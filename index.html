@@ -1,0 +1,2245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Friday Assistant - Ваш персональный помощник</title>
+    <link rel="icon" type="image/x-icon" href="images/f.png">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!--<link rel="stylesheet" href="style.css">-->
+     <style>
+:root {
+--primary: #3498db;
+--primary-dark: #2980b9;
+--secondary: #2c3e50;
+--light: #ecf0f1;
+--dark: #34495e;
+--success: #2ecc71;
+--danger: #e74c3c;
+--warning: #f39c12;
+--info: #1abc9c;
+--gray: #95a5a6;
+--light-gray: #bdc3c7;
+--chat-user: #3498db;
+--chat-bot: #e3f2fd;
+}
+
+* {
+margin: 0;
+padding: 0;
+box-sizing: border-box;
+}
+
+body {
+font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+line-height: 1.6;
+background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+color: #333;
+min-height: 100vh;
+padding: 20px;
+}
+
+.container {
+max-width: 1200px;
+margin: 0 auto;
+display: grid;
+grid-template-columns: 1fr 1.5fr;
+gap: 20px;
+}
+
+@media (max-width: 900px) {
+.container {
+grid-template-columns: 1fr;
+}
+}
+
+header {
+grid-column: 1 / -1;
+text-align: center;
+margin-bottom: 30px;
+color: white;
+position: relative;
+}
+
+.auth-buttons {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+}
+
+.auth-btn {
+padding: 8px 16px;
+border-radius: 20px;
+border: none;
+font-weight: 600;
+cursor: pointer;
+transition: all 0.3s ease;
+}
+
+.login-btn {
+background: white;
+color: var(--primary);
+}
+
+.login-btn:hover {
+background: #f0f0f0;
+}
+
+.register-btn {
+background: var(--primary);
+color: white;
+}
+
+.register-btn:hover {
+background: var(--primary-dark);
+}
+
+h1 {
+font-size: 2.5rem;
+margin-bottom: 10px;
+text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.tagline {
+font-size: 1.2rem;
+opacity: 0.9;
+}
+
+.card {
+background: white;
+border-radius: 12px;
+box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+overflow: hidden;
+}
+
+.download-section {
+padding: 25px;
+display: flex;
+flex-direction: column;
+}
+
+.section-title {
+font-size: 1.5rem;
+margin-bottom: 20px;
+color: var(--secondary);
+display: flex;
+align-items: center;
+gap: 10px;
+}
+
+.section-title i {
+color: var(--primary);
+}
+
+.download-buttons {
+display: flex;
+flex-direction: column;
+gap: 15px;
+margin-bottom: 25px;
+}
+
+.download-btn {
+display: flex;
+align-items: center;
+justify-content: center;
+gap: 12px;
+padding: 15px;
+border-radius: 8px;
+font-weight: 600;
+text-decoration: none;
+color: white;
+transition: all 0.3s ease;
+box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.download-btn:hover {
+transform: translateY(-3px);
+box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+}
+
+.windows-btn {
+background: #0078d7;
+}
+
+.android-btn {
+background: #3ddc84;
+}
+
+.description {
+margin-top: auto;
+padding: 15px;
+background: #f8f9fa;
+border-radius: 8px;
+}
+
+.description h3 {
+margin-bottom: 10px;
+color: var(--secondary);
+}
+
+.description ul {
+padding-left: 20px;
+margin-bottom: 15px;
+}
+
+.description li {
+margin-bottom: 8px;
+}
+
+/* Chat Section */
+.chat-section {
+display: flex;
+flex-direction: column;
+height: 600px;
+}
+
+.chat-header {
+padding: 15px 20px;
+background: var(--primary);
+color: white;
+display: flex;
+align-items: center;
+gap: 10px;
+}
+
+.chat-controls {
+display: flex;
+padding: 15px;
+background: #f0f5ff;
+border-bottom: 1px solid #ddd;
+flex-wrap: wrap;
+gap: 15px;
+align-items: center;
+}
+
+.control-group {
+display: flex;
+align-items: center;
+gap: 8px;
+}
+
+.control-group label {
+font-weight: 500;
+white-space: nowrap;
+}
+
+select, input[type="text"] {
+padding: 8px 12px;
+border-radius: 6px;
+border: 1px solid #ccc;
+font-family: inherit;
+}
+
+.microphone-btn {
+padding: 8px 16px;
+background: var(--info);
+color: white;
+border: none;
+border-radius: 20px;
+cursor: pointer;
+display: flex;
+align-items: center;
+gap: 8px;
+transition: background 0.3s;
+}
+
+.microphone-btn:hover {
+background: #17a98c;
+}
+
+.microphone-btn.active {
+background: var(--danger);
+}
+
+.microphone-btn.listening {
+animation: pulse 1.5s infinite;
+background: var(--warning);
+}
+
+@keyframes pulse {
+0% { transform: scale(1); }
+50% { transform: scale(1.05); }
+100% { transform: scale(1); }
+}
+
+.chat-messages {
+flex: 1;
+padding: 20px;
+overflow-y: auto;
+background: #f5f8fa;
+display: flex;
+flex-direction: column;
+gap: 15px;
+}
+
+.message {
+max-width: 80%;
+padding: 12px 16px;
+border-radius: 18px;
+line-height: 1.4;
+position: relative;
+animation: fadeIn 0.3s ease;
+word-break: break-word;
+}
+
+@keyframes fadeIn {
+from { opacity: 0; transform: translateY(10px); }
+to { opacity: 1; transform: translateY(0); }
+}
+
+.user-message {
+align-self: flex-end;
+background: var(--chat-user);
+color: white;
+border-bottom-right-radius: 4px;
+}
+
+.bot-message {
+align-self: flex-start;
+background: var(--chat-bot);
+color: #333;
+border-bottom-left-radius: 4px;
+}
+
+.message-time {
+font-size: 0.7rem;
+opacity: 0.7;
+margin-top: 5px;
+text-align: right;
+}
+
+/* Стили для поля ввода */
+.chat-input {
+display: flex;
+padding: 20px;
+background: white;
+border-top: 1px solid #e0e0e0;
+align-items: flex-end;
+}
+
+.chat-input-wrapper {
+flex: 1;
+position: relative;
+display: flex;
+align-items: center;
+background: #f9f9f9;
+border-radius: 24px;
+border: 1px solid #ddd;
+padding: 5px 15px;
+min-height: 46px;
+}
+
+.chat-input textarea {
+flex: 1;
+border: none;
+outline: none;
+font-size: 1rem;
+resize: none;
+background: transparent;
+max-height: 120px;
+padding: 8px 0;
+font-family: inherit;
+}
+
+.file-input-wrapper {
+position: relative;
+margin-right: 10px;
+}
+
+.file-input-wrapper input[type="file"] {
+position: absolute;
+left: 0;
+top: 0;
+opacity: 0;
+width: 100%;
+height: 100%;
+cursor: pointer;
+}
+
+.attach-btn {
+background: none;
+border: none;
+color: var(--gray);
+font-size: 1.2rem;
+cursor: pointer;
+padding: 8px;
+border-radius: 50%;
+transition: all 0.3s;
+}
+
+.attach-btn:hover {
+color: var(--primary);
+background: #f0f0f0;
+}
+
+.chat-input textarea:focus {
+border: none;
+box-shadow: none;
+}
+
+.chat-input textarea:disabled {
+background-color: #f0f0f0;
+cursor: not-allowed;
+}
+
+.chat-input button {
+margin-left: 10px;
+width: 46px;
+height: 46px;
+border-radius: 50%;
+border: none;
+background: var(--primary);
+color: white;
+cursor: pointer;
+transition: background 0.3s;
+display: flex;
+align-items: center;
+justify-content: center;
+flex-shrink: 0;
+}
+
+.chat-input button:hover {
+background: var(--primary-dark);
+}
+
+.chat-input button:disabled {
+background-color: var(--light-gray);
+cursor: not-allowed;
+}
+
+.chat-input button:disabled:hover {
+background-color: var(--light-gray);
+}
+
+.hint {
+position: absolute;
+bottom: -20px;
+right: 10px;
+font-size: 0.75rem;
+color: var(--gray);
+}
+
+/* Стили для уведомлений */
+.notification {
+position: fixed;
+top: 20px;
+right: 20px;
+padding: 15px 20px;
+border-radius: 8px;
+color: white;
+font-weight: 500;
+z-index: 1000;
+max-width: 350px;
+box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+display: flex;
+align-items: center;
+gap: 10px;
+transform: translateX(100%);
+opacity: 0;
+transition: all 0.3s ease;
+}
+
+.notification.show {
+transform: translateX(0);
+opacity: 1;
+}
+
+.notification.success {
+background: var(--success);
+}
+
+.notification.error {
+background: var(--danger);
+}
+
+.notification.info {
+background: var(--info);
+}
+
+.voice-status {
+position: fixed;
+bottom: 100px;
+left: 50%;
+transform: translateX(-50%);
+background: rgba(0, 0, 0, 0.7);
+color: white;
+padding: 15px 25px;
+border-radius: 30px;
+display: none;
+align-items: center;
+gap: 10px;
+z-index: 1000;
+}
+
+.voice-status.active {
+display: flex;
+}
+
+.voice-status.listening .status-icon {
+animation: pulse 1.5s infinite;
+}
+
+footer {
+grid-column: 1 / -1;
+text-align: center;
+margin-top: 30px;
+color: white;
+opacity: 0.8;
+}
+
+/* Стили для модальных окон */
+.modal {
+  display: none;
+  position: fixed;
+  z-index: 1000;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.7);
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-content {
+  background-color: white;
+  border-radius: 12px;
+  width: 100%;
+  max-width: 400px;
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.modal-header {
+  background: var(--primary);
+  color: white;
+  padding: 15px 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.modal-close, .recovery-close {
+  font-size: 1.8rem;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.modal-close:hover {
+  color: var(--light-gray);
+}
+
+.recovery-close:hover {
+  color: var(--light-gray);
+}
+
+#registerForm, #loginForm, #recoveryForm{
+  padding: 20px;
+}
+
+.recovery-link {
+  text-align: center;
+  margin-top: 15px;
+}
+
+.recovery-link a {
+  color: #007bff;
+  text-decoration: none;
+  font-size: 14px;
+}
+
+.recovery-link a:hover {
+  text-decoration: underline;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 500;
+  color: var(--secondary);
+}
+
+.form-group input {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.modal-btn {
+  width: 100%;
+  padding: 12px;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.3s;
+}
+
+.modal-btn:hover {
+  background: var(--primary-dark);
+}
+
+.response-message {
+  margin-top: 15px;
+  padding: 10px;
+  border-radius: 6px;
+  text-align: center;
+  display: none;
+}
+
+.response-message.success {
+  background: #d4edda;
+  color: #155724;
+  display: block;
+}
+
+.response-message.error {
+  background: #f8d7da;
+  color: #721c24;
+  display: block;
+}
+
+.image-preview-container {
+    margin-top: 10px;
+    position: relative;
+    display: inline-block;
+}
+
+.image-preview {
+    max-width: 75px;
+    max-height: 75px;
+    border-radius: 8px;
+    border: 1px solid #ddd;
+}
+
+.remove-image {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    background: var(--danger);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    max-width: 24px;
+    max-height: 24px;
+    font-size: 14px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Адаптивность для кнопок авторизации */
+@media (max-width: 750px) {
+    .auth-buttons {
+        position: static;
+        margin-top: 20px;
+        justify-content: center;
+    }
+    
+    header {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+    
+    h1 {
+        order: 1;
+    }
+    
+    .tagline {
+        order: 2;
+    }
+    
+    .auth-buttons {
+        order: 3;
+        margin-top: 15px;
+    }
+}
+
+/* Дополнительные адаптивные стили для модальных окон */
+@media (max-width: 500px) {
+    .modal-content {
+        width: 95%;
+        margin: 10px;
+    }
+    
+    .auth-btn {
+        padding: 10px 20px;
+        font-size: 0.9rem;
+    }
+}
+
+/* Общие адаптивные стили для мобильных устройств */
+@media (max-width: 750px) {
+    .container {
+        padding: 10px;
+        gap: 15px;
+    }
+    
+    h1 {
+        font-size: 2rem;
+    }
+    
+    .tagline {
+        font-size: 1rem;
+    }
+    
+    .download-buttons {
+        flex-direction: column;
+    }
+    
+    .chat-section {
+        min-height: 500px;
+    }
+    
+    .chat-controls {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .control-group {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+
+@media (max-width: 410px) {
+    .chat-input {
+        padding: 10px;
+    }
+    
+    .chat-input-wrapper {
+        min-height: 36px;
+        padding: 3px 10px;
+    }
+    
+    .attach-btn {
+        font-size: 1rem;
+        padding: 6px;
+        margin-right: 5px;
+    }
+    
+    .chat-input button {
+        width: 36px;
+        height: 36px;
+        margin-left: 5px;
+    }
+    
+    .chat-input textarea {
+        font-size: 0.9rem;
+        padding: 6px 0;
+    }
+    
+    .hint {
+        font-size: 0.65rem;
+        bottom: -18px;
+    }
+    
+    /* Уменьшение других элементов для сохранения пропорций */
+    .chat-controls {
+        padding: 10px;
+        gap: 10px;
+    }
+    
+    .microphone-btn {
+        padding: 6px 12px;
+        font-size: 0.9rem;
+    }
+    
+    select, input[type="text"] {
+        padding: 6px 10px;
+        font-size: 0.9rem;
+    }
+}
+  	</style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="auth-buttons">
+                <button class="auth-btn register-btn">Регистрация</button>
+                <button class="auth-btn login-btn">Вход</button>
+            </div>
+            <h1>Friday Assistant</h1>
+            <p class="tagline">Ваш персональный AI-помощник для управления устройствами</p>
+        </header>
+        
+        <div class="card download-section">
+            <h2 class="section-title"><i class="fas fa-download"></i> Скачать приложение</h2>
+            <div class="download-buttons">
+                <a href="/download-windows" class="download-btn windows-btn">
+                    <i class="fab fa-windows fa-2x"></i>
+                    <span>Скачать для Windows</span>
+                </a>
+                <a href="/download-android" class="download-btn android-btn">
+                    <i class="fab fa-android fa-2x"></i>
+                    <span>Скачать для Android</span>
+                </a>
+            </div>
+            <div class="description">
+                <h3>О проекте</h3>
+                <p>Friday Assistant позволяет управлять всеми вашими устройствами через единый интерфейс с помощью голосовых команд и AI-ассистента.</p>
+                <ul>
+                    <li>Управление компьютером и телефоном при помощи голоса</li>
+                    <li>Интеграция с Gemini AI для умных ответов</li>
+                    <li>Кроссплатформенная синхронизация</li>
+                    <li>Безопасное соединение</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="card chat-section">
+            <div class="chat-header">
+                <i class="fas fa-robot"></i>
+                <h2>Чат с ассистентом</h2>
+            </div>
+            <div class="chat-controls">
+                <div class="control-group">
+                    <label for="voice-type">Тип ввода:</label>
+                    <select id="voice-type">
+                        <option value="name-response-command" selected>имя-ответ-команда</option>
+                        <option value="name-command">имя+команда</option>
+                        <option value="conversation">разговор</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label for="bot-name">Имя бота:</label>
+                    <input type="text" id="bot-name" value="Пятница">
+                </div>
+                <button id="microphone-btn" class="microphone-btn">
+                    <i class="fas fa-microphone"></i>
+                    <span>Включить микрофон</span>
+                </button>
+                <button id="clear-history" class="microphone-btn" style="background: var(--warning);">
+                    <i class="fas fa-trash"></i>
+                    <span>Очистить историю</span>
+                </button>
+            </div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="message bot-message">
+                    <div>Привет! Я ваш персональный ассистент Friday. Чем могу помочь?</div>
+                    <div class="message-time">Только что</div>
+                </div>
+            </div>
+            <div class="chat-input">
+                <div class="chat-input-wrapper">
+                    <div class="file-input-wrapper">
+                        <input type="file" id="file-upload" accept=".png,.jpg,.jpeg">
+                        <button class="attach-btn" title="Прикрепить файл">
+                            <i class="fas fa-paperclip"></i>
+                        </button>
+                    </div>
+                    <textarea id="messageInput" placeholder="Введите ваше сообщение..." rows="1"></textarea>
+                    <span class="hint">Shift+Enter для переноса строки</span>
+                </div>
+                <div class="image-preview-container" id="imagePreviewContainer" style="display: none;"></div>
+                <button id="sendMessage">
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </div>
+        </div>
+
+        <div class="voice-status" id="voiceStatus">
+            <i class="fas fa-microphone status-icon"></i>
+            <span id="voiceStatusText">Слушаю...</span>
+        </div>
+
+        <footer>
+            <p>© 2025 Friday Assistant. Все права защищены.</p>
+        </footer>
+    </div>
+
+    <div class="notification" id="notification">
+        <i class="fas fa-check-circle"></i>
+        <span id="notification-text"></span>
+    </div>
+    
+    <!-- Модальное окно регистрации -->
+<div id="registerModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Регистрация</h2>
+      <span class="modal-close">&times;</span>
+    </div>
+    <form id="registerForm">
+      <div class="form-group">
+        <label for="regEmail">Email:</label>
+        <input type="email" id="regEmail" required>
+      </div>
+      <div class="form-group">
+        <label for="regLogin">Логин:</label>
+        <input type="text" id="regLogin" required>
+      </div>
+      <div class="form-group">
+        <label for="regPassword">Пароль:</label>
+        <input type="password" id="regPassword" required>
+      </div>
+      <div class="form-group">
+        <label for="regPasswordConfirm">Подтвердите пароль:</label>
+        <input type="password" id="regPasswordConfirm" required>
+      </div>
+      <button type="submit" class="modal-btn">Зарегистрироваться</button>
+      <div id="registerResponse" class="response-message"></div>
+    </form>
+  </div>
+</div>
+
+<!-- Модальное окно авторизации -->
+<div id="loginModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Вход</h2>
+      <span class="modal-close">&times;</span>
+    </div>
+    <form id="loginForm">
+      <div class="form-group">
+        <label for="loginEmail">Email или логин:</label>
+        <input type="text" id="loginEmail" required>
+      </div>
+      <div class="form-group">
+        <label for="loginPassword">Пароль:</label>
+        <input type="password" id="loginPassword" required>
+      </div>
+      <button type="submit" class="modal-btn">Войти</button>
+      
+      <div class="recovery-link">
+        <a href="#" id="forgotPassword">Забыли пароль?</a>
+      </div>
+        
+      <div id="loginResponse" class="response-message"></div>
+    </form>
+  </div>
+</div>
+    
+<!-- Модальное окно восстановления пароля -->
+<div id="recoveryModal" class="modal">
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Восстановление пароля</h2>
+      <span class="recovery-close">&times;</span>
+    </div>
+    <form id="recoveryForm">
+      <div class="form-group">
+        <label for="recoveryEmail">Email:</label>
+        <input type="email" id="recoveryEmail" required>
+      </div>
+      <button type="submit" class="modal-btn">Восстановить пароль</button>
+        
+      <div id="recoveryResponse" class="response-message"></div>
+    </form>
+  </div>
+</div>
+
+    <script>
+        let userLogin = null;
+        let isMicrophoneActive = false;
+        let selectedFileName = '';
+        let recognition = null;
+        let finalTranscript = '';
+        let isListening = false;
+        let websocketConnection = null;
+        let pingInterval = null;
+        let currentFile = null;
+        let isBotSpeaking = false; 
+        let stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
+        let currentUtterance = null;
+
+        function addMessage(role, content) {
+            const chatMessages = document.getElementById('chatMessages');
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('message');
+            messageElement.classList.add(role === 'user' ? 'user-message' : 'bot-message');
+
+            const now = new Date();
+            const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+            function escapeHtml(text) {
+                return text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            }
+
+            const displayContent = escapeHtml(content);
+
+            messageElement.innerHTML = `
+                <div>${displayContent}</div>
+                <div class="message-time">${timeString}</div>
+            `;
+
+            chatMessages.appendChild(messageElement);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        function processBotActions(actions) {
+            let displayText = '';
+            
+            actions.forEach(action => {
+                // Разделяем тип действия и содержание
+                const separatorIndex = action.indexOf('|');
+                if (separatorIndex !== -1) {
+                    const actionType = action.substring(0, separatorIndex).trim();
+                    const actionContent = action.substring(separatorIndex + 1).trim();
+                    
+                    if (actionType === 'текстовой ответ') {
+                        displayText += actionContent + '\n\n';
+                    } else if (actionType === 'голосовой ответ') {
+                        displayText += actionContent + '\n\n';
+                        // Озвучиваем голосовые ответы
+                        if ('speechSynthesis' in window) {
+                            speakText(actionContent);
+                        }
+                    } else if (actionType === 'очистка истории'){
+                        clearHistory();
+                    }
+                } else {
+                    // Если нет разделителя, добавляем как есть
+                    displayText += action + '\n\n';
+                }
+            });
+            
+            // Добавляем сообщение в чат
+            if (displayText.trim()) {
+                addMessage('assistant', displayText.trim());
+            }
+        }
+
+        function displayHistory(actions) {
+            let displayText = '';
+            
+            actions.forEach(action => {
+                // Разделяем тип действия и содержание
+                const separatorIndex = action.indexOf('|');
+                if (separatorIndex !== -1) {
+                    const actionType = action.substring(0, separatorIndex).trim();
+                    const actionContent = action.substring(separatorIndex + 1).trim();
+                    displayText += actionContent + '\n\n';
+                } else {
+                    // Если нет разделителя, добавляем как есть
+                    displayText += action + '\n\n';
+                }
+            });
+            
+            // Добавляем сообщение в чат
+            if (displayText.trim()) {
+                addMessage('assistant', displayText.trim());
+            }
+        }
+        const clearHistoryBtn = document.getElementById('clear-history');
+        clearHistoryBtn.addEventListener('click', async function() {
+            clearHistory();
+        });
+
+        async function clearHistory(){
+            const token = localStorage.getItem('token');
+            
+            if (token) {
+                // Если есть токен, отправляем запрос на сервер
+                try {
+                    const response = await fetch('/clear_history', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ token: token })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (data.status === 'success') {
+                        // Очищаем чат (кроме приветственного сообщения)
+                        const chatMessages = document.getElementById('chatMessages');
+                        const welcomeMessage = chatMessages.querySelector('.bot-message');
+                        chatMessages.innerHTML = '';
+                        if (welcomeMessage) {
+                            chatMessages.appendChild(welcomeMessage);
+                        }
+                        
+                        showNotification(data.message, 'success');
+                    } else {
+                        showNotification(data.message, 'error');
+                    }
+                } catch (error) {
+                    console.error('Ошибка при очистке истории:', error);
+                    showNotification('Произошла ошибка при очистке истории', 'error');
+                }
+            } else {
+                // Если токена нет, просто очищаем чат локально
+                const chatMessages = document.getElementById('chatMessages');
+                const welcomeMessage = chatMessages.querySelector('.bot-message');
+                chatMessages.innerHTML = '';
+                if (welcomeMessage) {
+                    chatMessages.appendChild(welcomeMessage);
+                }
+                
+                showNotification('История чата очищена', 'info');
+            }
+        }
+
+        // Функция для озвучивания текста
+        function speakText(text) {
+            if ('speechSynthesis' in window) {
+                // Останавливаем предыдущую речь, если она есть
+                if (isBotSpeaking) {
+                    stopSpeaking();
+                }
+                
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.lang = 'ru-RU';
+                
+                // Устанавливаем флаг, что бот начал говорить
+                isBotSpeaking = true;
+                currentUtterance = utterance;
+                
+                // Обработчики событий для речи
+                utterance.onstart = function() {
+                    isBotSpeaking = true;
+                };
+                
+                utterance.onend = function() {
+                    isBotSpeaking = false;
+                    currentUtterance = null;
+                };
+                
+                utterance.onerror = function(event) {
+                    isBotSpeaking = false;
+                    currentUtterance = null;
+                };
+                
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        function stopSpeaking() {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel();
+                isBotSpeaking = false;
+                currentUtterance = null;
+                console.log('Речь бота остановлена');
+            }
+        }
+
+        function connectWebSocket() {
+            const token = localStorage.getItem('token');
+            const userLogin = localStorage.getItem('userLogin');
+            
+            if (!token) {
+                console.log('No token available for WebSocket connection');
+                return;
+            }
+
+            // Закрываем существующее соединение если есть
+            if (websocketConnection) {
+                websocketConnection.close();
+            }
+
+            // Создаем новое соединение
+            websocketConnection = new WebSocket('wss://friday-assistant.ru/ws');
+
+            websocketConnection.onopen = function(event) {
+                console.log('WebSocket connection established');
+                
+                // Кодируем и отправляем аутентификационный токен
+                const authMessage = JSON.stringify({
+                    type: 'web_client_auth',
+                    token: token,
+                    login: userLogin
+                });
+                const encodedAuth = btoa(unescape(encodeURIComponent(authMessage)));
+                websocketConnection.send(encodedAuth);
+                
+                // Запускаем ping каждые 30 секунд
+                pingInterval = setInterval(() => {
+                    if (websocketConnection.readyState === WebSocket.OPEN) {
+                        const pingMessage = JSON.stringify({
+                            type: 'ping',
+                            timestamp: Date.now()
+                        });
+                        const encodedPing = btoa(unescape(encodeURIComponent(pingMessage)));
+                        websocketConnection.send(encodedPing);
+                    }
+                }, 30000);
+            };
+
+            websocketConnection.onmessage = function(event) {
+                try {
+                    // Декодируем сообщение из base64
+                    const decodedMessage = decodeURIComponent(escape(atob(event.data)));
+                    const data = JSON.parse(decodedMessage);
+                    console.log('WebSocket message received:', data);
+                    
+                    // Обработка ответа на регистрацию устройства (история сообщений)
+                    if (data.status === 'success' && data.history && Array.isArray(data.history)) {
+                        console.log('History:', data.history);
+                        
+                        // Очищаем текущие сообщения в чате (кроме приветственного)
+                        const chatMessages = document.getElementById('chatMessages');
+                        const welcomeMessage = chatMessages.querySelector('.bot-message');
+                        chatMessages.innerHTML = '';
+                        if (welcomeMessage) {
+                            chatMessages.appendChild(welcomeMessage);
+                        }
+                        
+                        // Добавляем сообщения из истории
+                        data.history.forEach(msg => {
+                            if (msg.sender === 'Вы') {
+                                addMessage('user', msg.text);
+                            } else {
+                                const actions = msg.text.split('⸵');
+                                processBotActions(actions);
+                            }
+                        });
+                    }
+                    
+                    // Обработка нового сообщения от бота
+                    if (data.type === 'new_message' && data.actions && Array.isArray(data.actions)) {
+                        console.log('New message actions:', data.actions);
+                        
+                        // Обрабатываем действия из сообщения
+                        processBotActions(data.actions);
+                    }
+                    
+                    // Обработка уведомлений
+                    if (data.type === 'notification') {
+                        showNotification(data.message, data.level || 'info');
+                    }
+                    
+                } catch (error) {
+                    console.error('Error decoding or parsing WebSocket message:', error);
+                    
+                    // Попытка обработать как обычный JSON
+                    try {
+                        const data = JSON.parse(event.data);
+                        console.log('WebSocket message received (non-base64):', data);
+                    } catch (e) {
+                        console.error('Message is neither base64 nor JSON:', event.data);
+                    }
+                }
+            };
+
+            
+            websocketConnection.onclose = function(event) {
+                console.log('WebSocket connection closed:', event.code, event.reason);
+                
+                // Останавливаем ping
+                if (pingInterval) {
+                    clearInterval(pingInterval);
+                    pingInterval = null;
+                }
+                
+                // Пытаемся переподключиться через 5 секунд
+                setTimeout(() => {
+                    if (localStorage.getItem('token')) {
+                        connectWebSocket();
+                    }
+                }, 5000);
+            };
+            
+            websocketConnection.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+        }
+
+
+        // Глобальные функции
+        function showNotification(message, type = 'success') {
+            const notification = document.getElementById('notification');
+            const notificationText = document.getElementById('notification-text');
+            notificationText.textContent = message;
+            notification.className = `notification ${type} show`;
+
+            setTimeout(() => {
+                notification.classList.remove('show');
+            }, 5000);
+        }
+
+        function openRegisterModal() {
+            const registerModal = document.getElementById('registerModal');
+            registerModal.style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
+        function openLoginModal() {
+            const loginModal = document.getElementById('loginModal');
+            loginModal.style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeModals() {
+            const registerModal = document.getElementById('registerModal');
+            const loginModal = document.getElementById('loginModal');
+            const recoveryModal = document.getElementById('recoveryModal');
+            registerModal.style.display = 'none';
+            loginModal.style.display = 'none';
+            recoveryModal.style.display = 'none';
+            document.body.style.overflow = 'auto';
+        }
+
+        function openRecoveryModal() {
+            const recoveryModal = document.getElementById('recoveryModal');
+            recoveryModal.style.display = 'flex';
+        }
+
+        function closeRecoveryModal() {
+            const recoveryModal = document.getElementById('recoveryModal');
+            recoveryModal.style.display = 'none';
+        }
+
+        // Вспомогательная функция для безопасного добавления обработчиков
+        function addEventListenerSafe(element, event, handler) {
+            if (element && typeof handler === 'function') {
+                element.addEventListener(event, handler);
+            }
+        }
+
+        // Функция для обновления интерфейса авторизации
+        function updateAuthUI() {
+            const authButtons = document.querySelector('.auth-buttons');
+            if (!authButtons) return;
+
+            if (userLogin) {
+                authButtons.innerHTML = `
+                    <div class="user-info">
+                        <span class="user-login">${userLogin}</span>
+                        <button class="auth-btn logout-btn">Выйти</button>
+                    </div>
+                `;
+
+                // Безопасно добавляем обработчик для кнопки выхода
+                addEventListenerSafe(document.querySelector('.logout-btn'), 'click', logout);
+            } else {
+                authButtons.innerHTML = `
+                    <button class="auth-btn register-btn">Регистрация</button>
+                    <button class="auth-btn login-btn">Вход</button>
+                `;
+
+                // Безопасно добавляем обработчики для кнопок
+                addEventListenerSafe(document.querySelector('.register-btn'), 'click', openRegisterModal);
+                addEventListenerSafe(document.querySelector('.login-btn'), 'click', openLoginModal);
+            }
+        }
+
+        async function verifyToken() {
+            const token = localStorage.getItem('token');
+            const savedLogin = localStorage.getItem('userLogin');
+
+            if (!token || !savedLogin) {
+                return false;
+            }
+
+            try {
+                const response = await fetch(`/verify_token?token=${encodeURIComponent(token)}`, {
+                    method: 'GET'
+                });
+
+                const data = await response.json();
+
+                if (response.ok && data.status === 'success') {
+                    userLogin = data.user_login;
+                    return true;
+                } else {
+                    localStorage.removeItem('token');
+                    localStorage.removeItem('userLogin');
+                    userLogin = null;
+                    showNotification('Сессия истекла. Пожалуйста, войдите снова.', 'info');
+                    return false;
+                }
+            } catch (error) {
+                console.error('Ошибка проверки токена:', error);
+                localStorage.removeItem('token');
+                localStorage.removeItem('userLogin');
+                userLogin = null;
+                return false;
+            }
+        }
+
+        async function logout() {
+            try {
+                const token = localStorage.getItem('token');
+                
+                // Закрываем WebSocket соединение
+                if (websocketConnection) {
+                    websocketConnection.close();
+                    websocketConnection = null;
+                }
+                
+                // Останавливаем ping интервал
+                if (pingInterval) {
+                    clearInterval(pingInterval);
+                    pingInterval = null;
+                }
+                
+                // Отправляем запрос на сервер для удаления устройства
+                if (token) {
+                    try {
+                        const response = await fetch('/logout_web', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify({ token: token })
+                        });
+                        
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            console.log('Web-устройство успешно удалено с сервера');
+                        } else {
+                            console.warn('Не удалось удалить web-устройство с сервера:', data.message);
+                        }
+                    } catch (error) {
+                        console.error('Ошибка при отправке запроса logout:', error);
+                    }
+                }
+                
+                // Очищаем локальное хранилище
+                localStorage.removeItem('token');
+                localStorage.removeItem('userLogin');
+                userLogin = null;
+                updateAuthUI();
+                
+                const chatMessages = document.getElementById('chatMessages');
+                const welcomeMessage = chatMessages.querySelector('.bot-message');
+                chatMessages.innerHTML = '';
+                if (welcomeMessage) {
+                    chatMessages.appendChild(welcomeMessage);
+                }
+                showNotification('Вы успешно вышли из системы', 'success');
+            } catch (error) {
+                console.error('Ошибка при выходе:', error);
+                showNotification('Произошла ошибка при выходе из системы', 'error');
+            }
+        }
+
+        function saveSettingsToLocalStorage() {
+            const voiceType = document.getElementById('voice-type').value;
+            const botName = document.getElementById('bot-name').value;
+            
+            localStorage.setItem('voiceType', voiceType);
+            localStorage.setItem('botName', botName);
+        }
+
+        function loadSettingsFromLocalStorage() {
+            const savedVoiceType = localStorage.getItem('voiceType');
+            const savedBotName = localStorage.getItem('botName');
+            
+            if (savedVoiceType) {
+                document.getElementById('voice-type').value = savedVoiceType;
+            }
+            
+            if (savedBotName) {
+                document.getElementById('bot-name').value = savedBotName;
+            }
+        }
+
+        
+        // Остальные функции и обработчики событий...
+        document.addEventListener('DOMContentLoaded', async function() {
+            loadSettingsFromLocalStorage();
+            const hasValidToken = await verifyToken();
+
+            if (hasValidToken) {
+                updateAuthUI();
+                showNotification(`Добро пожаловать, ${userLogin}!`, 'success');
+                connectWebSocket();
+            } else {
+                updateAuthUI();
+            }
+            // Остальной код инициализации...
+            const chatMessages = document.getElementById('chatMessages');
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.getElementById('sendMessage');
+            const notification = document.getElementById('notification');
+            const microphoneBtn = document.getElementById('microphone-btn');
+            const fileUpload = document.getElementById('file-upload');
+            const voiceType = document.getElementById('voice-type');
+            const botName = document.getElementById('bot-name');
+            const registerBtn = document.querySelector('.register-btn');
+            const loginBtn = document.querySelector('.login-btn');
+            const voiceStatus = document.getElementById('voiceStatus');
+            const voiceStatusText = document.getElementById('voiceStatusText');
+            
+            // Получаем модальные окна
+            const registerModal = document.getElementById('registerModal');
+            const loginModal = document.getElementById('loginModal');
+
+            // Получаем кнопки закрытия
+            const closeButtons = document.querySelectorAll('.modal-close');
+
+            let recoveryModal = document.getElementById('recoveryModal');
+            let recoveryClose = document.querySelector('.recovery-close');
+            let forgotPasswordLink = document.getElementById('forgotPassword');
+            let listeningState = 'waitingForName';
+            let commandTimeout = null;
+
+            voiceType.addEventListener('change', function() {
+                saveSettingsToLocalStorage();
+                listeningState = 'waitingForName';
+                clearTimeout(commandTimeout);
+            });
+
+            botName.addEventListener('change', function() {
+                saveSettingsToLocalStorage();
+            });
+
+            botName.addEventListener('input', function() {
+                // Сохраняем при каждом вводе, но с debounce чтобы не спамить
+                clearTimeout(botName.saveTimeout);
+                botName.saveTimeout = setTimeout(() => {
+                    saveSettingsToLocalStorage();
+                }, 500);
+            });
+            // Проверяем поддержку Web Speech API
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                recognition = new SpeechRecognition();
+                recognition.continuous = true;  // Непрерывное распознавание
+                recognition.interimResults = true;
+                recognition.lang = 'ru-RU';
+
+                recognition.onstart = function() {
+                    isListening = true;
+                    microphoneBtn.classList.add('listening');
+                    voiceStatus.classList.add('active', 'listening');
+                    voiceStatusText.textContent = 'Слушаю...';
+                };
+
+                recognition.onresult = function(event) {
+                    let interimTranscript = '';
+                    let finalTranscript = '';
+                    
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        if (event.results[i].isFinal) {
+                            finalTranscript += event.results[i][0].transcript;
+                        } else {
+                            interimTranscript += event.results[i][0].transcript;
+                        }
+                    }
+                    
+                    // Показываем промежуточные результаты
+                    if (interimTranscript) {
+                        voiceStatusText.textContent = interimTranscript;
+                    }
+                    
+                    // Обрабатываем окончательные результаты
+                    if (finalTranscript) {
+                        processVoiceCommand(finalTranscript);
+                    }
+                };
+
+                recognition.onend = function() {
+                    isListening = false;
+                    microphoneBtn.classList.remove('listening');
+                    voiceStatus.classList.remove('active', 'listening');
+                    
+                    // Если микрофон все еще активен, перезапускаем распознавание
+                    if (isMicrophoneActive) {
+                        try {
+                            recognition.start();
+                        } catch (error) {
+                            console.error('Ошибка при перезапуске распознавания:', error);
+                            showNotification('Ошибка при перезапуске распознавания речи', 'error');
+                            // В случае ошибки выключаем микрофон
+                            isMicrophoneActive = false;
+                            microphoneBtn.classList.remove('active');
+                            microphoneBtn.querySelector('span').textContent = 'Включить микрофон';
+                            microphoneBtn.querySelector('i').className = 'fas fa-microphone';
+                        }
+                    }
+                };
+
+                recognition.onerror = function(event) {
+                    console.error('Ошибка распознавания речи:', event.error);
+                    isListening = false;
+                    microphoneBtn.classList.remove('listening');
+                    voiceStatus.classList.remove('active', 'listening');
+                    
+                    if (event.error === 'not-allowed') {
+                        showNotification('Доступ к микрофону запрещен. Разрешите использование микрофона в настройках браузера.', 'error');
+                    } else {
+                        showNotification('Ошибка распознавания речи: ' + event.error, 'error');
+                    }
+                };
+            } else {
+                // Браузер не поддерживает распознавание речи
+                microphoneBtn.disabled = true;
+                microphoneBtn.title = 'Ваш браузер не поддерживает распознавание речи';
+                showNotification('Ваш браузер не поддерживает распознавание речи', 'error');
+            }
+
+            // Функция для экранирования HTML
+            function escapeHtml(text) {
+                return text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            }
+
+            // Автоматическое изменение высоты textarea
+            messageInput.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = (this.scrollHeight) + 'px';
+            });
+
+            function containsStopWords(text) {
+                const textLower = text.toLowerCase();
+                return stopWords.some(word => textLower.includes(word));
+            }
+
+            function processVoiceCommand(transcript) {
+
+                if (isBotSpeaking && containsStopWords(transcript)) {
+                    stopSpeaking();
+                    return;
+                }
+                const currentBotName = botName.value.trim().toLowerCase();
+                const inputMode = voiceType.value;
+                const transcriptLower = transcript.toLowerCase();
+                
+                let commandToSend = '';
+                let shouldProcess = false;
+                
+                switch(inputMode) {
+                    case 'name-response-command':
+                        if (listeningState === 'waitingForName' && transcriptLower.includes(currentBotName)) {
+                            // Распознано имя - переходим в режим ожидания команды
+                            listeningState = 'waitingForCommand';
+                            
+                            // Добавляем сообщение пользователя с именем бота
+                            addMessage('user', transcript);
+                            
+                            // Озвучиваем и показываем ответ
+                            speakText("Слушаю Вас");
+                            addMessage('assistant', 'Слушаю Вас');
+                            
+                            // Устанавливаем таймаут для возврата в ожидание имени, если команда не поступила
+                            clearTimeout(commandTimeout);
+                            commandTimeout = setTimeout(() => {
+                                if (listeningState === 'waitingForCommand') {
+                                    speakText("Команда не поступила");
+                                    addMessage('assistant', 'Команда не поступила');
+                                    listeningState = 'waitingForName';
+                                }
+                            }, 10000); // 10 секунд таймаут
+                            
+                            showNotification(`Распознано имя: "${currentBotName}"`, 'success');
+                        } else if (listeningState === 'waitingForCommand') {
+                            // Распознана команда - обрабатываем и возвращаемся в ожидание имени
+                            commandToSend = transcript;
+                            shouldProcess = true;
+                            listeningState = 'waitingForName';
+                            clearTimeout(commandTimeout);
+                            
+                            // Добавляем сообщение пользователя с командой
+                            addMessage('user', transcript);
+                            
+                            showNotification(`Распознана команда: "${transcript}"`, 'success');
+                        } else {
+                            // Не распознано ни имя, ни команда в нужном состоянии
+                            return;
+                        }
+                        break;
+                        
+                    case 'name-command':
+                        // Режим "имя+команда": ждем имя бота и команду
+                        if (transcriptLower.includes(currentBotName)) {
+                            commandToSend = transcript;
+                            shouldProcess = true;
+                            
+                            // Добавляем сообщение пользователя
+                            addMessage('user', transcript);
+                            
+                            showNotification(`Распознано: "${transcript}"`, 'success');
+                        } else {
+                            return;
+                        }
+                        break;
+                        
+                    case 'conversation':
+                        // Режим "разговор": любой текст
+                        commandToSend = transcript;
+                        shouldProcess = true;
+                        
+                        // Добавляем сообщение пользователя
+                        addMessage('user', transcript);
+                        
+                        showNotification(`Распознано: "${transcript}"`, 'success');
+                        break;
+                }
+                
+                // Отправляем команду на сервер только если она прошла проверку
+                if (shouldProcess && commandToSend) {
+                    const previewContainer = document.getElementById('imagePreviewContainer');
+                    previewContainer.innerHTML = '';
+                    previewContainer.style.display = 'none';
+                    sendToServer(commandToSend, "голосовое сообщение");
+                }
+            }
+
+
+            async function sendToServer(prompt, command_type) {
+                try {
+                    const token = localStorage.getItem('token');
+                    const userLogin = localStorage.getItem('userLogin');
+                    const file = currentFile;
+                    
+                    // Если пользователь авторизован, отправляем через WebSocket
+                    if (token && userLogin && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
+                        // Подготавливаем данные для отправки через WebSocket
+                        const requestData = {
+                            type: 'web_command',
+                            command: prompt,
+                            token: token,
+                            timestamp: new Date().toISOString(),
+                            name: botName.value.trim(),
+                            command_type: command_type
+                        };
+                        
+                        // Если есть файл, добавляем его как base64
+                        if (file) {
+                            const reader = new FileReader();
+                            reader.onload = function() {
+                                // Извлекаем чистый base64 без data URL префикса
+                                const base64Data = reader.result.split(',')[1];
+                                requestData.screenshot = base64Data;
+                                
+                                // Кодируем и отправляем сообщение
+                                const encodedMessage = btoa(unescape(encodeURIComponent(JSON.stringify(requestData))));
+                                websocketConnection.send(encodedMessage);
+                                
+                                // Сбрасываем файл после успешной отправки
+                                currentFile = null;
+                                const previewContainer = document.getElementById('imagePreviewContainer');
+                                previewContainer.innerHTML = '';
+                                previewContainer.style.display = 'none';
+                                fileUpload.value = '';
+                            };
+                            reader.readAsDataURL(file);
+                        } else {
+                            // Кодируем и отправляем сообщение без файла
+                            const encodedMessage = btoa(unescape(encodeURIComponent(JSON.stringify(requestData))));
+                            websocketConnection.send(encodedMessage);
+                        }
+                        
+                        // Показываем уведомление о отправке через WebSocket
+                        showNotification('Команда отправлена через WebSocket', 'info');
+                        
+                    } else {
+                        const requestData = {
+                            prompt: prompt,
+                            bot_name: botName.value.trim().toLowerCase(),
+                            command_type: command_type
+                        };
+                        
+                        if (file) {
+                            const reader = new FileReader();
+                            reader.onload = function() {
+                                // Извлекаем чистый base64 без data URL префикса
+                                const base64Data = reader.result.split(',')[1];
+                                requestData.screenshot = base64Data;
+                                
+                                // Отправляем запрос на сервер после чтения файла
+                                sendFetchRequest(requestData);
+                            };
+                            reader.readAsDataURL(file);
+                        } else {
+                            // Если файла нет, отправляем сразу
+                            sendFetchRequest(requestData);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Ошибка при отправке запроса:', error);
+                    
+                    // Показываем сообщение об ошибке
+                    const errorMessage = 'Произошла ошибка при обработке запроса. Попробуйте еще раз.';
+                    addMessage('assistant', errorMessage);
+                    
+                    showNotification('Ошибка при обработке запроса', 'error');
+                }
+            }
+
+
+            async function sendFetchRequest(requestData) {
+                try {
+                    const response = await fetch('/generate', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(requestData)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Ошибка сервера: ${response.status}`);
+                    }
+
+                    const data = await response.json();
+                    
+                    if (data.status === 'success') {
+                        if (data.actions) {
+                            let displayText = '';
+                            data.actions.forEach(action => {
+                                if (action.type === 'текстовой ответ') {
+                                    displayText += action.content + '\n\n';
+                                } else if (action.type === 'голосовой ответ') {
+                                    displayText += action.content + '\n\n';
+                                    if ('speechSynthesis' in window) {
+                                        speakText(action.content);
+                                    }
+                                }
+                            });
+                            
+                            addMessage('assistant', displayText.trim());
+                        }
+                    }
+                    else {
+                        throw new Error(data.message || 'Неизвестная ошибка сервера');
+                    }
+                    
+                    // Сбрасываем файл после успешной отправки
+                    currentFile = null;
+                    const previewContainer = document.getElementById('imagePreviewContainer');
+                    previewContainer.innerHTML = '';
+                    previewContainer.style.display = 'none';
+                    fileUpload.value = '';
+                    
+                } catch (error) {
+                    console.error('Ошибка при отправке запроса:', error);
+                    const errorMessage = 'Произошла ошибка при обработке запроса. Попробуйте еще раз.';
+                    addMessage('assistant', errorMessage);
+                    showNotification('Ошибка при обработке запроса', 'error');
+                }
+            }
+
+
+
+            // Обработчики событий
+            sendButton.addEventListener('click', function() {
+                const message = messageInput.value.trim();
+                if (!message) return;
+                
+                // Сбрасываем высоту textarea
+                messageInput.style.height = 'auto';
+                
+                // Сохраняем сообщение пользователя и показываем его
+                addMessage('user', message);
+                messageInput.value = '';
+                const previewContainer = document.getElementById('imagePreviewContainer');
+                previewContainer.innerHTML = '';
+                previewContainer.style.display = 'none';
+                // Отправляем сообщение на сервер
+                sendToServer(message, "текстовое сообщение");
+            });
+                        
+            messageInput.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') {
+                    if (e.shiftKey) {
+                        // Shift+Enter - перенос строки
+                        return;
+                    } else {
+                        // Enter - отправка сообщения
+                        e.preventDefault();
+                        sendButton.click();
+                    }
+                }
+            });
+
+            // Обработчик для кнопки микрофона
+            microphoneBtn.addEventListener('click', function() {
+                if (!recognition) return;
+                
+                isMicrophoneActive = !isMicrophoneActive;
+                
+                if (isMicrophoneActive) {
+                    this.classList.add('active');
+                    this.querySelector('span').textContent = 'Выключить микрофон';
+                    this.querySelector('i').className = 'fas fa-microphone-slash';
+                    
+                    // Сбрасываем состояние при включении микрофона
+                    listeningState = 'waitingForName';
+                    clearTimeout(commandTimeout);
+                    
+                    // Запускаем распознавание речи
+                    try {
+                        recognition.start();
+                    } catch (error) {
+                        console.error('Ошибка при запуске распознавания:', error);
+                        showNotification('Ошибка при запуске распознавания речи', 'error');
+                        // В случае ошибки выключаем микрофон
+                        isMicrophoneActive = false;
+                        this.classList.remove('active');
+                        this.querySelector('span').textContent = 'Включить микрофон';
+                        this.querySelector('i').className = 'fas fa-microphone';
+                    }
+                } else {
+                    this.classList.remove('active');
+                    this.querySelector('span').textContent = 'Включить микрофон';
+                    this.querySelector('i').className = 'fas fa-microphone';
+                    
+                    // Сбрасываем состояние при выключении микрофона
+                    listeningState = 'waitingForName';
+                    clearTimeout(commandTimeout);
+                    
+                    // Останавливаем распознавание, если активно
+                    if (isListening) {
+                        recognition.stop();
+                    }
+                }
+            });
+
+            // Обработчик для загрузки файлов
+            fileUpload.addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                const previewContainer = document.getElementById('imagePreviewContainer');
+                
+                // Очищаем предыдущее превью
+                previewContainer.innerHTML = '';
+                previewContainer.style.display = 'none';
+                currentFile = null; // Сбрасываем текущий файл
+                
+                if (file) {
+                    // Проверяем тип файла
+                    if (!file.type.match('image/png') && !file.type.match('image/jpeg')) {
+                        showNotification('Можно загружать только PNG и JPG файлы', 'error');
+                        this.value = '';
+                        return;
+                    }
+                    
+                    selectedFileName = file.name;
+                    currentFile = file; // Сохраняем текущий файл
+                    showNotification(`Файл "${file.name}" готов к отправке`, 'success');
+                    
+                    // Создаем и отображаем превью
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        const img = document.createElement('img');
+                        img.src = e.target.result;
+                        img.classList.add('image-preview');
+                        
+                        const removeBtn = document.createElement('button');
+                        removeBtn.classList.add('remove-image');
+                        removeBtn.innerHTML = '&times;';
+                        removeBtn.addEventListener('click', function() {
+                            previewContainer.innerHTML = '';
+                            previewContainer.style.display = 'none';
+                            fileUpload.value = '';
+                            selectedFileName = '';
+                            currentFile = null; // Сбрасываем текущий файл при удалении
+                        });
+                        
+                        previewContainer.appendChild(img);
+                        previewContainer.appendChild(removeBtn);
+                        previewContainer.style.display = 'block';
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+
+            // Обработчики для кнопок регистрации и входа
+            addEventListenerSafe(registerBtn, 'click', openRegisterModal);
+            addEventListenerSafe(loginBtn, 'click', openLoginModal);
+
+            // Закрытие модальных окон при клике на крестик
+            closeButtons.forEach(btn => {
+              btn.addEventListener('click', closeModals);
+            });
+
+            // Закрытие модальных окон при клике вне их области
+            window.addEventListener('click', function(event) {
+              if (event.target === registerModal || event.target === loginModal) {
+                closeModals();
+              }
+            });
+
+            // Обработка формы регистрации
+            document.getElementById('registerForm').addEventListener('submit', async function(e) {
+              e.preventDefault();
+              const email = document.getElementById('regEmail').value;
+              const login = document.getElementById('regLogin').value;
+              const password = document.getElementById('regPassword').value;
+              const passwordConfirm = document.getElementById('regPasswordConfirm').value;
+              const responseElement = document.getElementById('registerResponse');
+              const submitButton = this.querySelector('button[type="submit"]');
+              const originalText = submitButton.textContent;
+
+              // Валидация паролей
+              if (password !== passwordConfirm) {
+                responseElement.textContent = 'Пароли не совпадают!';
+                responseElement.className = 'response-message error';
+                return;
+              }
+
+              try {
+                // Показываем состояние загрузки
+                submitButton.disabled = true;
+                submitButton.textContent = 'Регистрация...';
+
+                // Отправляем запрос на сервер
+                const response = await fetch('/register', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({ email, login, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                  // Успешная регистрация
+                  responseElement.textContent = data.message;
+                  responseElement.className = 'response-message success';
+
+                  // Очищаем форму и закрываем модальное окно через 2 секунды
+                  setTimeout(() => {
+                    this.reset();
+                    responseElement.className = 'response-message';
+                    closeModals();
+                  }, 2000);
+                } else {
+                  // Ошибка от сервера
+                  responseElement.textContent = data.message;
+                  responseElement.className = 'response-message error';
+                }
+              } catch (error) {
+                console.error('Ошибка:', error);
+                responseElement.textContent = 'Произошла ошибка при отправке данных. Попробуйте позже.';
+                responseElement.className = 'response-message error';
+              } finally {
+                // Восстанавливаем кнопку
+                submitButton.disabled = false;
+                submitButton.textContent = originalText;
+              }
+            });
+
+            // Обработка формы авторизации
+            document.getElementById('loginForm').addEventListener('submit', async function(e) {
+                e.preventDefault();
+                const login = document.getElementById('loginEmail').value;
+                const password = document.getElementById('loginPassword').value;
+                const responseElement = document.getElementById('loginResponse');
+                const submitButton = this.querySelector('button[type="submit"]');
+                const originalText = submitButton.textContent;
+
+                try {
+                    // Показываем состояние загрузки
+                    submitButton.disabled = true;
+                    submitButton.textContent = 'Вход...';
+
+                    // Отправляем запрос на сервер (без MAC для веб-версии)
+                    const response = await fetch('/login_web', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ login, password })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        // Успешный вход
+                        responseElement.textContent = data.message;
+                        responseElement.className = 'response-message success';
+
+                        // Сохраняем логин пользователя и токен
+                        userLogin = data.user_login;
+                        localStorage.setItem('token', data.token);
+                        localStorage.setItem('userLogin', data.user_login);
+
+                        // Обновляем интерфейс
+                        updateAuthUI();
+                        connectWebSocket();
+                        // Очищаем форму и закрываем модальное окно через 2 секунды
+                        setTimeout(() => {
+                            this.reset();
+                            responseElement.className = 'response-message';
+                            closeModals();
+                        }, 2000);
+                    } else {
+                        // Ошибка от сервера
+                        responseElement.textContent = data.message;
+                        responseElement.className = 'response-message error';
+                    }
+                } catch (error) {
+                    console.error('Ошибка:', error);
+                    responseElement.textContent = 'Произошла ошибка при отправке данных. Попробуйте позже.';
+                    responseElement.className = 'response-message error';
+                } finally {
+                    submitButton.disabled = false;
+                    submitButton.textContent = originalText;
+                }
+            });
+            
+            function openRecoveryModal() {
+              recoveryModal.style.display = 'flex';
+            }
+
+            // Функция закрытия окна восстановления пароля
+            function closeRecoveryModal() {
+              recoveryModal.style.display = 'none';
+            }
+
+            // Обработчики событий для окна восстановления
+            forgotPasswordLink.addEventListener('click', function(e) {
+              e.preventDefault();
+              closeModals(); // Закрываем все модальные окна
+              openRecoveryModal(); // Открываем окно восстановления
+            });
+
+            recoveryClose.addEventListener('click', closeRecoveryModal);
+
+            // Закрытие окна восстановления при клике вне его области
+            window.addEventListener('click', function(event) {
+              if (event.target === recoveryModal) {
+                closeRecoveryModal();
+              }
+            });
+            
+            document.getElementById('recoveryForm').addEventListener('submit', async function(e) {
+              e.preventDefault();
+              const email = document.getElementById('recoveryEmail').value;
+              const responseElement = document.getElementById('recoveryResponse');
+              const submitButton = this.querySelector('button[type="submit"]');
+              const originalText = submitButton.textContent;
+
+              try {
+                submitButton.disabled = true;
+                submitButton.textContent = 'Отправка...';
+
+                const response = await fetch('/recover-password', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({ email })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                  // Успешная отправка
+                  responseElement.textContent = data.message || 'Инструкции по восстановлению отправлены на ваш email';
+                  responseElement.className = 'response-message success';
+
+                  // Закрываем окно через 3 секунды
+                  setTimeout(() => {
+                    closeRecoveryModal();
+                    this.reset();
+                    responseElement.className = 'response-message';
+                  }, 3000);
+                } else {
+                  // Ошибка от сервера
+                  responseElement.textContent = data.message || 'Произошла ошибка при отправке запроса';
+                  responseElement.className = 'response-message error';
+                }
+              } catch (error) {
+                console.error('Ошибка:', error);
+                responseElement.textContent = 'Произошла ошибка при отправке данных. Попробуйте позже.';
+                responseElement.className = 'response-message error';
+              } finally {
+                // Восстанавливаем кнопку
+                submitButton.disabled = false;
+                submitButton.textContent = originalText;
+              }
+            });
+
+            // Обновите функцию closeModals чтобы она закрывала все окна
+            function closeModals() {
+              registerModal.style.display = 'none';
+              loginModal.style.display = 'none';
+              recoveryModal.style.display = 'none';
+              document.body.style.overflow = 'auto';
+            }
+
+            // Проверка параметров URL для показа уведомлений
+            function getQueryParam(name) {
+                const urlParams = new URLSearchParams(window.location.search);
+                return urlParams.get(name);
+            }
+
+            const message = getQueryParam('message');
+            if (message) {
+                switch(message) {
+                    case 'email_verified':
+                        showNotification('Email успешно подтвержден! Теперь вы можете войти в систему.');
+                        break;
+                    case 'password_changed':
+                        showNotification('Пароль успешно изменен! Теперь вы можете войти с новым паролем.');
+                        break;
+                    case 'recovery_no_token':
+                        showNotification('Отсутствует токен восстановления в ссылке.', 'error');
+                        break;
+                    case 'recovery_invalid_token':
+                        showNotification('Недействительная или просроченная ссылка восстановления. Запросите новое письмо.', 'error');
+                        break;
+                    case 'recovery_error':
+                        showNotification('Произошла ошибка при обработке запроса восстановления. Попробуйте позже.', 'error');
+                        break;
+                    case 'invalid_token':
+                        showNotification('Недействительная или просроченная ссылка подтверждения. Запросите новое письмо.', 'error');
+                        break;
+                    case 'no_token':
+                        showNotification('Отсутствует токен подтверждения в ссылке.', 'error');
+                        break;
+                    case 'error':
+                        showNotification('Произошла ошибка при обработке запроса. Попробуйте позже.', 'error');
+                        break;
+                }
+                
+                // Убираем параметр message из URL
+                const url = new URL(window.location);
+                url.searchParams.delete('message');
+                window.history.replaceState({}, '', url);
+            }
+            
+            addEventListenerSafe(document.querySelector('.modal-close'), 'click', closeModals);
+            addEventListenerSafe(document.querySelector('.recovery-close'), 'click', closeRecoveryModal);
+
+            // Закрытие модальных окон при клике вне их области
+            window.addEventListener('click', function(event) {
+                if (event.target === document.getElementById('registerModal') || 
+                    event.target === document.getElementById('loginModal') ||
+                    event.target === document.getElementById('recoveryModal')) {
+                    closeModals();
+                }
+            });
+
+            // Предотвращение перезагрузки страницы при отправке форм
+            const forms = document.querySelectorAll('form');
+            forms.forEach(form => {
+                form.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                });
+            });
+        });
+    </script>
+</body>
+</html>
