@@ -95,18 +95,19 @@ class AIService:
         raise Exception("AI Robot Service Unavailable")
         
     def generate_image(self, prompt: str) -> str:
-        """
-        Генерирует изображение через gemini-3.1-flash-image.
-        Использует строго один указанный Tier-1 ключ.
-        """
-        tier1_key = "AIzaSyAbPb80BVsL4dz-CMkhznZC8kBHmHCa2ZM"
+        try:
+            from app.config.settings import GOOGLE_API_KEY
+        except Exception:
+            GOOGLE_API_KEY = ""
+
+        tier1_key = GOOGLE_API_KEY or ""
         logger.info(f"[IMAGE GENERATION] Пробуем сгенерировать фото на Tier-1 ключе...")
         
         try:
-            # Явно указываем v1beta, так как генерация картинок и 3.1 — это новые фичи
+            if not tier1_key:
+                raise Exception("No Tier-1 Google API key available (set GOOGLE_API_KEY in env)")
             client = genai.Client(api_key=tier1_key, http_options={"api_version": "v1beta"})
             
-            # Настраиваем конфигурацию (аналог generation_config из AI Studio)
             config = types.GenerateContentConfig(
                 temperature=1.0,
                 max_output_tokens=65536,
@@ -114,30 +115,25 @@ class AIService:
                 response_modalities=["IMAGE"], 
             )
 
-            # Делаем стандартный запрос, который точно поддерживается SDK
             response = client.models.generate_content(
                 model='models/gemini-3.1-flash-image',
                 contents=prompt,
                 config=config
             )
 
-            # Если ответ пустой
             if not response.candidates:
                 raise Exception("API не вернуло ни одного кандидата (пустой ответ).")
 
-            # Достаем саму картинку (она приходит в виде байтов в inline_data)
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'inline_data') and part.inline_data:
-                    # Конвертируем байты в base64 для отправки на сайт
                     return base64.b64encode(part.inline_data.data).decode('utf-8')
             
-            # На случай непредвиденной структуры ответа
-            logger.warning(f"Структура ответа не содержит картинки. Ответ: {response.text}")
             raise Exception("API вернуло успешный ответ, но изображение не найдено в данных.")
 
         except Exception as e:
             logger.error(f"[IMAGE ERROR] Ошибка генерации: {e}")
             raise Exception(f"Ошибка генерации: {str(e)}")
+
 
     # Вспомогательный метод для генерации статического аудио (для фоновых уведомлений на ДРУГИЕ устройства)
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
