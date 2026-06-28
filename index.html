@@ -6,6 +6,10 @@
     <title>Friday Assistant - Ваш персональный помощник</title>
     <link rel="icon" type="image/x-icon" href="images/f.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <meta name="description" content="Friday Assistant — персональный AI-помощник на базе Gemini для управления компьютером и телефоном с помощью голосовых команд.">
+    <meta name="keywords" content="голосовой помощник, AI ассистент, управление голосом, Friday Assistant, Gemini AI">
+    <meta name="google-site-verification" content="C2E0dadifJwhQ0Ls5EFJwLSA6vD1JeU7pKh4Gekg48c" />
+    <meta name="yandex-verification" content="f01241a1225bebed" />
     <!--<link rel="stylesheet" href="style.css">-->
      <style>
 :root {
@@ -967,8 +971,9 @@ opacity: 0.8;
         let isBotSpeaking = false; 
         let stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
         let currentUtterance = null;
+        let messageHistory = []; // Переменная для хранения истории сообщений без аккаунта
 
-        function addMessage(role, content) {
+        function addMessage(role, content, skipHistory = false) {
             const chatMessages = document.getElementById('chatMessages');
             const messageElement = document.createElement('div');
             messageElement.classList.add('message');
@@ -995,6 +1000,18 @@ opacity: 0.8;
 
             chatMessages.appendChild(messageElement);
             chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            // Добавляем сообщение в историю, если пользователь не авторизован и не установлен флаг skipHistory
+            if (!localStorage.getItem('token') && !skipHistory) {
+                messageHistory.push({
+                    role: role,
+                    content: content,
+                    timestamp: now.toISOString()
+                });
+                
+                // Сохраняем историю в localStorage для сохранения между перезагрузками страницы
+                localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
+            }
         }
         
         function processBotActions(actions) {
@@ -1051,6 +1068,7 @@ opacity: 0.8;
                 addMessage('assistant', displayText.trim());
             }
         }
+        
         const clearHistoryBtn = document.getElementById('clear-history');
         clearHistoryBtn.addEventListener('click', async function() {
             clearHistory();
@@ -1090,7 +1108,11 @@ opacity: 0.8;
                     showNotification('Произошла ошибка при очистке истории', 'error');
                 }
             } else {
-                // Если токена нет, просто очищаем чат локально
+                // Если токена нет, очищаем переменную истории сообщений и локальное хранилище
+                messageHistory = [];
+                localStorage.removeItem('guestMessageHistory');
+                
+                // Очищаем чат (кроме приветственного сообщения)
                 const chatMessages = document.getElementById('chatMessages');
                 const welcomeMessage = chatMessages.querySelector('.bot-message');
                 chatMessages.innerHTML = '';
@@ -1423,6 +1445,10 @@ opacity: 0.8;
                 userLogin = null;
                 updateAuthUI();
                 
+                // Очищаем историю сообщений при выходе из аккаунта
+                messageHistory = [];
+                localStorage.removeItem('guestMessageHistory');
+                
                 const chatMessages = document.getElementById('chatMessages');
                 const welcomeMessage = chatMessages.querySelector('.bot-message');
                 chatMessages.innerHTML = '';
@@ -1457,10 +1483,37 @@ opacity: 0.8;
             }
         }
 
+        // Функция для загрузки истории сообщений гостя из localStorage
+        function loadGuestMessageHistory() {
+            const savedHistory = localStorage.getItem('guestMessageHistory');
+            if (savedHistory && !localStorage.getItem('token')) {
+                try {
+                    messageHistory = JSON.parse(savedHistory);
+                    
+                    // Очищаем текущие сообщения в чате (кроме приветственного)
+                    const chatMessages = document.getElementById('chatMessages');
+                    const welcomeMessage = chatMessages.querySelector('.bot-message');
+                    chatMessages.innerHTML = '';
+                    if (welcomeMessage) {
+                        chatMessages.appendChild(welcomeMessage);
+                    }
+                    
+                    // Восстанавливаем историю сообщений в чат
+                    messageHistory.forEach(msg => {
+                        addMessage(msg.role, msg.content, true); // true - не добавлять снова в историю
+                    });
+                } catch (error) {
+                    console.error('Ошибка при загрузке истории сообщений:', error);
+                    messageHistory = [];
+                }
+            }
+        }
+
         
         // Остальные функции и обработчики событий...
         document.addEventListener('DOMContentLoaded', async function() {
             loadSettingsFromLocalStorage();
+            loadGuestMessageHistory(); // Загружаем историю сообщений гостя
             const hasValidToken = await verifyToken();
 
             if (hasValidToken) {
@@ -1757,6 +1810,11 @@ opacity: 0.8;
                             bot_name: botName.value.trim().toLowerCase(),
                             command_type: command_type
                         };
+                        
+                        // Добавляем историю сообщений для неавторизованных пользователей
+                        if (!token) {
+                            requestData.message_history = messageHistory;
+                        }
                         
                         if (file) {
                             const reader = new FileReader();
@@ -2073,6 +2131,10 @@ opacity: 0.8;
                         userLogin = data.user_login;
                         localStorage.setItem('token', data.token);
                         localStorage.setItem('userLogin', data.user_login);
+
+                        // Очищаем историю сообщений при входе в аккаунт
+                        messageHistory = [];
+                        localStorage.removeItem('guestMessageHistory');
 
                         // Обновляем интерфейс
                         updateAuthUI();

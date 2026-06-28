@@ -1,0 +1,28 @@
+name: Deploy Friday Assistant
+
+on:
+  push:
+    branches:
+      - main  # или master, смотря как называется твоя главная ветка
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: 31.76.101.19
+        username: root
+        key: ${{ secrets.SSH_KEY }} # Этот ключ мы не настраивали, но rsync/git справится, если использовать пароль или SSH-ключи.
+        # Вместо сложного деплоя файлов напрямую, мы просто заставим сервер обновиться из гита:
+        script: |
+          cd /opt/friday
+          git pull origin main
+          source myenv/bin/activate
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          systemctl restart friday-ws.service
+          systemctl restart friday-http.service
