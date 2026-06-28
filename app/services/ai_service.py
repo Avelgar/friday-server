@@ -10,6 +10,11 @@ from pydantic import BaseModel, Field
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AI_Service")
 
+try:
+    from app.config.secrets import GEMINI_KEYS
+except ImportError:
+    GEMINI_KEYS = []
+
 # =====================================================================
 # --- 1. ОПИСАНИЕ СТРУКТУРЫ КОМАНД ДЛЯ ИИ ЧЕРЕЗ PYDANTIC (АВТО-СХЕМА) ---
 # =====================================================================
@@ -38,55 +43,14 @@ def send_device_commands(target_device: str, actions: list[DeviceAction]):
 
 class AIService:
     def __init__(self):
-        self.api_keys = [
-            "AIzaSyCESEReXq0UsL5fP0-9WtjVfWOWN6a2wjM",
-            "AIzaSyBwSJQEZdB5JQ359MbSy_DWK7SZPImDHhs",
-            "AIzaSyBGyND_GepfgFV-sBSgK5D3kBYGrSoI9R8",
-            "AIzaSyCpCTEiXmnE2gRQwK8iVoeGya-KOdNqyeY",
-            "AIzaSyCRKYI1odq36eg6asToVdrDZidfCkAmAC4",
-            "AIzaSyAE_7c-DKOgHCnTeuJeB9pAuB7p-AjHRF0",
-            "AIzaSyAm1KhcgUz5ZMksYRqc6BXp1oCIP3f9cpk",
-            "AIzaSyB5wRFCVFQB7btKtZagAIKfsqBEieNWtuM",
-            "AIzaSyBRfWSV3e0RuFAt9AZ6Qz02ZvfAb2YyyGw",
-            "AIzaSyACzEH-nda6E1vGltehC6uV6r69RsJbPM8",
-            "AIzaSyC1Hjtvjc3yURgifLqGdxN7of38yzMFCr8",
-            "AIzaSyD2J7ou1lx7HA6aso2BQEFNE3cMC9vw1O4",
-            "AIzaSyC1HkJ7DV_dcJklOEFhdRMFmeurxGQhIX0",
-            "AIzaSyAURUfaWF03jTv2hSNfxgsdoPgsbW5qeUE",
-            "AIzaSyCUXamP7Qo8AdD3pP6Zn8J9tXOP45gJpck",
-            "AIzaSyCsJb56fIL58blyTXEGWoHzUlvBqNzlPcI",
-            "AIzaSyA5VvY2DLN3Ls5q03kqSHtoo1FoLM0V15k",
-            "AIzaSyBNq4nX1HG5vfHMn9UhdsME1wV_bGsbA2k",
-            "AIzaSyDPGDM1gg8gW-ZTjc3npfU3bFhpuU2MQ0A",
-            "AIzaSyC8G07X83B3hbJnsjFv6pqPd6b2pU4o0sY",
-            "AIzaSyBG0ST4erR819haifvDNQ2_tzERSpGzHcU",
-            "AIzaSyBGrOQlb76EU3VR8ThZkFxg2g9S57iSA2w",
-            "AIzaSyAMlNR9xCrzo1AOVn3S3JkJgT9J9YPl8Pk",
-            "AIzaSyCuaNaXP4iDqZmvuk2Jxxa3e5ZvoGYSNxQ",
-            "AIzaSyAhchsUBU65ZkyBTgPYpiB7EDSO_7t6fSI",
-            "AIzaSyBiMiZd2eRSsO4e99p5AK3OKEaE1QorV5s",
-            "AIzaSyCaKfJKIaRPKc4q3chXs6AiRBIl5gjzXpY",
-            "AIzaSyAxB2IzJH2MMJmURKliVp23DcK9sbBYm1g",
-            "AIzaSyCiKGckL7grhm7wEv8fS9kDT_UMV3MaraU",
-            "AIzaSyD0AaQ6TuuZbl7fK38bw12erAG4etVz--A",
-            "AIzaSyCk8GSehVxCg327d4HXHThjm9eorUD_Ov8",
-            "AIzaSyCLzcCSp8Ov_K2Co3bkK0lA3fNkUluxiqU",
-            "AIzaSyBOZRA8Q-t0DttvYn2_qB3YEk1qv1cexFw",
-            "AIzaSyDZhFe0kAWvN1XLfm1jwCfQMMD1hQ3r7gc",
-            "AIzaSyC34mnbbo8TleGuJXASrs_TYJWG1Tlxt8s",
-            "AIzaSyDcTe4DXk2ob_65huLvxS-FDNlcC8lNBTY",
-            "AIzaSyAiYV4-nATX0WhxsEXVgcH_Whz9Z4FDx-4",
-            "AIzaSyBs1UVOKCVBio_AwYqxe1VwdQrxTEGlisQ",
-            "AIzaSyC3TpcPSW8-fValosd1AUo3tnhAKTJ7E2Q"
-        ]
-        
+        self.api_keys = GEMINI_KEYS
+
         self.models = ["gemini-2.5-flash"]
-        self.api_robot_keys = self.api_keys[:30] 
+        self.api_robot_keys = self.api_keys[:30] if len(self.api_keys) >= 30 else self.api_keys
         self.robot_models = ["gemini-3.1-flash-lite-preview"]
 
         self.current_key_index = 0
         self.current_robot_key_index = 0
-
     def _get_client(self, is_robot=False):
         key = self.api_robot_keys[self.current_robot_key_index] if is_robot else self.api_keys[self.current_key_index]
         return genai.Client(http_options={"api_version": "v1beta"}, api_key=key)
