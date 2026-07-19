@@ -1,74 +1,77 @@
+# -*- coding: utf-8 -*-
+import asyncio
 import sys
-# Указываем питону, где лежит корень проекта
+import os
+import wave
+
 sys.path.append('/opt/friday')
 
-import asyncio
-import base64
-import wave
-import os
-import json # Добавили для красивого вывода команд
-
-# Теперь импорт сработает!
-from app.services.ai_service import ai_instance
+from app.services.ai_service import AIService
 
 async def main():
-    print("⏳ Запускаю тестовый звонок в Gemini Live API с проверкой Function Calling...")
-    
-    # 1. Изменим промпт так, чтобы спровоцировать вызов функции И аудио-ответ
-    user_prompt = "Пятница открой википедию"
-    prompt = f"""[КОНТЕКСТ ТЕКУЩЕГО ЗАПРОСА]
-Время: 20:19
-Устройство отправителя: Компьютер Кирилла (Тип: Телефон)
-Доступные устройства в сети: нет
+    if len(sys.argv) < 2:
+        print("Использование: python3 test_hybrid.py <путь_к_wav_файлу>")
+        return
 
-Сообщение пользователя:
-Открой на телефоне шахматы и скажи какая погода в Москве сегодня
-"""
-    fake_history = "Пользователь: Привет!\nАссистент: Здравствуйте, сэр. Я в сети."
+    wav_path = sys.argv[1]
     
+    if not os.path.exists(wav_path):
+        print(f"❌ Файл {wav_path} не найден!")
+        return
+
+    with open(wav_path, "rb") as f:
+        audio_bytes = f.read()
+        
+    print(f"✅ Загружено {len(audio_bytes)} байт из {wav_path}")
+    
+    ai = AIService()
+    prompt = """[СИСТЕМНЫЕ ДАННЫЕ]
+Устройство отправителя: Компьютер (Тип: компьютер).
+Доступные устройства: нет.
+
+[ЗАПРОС ПОЛЬЗОВАТЕЛЯ]:
+"""
+    
+    print("🚀 Запускаем генератор Gemini Live API...\n")
+    print("-" * 50)
+    
+    response_pcm = bytearray()
+
     try:
-        # 2. Делаем запрос к обновленному методу (теперь возвращает 3 значения!)
-        audio_b64, text_reply, commands = await ai_instance.generate_audio_response(
-            prompt=prompt,
-            history_text=fake_history,
+        async for chunk in ai.generate_audio_stream(
+            prompt_text=prompt,
+            audio_bytes=audio_bytes,
+            image_bytes=None,
+            history_text="Это тестовый запуск.",
             voice_name="Aoede",
             assistant_name="Пятница"
-        )
-        
-        print(f"\n🤖 Текст ответа: {text_reply}\n")
-        
-        # --- НОВОЕ: ВЫВОД КОМАНД ---
-        if commands:
-            print("⚙️ Gemini решила отправить следующие команды на устройства:")
-            # Переводим словарь в красивый JSON с отступами
-            for cmd in commands:
-                # В Gemini Live API возвращаемые аргументы могут быть объектом protobuf, 
-                # мы преобразуем их в dict для надежного вывода
-                cmd_dict = type(cmd).to_dict(cmd) if hasattr(cmd, 'to_dict') else dict(cmd)
-                print(json.dumps(cmd_dict, indent=2, ensure_ascii=False))
-        else:
-            print("⚙️ Gemini не стала вызывать функции управления устройствами в этот раз.")
-            
-        print("-" * 40)
-        
-        # 3. Декодируем Base64 обратно в сырые аудио-байты (PCM)
-        if audio_b64:
-            pcm_bytes = base64.b64decode(audio_b64)
-            
-            # 4. Сохраняем PCM байты в нормальный WAV файл
-            filename = "test_response.wav"
-            with wave.open(filename, "wb") as f:
-                f.setnchannels(1)          # Моно
-                f.setsampwidth(2)          # 16-bit
-                f.setframerate(24000)      # Gemini Live API возвращает звук 24kHz
-                f.writeframes(pcm_bytes)
+        ):
+            if chunk["type"] == "user_text":
+                print(f"👤 ТРАНСКРИПЦИЯ ЮЗЕРА: {chunk['text']}")
+            elif chunk["type"] == "bot_text":
+                print(f"🤖 ТЕКСТ БОТА: {chunk['text']}")
+            elif chunk["type"] == "commands":
+                print(f"🛠 КОМАНДЫ БОТА: {chunk['commands']}")
+            elif chunk["type"] == "audio":
+                print(f"🎵 ПРИЛЕТЕЛ АУДИО-ЧАНК: {len(chunk['data'])} байт")
+                response_pcm.extend(chunk['data'])
                 
-            print(f"\n✅ Готово! Аудио сохранено в файл: {os.path.abspath(filename)}")
+        print("\n✅ СЕССИЯ УСПЕШНО ЗАВЕРШЕНА")
+
+        # СОХРАНЯЕМ ОТВЕТ ГУГЛА В ФАЙЛ
+        if response_pcm:
+            out_wav = "/tmp/Friday_Response.wav"
+            with wave.open(out_wav, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2) # 16-bit
+                wf.setframerate(24000) # Gemini всегда возвращает 24kHz
+                wf.writeframes(response_pcm)
+            print(f"💾 Аудио-ответ сохранен в файл: {out_wav}")
         else:
-            print("\n⚠️ ИИ не сгенерировал голос (возможно, выполнил команды молча).")
+            print("⚠️ Бот не прислал ни одного байта аудио!")
 
     except Exception as e:
-        print(f"❌ Произошла ошибка: {e}")
+        print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())

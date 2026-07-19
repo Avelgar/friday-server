@@ -9,13 +9,13 @@ logging.basicConfig(
 )
 
 # Читаем секреты из окружения (systemd передаст их сюда из .env)
-JWT_SECRET = os.environ.get('JWT_SECRET', 'friday2avelgar')
+JWT_SECRET = os.environ.get('JWT_SECRET', '')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
 
 # Настройки БД
 DB_CONFIG = {
     'user': os.environ.get('DB_USER', 'friday_user'),
-    'password': os.environ.get('DB_PASSWORD', 'testzxC13!'),
+    'password': os.environ.get('DB_PASSWORD', ''),
     'host': os.environ.get('DB_HOST', '127.0.0.1'),
     'database': os.environ.get('DB_NAME', 'friday_db'),
 }
