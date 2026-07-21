@@ -39,6 +39,9 @@ class AIService:
 
     # Статическое аудио для удаленных устройств (через стабильный SDK)
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
+        # ПЕРЕКЛЮЧАЕМ КЛЮЧ ПРИ КАЖДОМ ЗАПРОСЕ
+        self._rotate_key()
+        
         mapped_voice = "Puck" if voice_name.lower() in ["dmitri", "dmitry", "puck"] else "Aoede"
         client = self._get_client()
         config = types.LiveConnectConfig(
@@ -63,8 +66,11 @@ class AIService:
 
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
-            if total_keys_tried > 0: # Rotate only after the first attempt
-                self._rotate_key()
+            # Убрано условие if. ТЕПЕРЬ ПЕРЕКЛЮЧАЕТСЯ ВСЕГДА!
+            # При первом входе в метод (новый запрос) ключ сменится на следующий.
+            # Если возникнет ошибка API, цикл повторится, и ключ снова сменится.
+            self._rotate_key()
+            
             try:
                 client = self._get_client()
                 
@@ -183,9 +189,9 @@ class AIService:
                 logger.warning(f"[API ERROR] Ошибка Live API на ключе {self.current_key_index} (попытка {total_keys_tried + 1}/{len(self.api_keys)}): {e}")
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys):
-                    await asyncio.sleep(1) # Wait before retrying with a new key
+                    await asyncio.sleep(1) # Ждем секунду перед попыткой с другим ключом
                 else:
-                    break # All keys tried, exit loop
+                    break # Все ключи испробованы, выходим
 
         raise Exception("AI Live Service Unavailable")
 
