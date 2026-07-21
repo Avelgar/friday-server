@@ -63,6 +63,8 @@ class AIService:
 
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
+            if total_keys_tried > 0: # Rotate only after the first attempt
+                self._rotate_key()
             try:
                 client = self._get_client()
                 
@@ -178,12 +180,12 @@ class AIService:
                 return
 
             except Exception as e:
-                logger.warning(f"[API ERROR] Ошибка Live API на ключе {self.current_key_index}: {e}")
-                if self._rotate_key():
-                    total_keys_tried += 1
-                    await asyncio.sleep(1)
-                else: 
-                    break
+                logger.warning(f"[API ERROR] Ошибка Live API на ключе {self.current_key_index} (попытка {total_keys_tried + 1}/{len(self.api_keys)}): {e}")
+                total_keys_tried += 1
+                if total_keys_tried < len(self.api_keys):
+                    await asyncio.sleep(1) # Wait before retrying with a new key
+                else:
+                    break # All keys tried, exit loop
 
         raise Exception("AI Live Service Unavailable")
 
