@@ -16,7 +16,11 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           script: |
             cd /opt/friday
-            git pull origin main
+            # Скачиваем новые данные, не пытаясь их склеить с локальными
+            git fetch origin main
+            # Жестко затираем локальные файлы версией с GitHub
+            git reset --hard origin/main
+            
             source myenv/bin/activate
             if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
             systemctl restart friday-ws.service
