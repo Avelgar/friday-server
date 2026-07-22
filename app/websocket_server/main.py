@@ -16,7 +16,6 @@ from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 
-# Отключаем лишний спам от библиотеки websockets
 logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("WS_Server")
@@ -26,7 +25,6 @@ id_to_websocket = {}
 last_ping_times = {}     
 PING_TIMEOUT = 70
 
-# === КОНСТАНТЫ ВОЗМОЖНОСТЕЙ АГЕНТОВ ===
 CAP_PC = "открытие ссылки, напечатать текст, нажать кнопку мыши, переместить мышь, уведомление, музыка, смена имени, смена голоса, очистка истории, изменение громкости, изменение яркости"
 CAP_PHONE = "открытие ссылки, изменение громкости, изменение яркости, музыка, очистка истории, режим камеры, выключить режим камеры"
 CAP_TRIGGERS = "check_network_devices (узнать, кто в сети), get_running_processes (получить список процессов), get_installed_programs (узнать пути программ), request_retry"
@@ -67,16 +65,15 @@ def get_accessible_devices(cursor, current_mac, user_id):
 
 async def async_send(websocket, data):
     try:
-        # ЗАГЛУШКА ДЛЯ СПАМА: Если сокет закрыт, мы даже не пытаемся отправить
         if websocket.state != websockets.protocol.State.OPEN:
             return
         json_data = json.dumps(data, ensure_ascii=False)
         encoded_data = base64.b64encode(json_data.encode('utf-8')).decode('utf-8')
         await websocket.send(encoded_data)
     except ConnectionClosed:
-        pass # Тихо игнорируем разрыв
+        pass
     except Exception as e:
-        pass # Тихо игнорируем
+        pass
 
 async def handle_web_client_auth(websocket, data):
     conn = None
@@ -195,16 +192,13 @@ async def handle_command(websocket, data):
         """, (sender_id, user_msg_id))
         history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in cursor.fetchall()])
 
-        system_instruction = f"""Ты — ИИ-помощник {name}. Твой текущий собеседник работает за устройством: {sender_name} (Тип: {device_type}).
+        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник работает за устройством: {sender_name} (Тип: {device_type}).
 ПРАВИЛА УПРАВЛЕНИЯ:
-1. Ты общаешься ТОЛЬКО ГОЛОСОМ. Говори естественно и живо.
-2. Твой голос АВТОМАТИЧЕСКИ отправляется пользователю. Никогда не используй action_type="голосовой ответ" для устройства-отправителя!
-3. Твои локальные возможности на этом устройстве: {CAP_PC if device_type == 'компьютер' else CAP_PHONE}.
-4. ТЫ НЕ УМЕЕШЬ открывать программы или закрывать процессы напрямую! Ты не знаешь путей и точных имен!
-5. Если тебя просят ОТКРЫТЬ программу, ЗАКРЫТЬ программу или УПРАВЛЯТЬ ДРУГИМ УСТРОЙСТВОМ, используй ТОЛЬКО эти триггеры-запросы: {CAP_TRIGGERS}.
-6. Примеры:
-   - Просят открыть блокнот тут? Отправь get_installed_programs на устройство {sender_name} и скажи "Ищу блокнот".
-   - Просят запустить/настроить что-то на телефоне? Отправь check_network_devices на устройство {sender_name} и скажи "Проверяю сеть".
+1. Говори естественно и живо. Твой голос сам транслируется пользователю, не используй "голосовой ответ" для {sender_name}.
+2. Твои возможности тут: {CAP_PC if device_type == 'компьютер' else CAP_PHONE}.
+3. ВНИМАНИЕ: Для открытия сайтов/видео используй СТРОГО action_type="открытие ссылки" и передавай ПОЛНУЮ валидную ссылку (например https://youtube.com) в action_value. НИКОГДА не обрезай ссылки!
+4. Ты не знаешь точных путей к программам. Если просят запустить программу, сначала вызови триггер action_type="get_installed_programs".
+5. Если просят сделать что-то на ДРУГОМ устройстве, используй action_type="check_network_devices".
 """
 
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
@@ -314,7 +308,6 @@ async def handle_command(websocket, data):
                     sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
                     if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
-        # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ ===
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
             logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
@@ -382,11 +375,10 @@ async def handle_target_command(websocket, data):
 Доступные устройства в сети прямо сейчас: {accessible_devices}.
 
 ПРАВИЛА:
-1. Твой голос автоматически транслируется пользователю на {source_name}. Ответь ему естественно и живо.
-2. Если нужного устройства НЕТ в сети — просто скажи об этом пользователю голосом, не извиняйся.
-3. Если устройство ЕСТЬ в сети — отправь на него нужные команды (среди возможностей: {CAP_PC} или {CAP_PHONE}).
-4. ОЧЕНЬ ВАЖНО: Если нужно открыть или закрыть что-то на удаленном устройстве, отправляй туда команды: {CAP_TRIGGERS} (например get_running_processes).
-5. Если хочешь, чтобы удаленное устройство что-то сказало само, отправляй на него action_type="голосовой ответ".
+1. Ответь пользователю на {source_name} живо и естественно.
+2. Если нужного устройства НЕТ в сети — просто скажи об этом.
+3. ВНИМАНИЕ: Для открытия ссылок/видео на удаленном устройстве отправляй СТРОГО action_type="открытие ссылки" и полную валидную ссылку (например https://youtube.com).
+4. Если нужно открыть файл/программу, отправляй action_type="get_installed_programs". Если закрыть — action_type="get_running_processes".
 """
             prompt_context = "[СИСТЕМНОЕ ЗАДАНИЕ] Проверь наличие устройства в сети и маршрутизируй запрос, обязательно ответив пользователю."
 
@@ -408,18 +400,16 @@ async def handle_target_command(websocket, data):
             logger.info("\n" + "="*50)
             logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ-ИСПОЛНИТЕЛЬ. Данные от: {sender_device['device_name']}")
 
-            # ОПТИМИЗИРОВАННЫЙ ПРОМПТ (ЧТОБЫ ИИ НЕ ТУПИЛ И НЕ ТАЙМАУТИЛ)
             system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Исполнитель-Аналитик.
 Пользователь с устройства {source_name} изначально просил: "{original_command}".
 Устройство {sender_device['device_name']} прислало системные данные (ПРОГРАММЫ И ПРОЦЕССЫ).
 
 ПРАВИЛА:
-1. Твой голос автоматически транслируется на {source_name}. Скажи, что задача выполнена или данные найдены.
+1. Скажи пользователю на {source_name}, что задача выполнена или данные найдены.
 2. Твои расширенные возможности как исполнителя: {CAP_EXEC}.
-3. ВНИМАНИЕ: НЕ ЧИТАЙ ВЕСЬ СПИСОК ВСЛУХ! Найди нужный путь или процесс и СРАЗУ отправь финальную команду на {sender_device['device_name']} (например "открытие файла" передав точный путь).
+3. ВНИМАНИЕ: НЕ ЧИТАЙ ВЕСЬ СПИСОК ВСЛУХ! Найди нужный путь или процесс и СРАЗУ отправь финальную команду на {sender_device['device_name']} (например action_type="открытие файла" передав точный путь в action_value).
 ОТВЕЧАЙ МАКСИМАЛЬНО КОРОТКО.
 """
-            # Передаем списки прямо в запрос, чтобы он их просто парсил
             prompt_context = f"[ДАННЫЕ]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни задачу пользователя."
 
         source_id = source_device_info['id']

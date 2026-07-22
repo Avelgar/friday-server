@@ -48,17 +48,15 @@ class AIService:
         cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
         session = None
         try:
-            # Коннект отваливается быстро (10 сек)
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
             await session.send(input=f"Произнеси: {text}", end_of_turn=True)
             
             receive_iterator = session.receive().__aiter__()
             while True:
-                # На генерацию аудио даем больше времени
                 response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
                 if response.server_content and response.data:
                     audio_data.extend(response.data)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             logger.error(f"Static audio timeout on key {self.current_key_index}")
             return None
         except StopAsyncIteration:
@@ -79,6 +77,8 @@ class AIService:
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
+            has_yielded_data = False # Флаг! Если мы уже начали отвечать, перебирать ключи ЗАПРЕЩЕНО.
+            
             try:
                 client = self._get_client()
                 
@@ -96,8 +96,8 @@ class AIService:
                                         items=types.Schema(
                                             type=types.Type.OBJECT,
                                             properties={
-                                                "action_type": types.Schema(type=types.Type.STRING, description="Тип действия"),
-                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение")
+                                                "action_type": types.Schema(type=types.Type.STRING, description="СТРОГО ОДИН ИЗ: открытие ссылки, открытие файла, завершение процесса, напечатать текст, музыка, изменение громкости, check_network_devices, get_running_processes, get_installed_programs"),
+                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение (полная ссылка, текст или пусто)")
                                             },
                                             required=["action_type", "action_value"]
                                         )
@@ -126,7 +126,6 @@ class AIService:
                 session = None
                 
                 try:
-                    # ЖЕСТКИЙ ТАЙМАУТ ПОДКЛЮЧЕНИЯ (10 сек - если гугл лежит, скипаем быстро)
                     session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
                     if prompt_text:
@@ -141,7 +140,6 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        # ТАЙМАУТ ОЖИДАНИЯ ЧАНКА УВЕЛИЧЕН ДО 25 сек (чтобы успевал читать списки программ)
                         response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=25.0)
                         
                         sc = response.server_content
@@ -149,10 +147,12 @@ class AIService:
                             if sc.input_transcription:
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
                             if sc.output_transcription:
+                                has_yielded_data = True
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
+                                        has_yielded_data = True
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила свою реплику (turn_complete).")
@@ -167,12 +167,17 @@ class AIService:
                                 function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
                             
                             if extracted_commands:
+                                has_yielded_data = True
                                 yield {"type": "commands", "commands": extracted_commands}
                             
                             await session.send_tool_response(function_responses=function_responses)
                             
-                except asyncio.TimeoutError:
-                    raise Exception("Таймаут подключения/стрима (зависание)")
+                except (asyncio.TimeoutError, TimeoutError):
+                    # Если мы уже начали отвечать, таймаут - это просто конец ответа. Выходим штатно!
+                    if has_yielded_data:
+                        logger.info("[API] Таймаут после отправки данных. Считаем ответ ИИ завершенным.")
+                        return 
+                    raise Exception("Таймаут подключения/стрима (зависание до начала ответа)")
                 except StopAsyncIteration:
                     pass
                 finally:
@@ -183,6 +188,10 @@ class AIService:
                 return # Успешно отработали, выходим
 
             except Exception as e:
+                if has_yielded_data:
+                    logger.info(f"[API] Обрыв связи во время ответа ({e}). Считаем завершенным, не повторяем.")
+                    return
+                
                 logger.warning(f"[API ERROR] Ошибка/Таймаут на ключе {self.current_key_index}: {e}")
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys):
