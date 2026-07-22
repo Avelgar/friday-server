@@ -48,14 +48,14 @@ class AIService:
         cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
         session = None
         try:
-            # Жесткий таймаут на подключение
-            session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
+            # Коннект отваливается быстро (10 сек)
+            session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
             await session.send(input=f"Произнеси: {text}", end_of_turn=True)
             
             receive_iterator = session.receive().__aiter__()
             while True:
-                # Жесткий таймаут на ожидание чанка
-                response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=8.0)
+                # На генерацию аудио даем больше времени
+                response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
                 if response.server_content and response.data:
                     audio_data.extend(response.data)
         except asyncio.TimeoutError:
@@ -126,8 +126,8 @@ class AIService:
                 session = None
                 
                 try:
-                    # ЖЕСТКИЙ ТАЙМАУТ ПОДКЛЮЧЕНИЯ (8 сек)
-                    session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
+                    # ЖЕСТКИЙ ТАЙМАУТ ПОДКЛЮЧЕНИЯ (10 сек - если гугл лежит, скипаем быстро)
+                    session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
                     if prompt_text:
                         await session.send_realtime_input(text=prompt_text)
@@ -141,8 +141,8 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        # ЖЕСТКИЙ ТАЙМАУТ ОЖИДАНИЯ ОТВЕТА (8 сек)
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=8.0)
+                        # ТАЙМАУТ ОЖИДАНИЯ ЧАНКА УВЕЛИЧЕН ДО 25 сек (чтобы успевал читать списки программ)
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=25.0)
                         
                         sc = response.server_content
                         if sc:

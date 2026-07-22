@@ -305,18 +305,14 @@ async def handle_command(websocket, data):
         
         # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ ===
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
-            # ИИ ничего не сказал и не вызвал ни одну функцию (таймаут или пустота)
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
             if sender_device['websocket_id']:
                 sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
                 if sender_ws:
-                    # Приказываем клиенту удалить баббл
                     await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
-                    # И кидаем пустой пакет чтобы разблокировать микрофон
                     await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         else:
-            # Стандартное обновление если всё ок
             cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             conn.commit()
             if sender_device['websocket_id']:
@@ -331,7 +327,6 @@ async def handle_command(websocket, data):
             if sender_device and sender_device['websocket_id']:
                 sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
                 if sender_ws:
-                    # В случае ошибки на сервере тоже удаляем мусор
                     cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
                     conn.commit()
                     await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
@@ -343,6 +338,7 @@ async def handle_target_command(websocket, data):
     conn = None
     cursor = None
     audio_chunks_count = 0
+    has_commands = False
     try:
         mysql_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn = get_db_connection()
@@ -436,6 +432,7 @@ async def handle_target_command(websocket, data):
             assistant_name=name
         ):
             if chunk["type"] == "commands":
+                if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
                 
                 for cmd in extracted_commands:
@@ -480,6 +477,20 @@ async def handle_target_command(websocket, data):
 
             elif chunk["type"] == "bot_text":
                 final_text += chunk["text"] + " "
+                # === ИСПРАВЛЕНО: СТРИМИМ ТЕКСТ В РЕАЛТАЙМЕ ДЛЯ ТРЕТИЧНОГО АГЕНТА ===
+                cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
+                conn.commit()
+                if source_device_info['websocket_id']:
+                    source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
+                    if source_ws:
+                        await async_send(source_ws, {
+                            "type": "new_message",
+                            "message_id": bot_message_id,
+                            "ui_msg_id": str(bot_message_id), # Передаем как запасной идентификатор
+                            "sender": "Бот",
+                            "text": chunk["text"],
+                            "actions": []
+                        })
 
             elif chunk["type"] == "audio":
                 audio_chunks_count += 1
@@ -487,19 +498,35 @@ async def handle_target_command(websocket, data):
                     source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
                     if source_ws: await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
 
-        if final_text.strip():
-            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
-        else:
+        # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ ===
+        if not final_text.strip() and audio_chunks_count == 0 and not has_commands:
             cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
-        conn.commit()
+            conn.commit()
+            if source_device_info['websocket_id']:
+                source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
+                if source_ws:
+                    await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
+                    await async_send(source_ws, {"type": "new_message", "message_id": None, "ui_msg_id": str(bot_message_id), "sender": "Бот", "text": "", "actions": []})
+        else:
+            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
+            conn.commit()
+            if source_device_info['websocket_id']:
+                source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
+                if source_ws: await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id), "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Вторичная/Третичная обработка завершена. Чанков: {audio_chunks_count}\n" + "="*50)
 
     except Exception as e:
         logger.error(f"[ERROR] {e}", exc_info=True)
-    finally:
-        if cursor: cursor.close()
-        if conn: conn.close()
+        try:
+            if source_device_info and source_device_info['websocket_id']:
+                source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
+                if source_ws:
+                    cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
+                    conn.commit()
+                    await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
+                    await async_send(source_ws, {"type": "new_message", "message_id": None, "ui_msg_id": str(bot_message_id), "sender": "Бот", "text": "", "actions": []})
+        except: pass
 
 async def handle_device_registration(websocket, data):
     conn = None
