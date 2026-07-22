@@ -1,6 +1,7 @@
 import sys
 import asyncio
 import websockets
+from websockets.exceptions import ConnectionClosed
 import json
 import base64
 import logging
@@ -15,6 +16,8 @@ from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 
+# Отключаем лишний спам от библиотеки websockets
+logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("WS_Server")
 
@@ -64,11 +67,16 @@ def get_accessible_devices(cursor, current_mac, user_id):
 
 async def async_send(websocket, data):
     try:
+        # ЗАГЛУШКА ДЛЯ СПАМА: Если сокет закрыт, мы даже не пытаемся отправить
+        if websocket.state != websockets.protocol.State.OPEN:
+            return
         json_data = json.dumps(data, ensure_ascii=False)
         encoded_data = base64.b64encode(json_data.encode('utf-8')).decode('utf-8')
         await websocket.send(encoded_data)
+    except ConnectionClosed:
+        pass # Тихо игнорируем разрыв
     except Exception as e:
-        logger.error(f"Ошибка отправки сообщения: {e}")
+        pass # Тихо игнорируем
 
 async def handle_web_client_auth(websocket, data):
     conn = None
@@ -214,6 +222,7 @@ async def handle_command(websocket, data):
         ):
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
+                logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
                 conn.commit()
                 if sender_device['websocket_id']:
@@ -223,6 +232,7 @@ async def handle_command(websocket, data):
 
             elif chunk["type"] == "bot_text":
                 final_bot_text_full += chunk["text"] + " "
+                logger.info(f"[TTS] Бот: {chunk['text'].strip()}")
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
                 conn.commit()
                 if sender_device['websocket_id']:
@@ -233,6 +243,7 @@ async def handle_command(websocket, data):
             elif chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
+                logger.info(f"[JSON] Команды ИИ (Первичный): {json.dumps(extracted_commands, ensure_ascii=False)}")
                 filtered_commands = []
                 
                 for cmd in extracted_commands:
@@ -305,6 +316,7 @@ async def handle_command(websocket, data):
         
         # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ ===
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
+            logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
             if sender_device['websocket_id']:
@@ -396,18 +408,19 @@ async def handle_target_command(websocket, data):
             logger.info("\n" + "="*50)
             logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ-ИСПОЛНИТЕЛЬ. Данные от: {sender_device['device_name']}")
 
+            # ОПТИМИЗИРОВАННЫЙ ПРОМПТ (ЧТОБЫ ИИ НЕ ТУПИЛ И НЕ ТАЙМАУТИЛ)
             system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Исполнитель-Аналитик.
 Пользователь с устройства {source_name} изначально просил: "{original_command}".
-Устройство {sender_device['device_name']} прислало запрошенные системные данные:
-Процессы: {processes}
-Программы: {programs}
+Устройство {sender_device['device_name']} прислало системные данные (ПРОГРАММЫ И ПРОЦЕССЫ).
 
 ПРАВИЛА:
-1. Твой голос автоматически транслируется пользователю на устройство инициатора ({source_name}). Скажи ему, что задача выполнена или данные найдены.
+1. Твой голос автоматически транслируется на {source_name}. Скажи, что задача выполнена или данные найдены.
 2. Твои расширенные возможности как исполнителя: {CAP_EXEC}.
-3. Опираясь строго на полученные данные, отправь финальную команду на устройство {sender_device['device_name']} (например, "открытие файла" передав точный путь).
+3. ВНИМАНИЕ: НЕ ЧИТАЙ ВЕСЬ СПИСОК ВСЛУХ! Найди нужный путь или процесс и СРАЗУ отправь финальную команду на {sender_device['device_name']} (например "открытие файла" передав точный путь).
+ОТВЕЧАЙ МАКСИМАЛЬНО КОРОТКО.
 """
-            prompt_context = "[СИСТЕМНОЕ ЗАДАНИЕ] Проанализируй системные данные и выполни финальное действие на устройстве."
+            # Передаем списки прямо в запрос, чтобы он их просто парсил
+            prompt_context = f"[ДАННЫЕ]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни задачу пользователя."
 
         source_id = source_device_info['id']
 
@@ -434,6 +447,7 @@ async def handle_target_command(websocket, data):
             if chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
+                logger.info(f"[JSON] Команды ИИ (Вторичный/Третичный): {json.dumps(extracted_commands, ensure_ascii=False)}")
                 
                 for cmd in extracted_commands:
                     target_device_name = cmd.get('target_device', '').strip()
@@ -477,7 +491,8 @@ async def handle_target_command(websocket, data):
 
             elif chunk["type"] == "bot_text":
                 final_text += chunk["text"] + " "
-                # === ИСПРАВЛЕНО: СТРИМИМ ТЕКСТ В РЕАЛТАЙМЕ ДЛЯ ТРЕТИЧНОГО АГЕНТА ===
+                logger.info(f"[TTS] Бот: {chunk['text'].strip()}")
+                
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
                 conn.commit()
                 if source_device_info['websocket_id']:
@@ -486,7 +501,7 @@ async def handle_target_command(websocket, data):
                         await async_send(source_ws, {
                             "type": "new_message",
                             "message_id": bot_message_id,
-                            "ui_msg_id": str(bot_message_id), # Передаем как запасной идентификатор
+                            "ui_msg_id": str(bot_message_id),
                             "sender": "Бот",
                             "text": chunk["text"],
                             "actions": []
@@ -498,8 +513,8 @@ async def handle_target_command(websocket, data):
                     source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
                     if source_ws: await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
 
-        # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ ===
         if not final_text.strip() and audio_chunks_count == 0 and not has_commands:
+            logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
             conn.commit()
             if source_device_info['websocket_id']:
@@ -615,10 +630,10 @@ async def websocket_handler(websocket):
                 logger.error(f"JSON Error: {e}")
             except Exception as e:
                 logger.error(f"Handler Error: {e}")
-    except websockets.exceptions.ConnectionClosed:
+    except ConnectionClosed:
         pass
     except Exception as e:
-        logger.error(f"Critical WS Error: {e}")
+        pass
     finally:
         logger.info(f"Disconnected: {client_id}")
         if websocket in active_connections: del active_connections[websocket]
