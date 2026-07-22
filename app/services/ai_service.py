@@ -44,18 +44,35 @@ class AIService:
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
         )
         audio_data = bytearray()
+        
+        cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+        session = None
         try:
-            async with client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config) as session:
-                await session.send(input=f"Произнеси: {text}", end_of_turn=True)
-                async for response in session.receive():
-                    if response.server_content and response.data:
-                        audio_data.extend(response.data)
-            return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
+            # Жесткий таймаут на подключение
+            session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
+            await session.send(input=f"Произнеси: {text}", end_of_turn=True)
+            
+            receive_iterator = session.receive().__aiter__()
+            while True:
+                # Жесткий таймаут на ожидание чанка
+                response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=8.0)
+                if response.server_content and response.data:
+                    audio_data.extend(response.data)
+        except asyncio.TimeoutError:
+            logger.error(f"Static audio timeout on key {self.current_key_index}")
+            return None
+        except StopAsyncIteration:
+            pass
         except Exception as e:
             logger.error(f"Static audio error: {e}")
             return None
+        finally:
+            if session:
+                try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                except: pass
+                
+        return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
-    # ОБНОВЛЕНИЕ: Теперь system_instruction передается аргументом извне!
     async def generate_audio_stream(self, prompt_text, system_instruction, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница"):
         mapped_voice = "Puck" if voice_name.lower() in ["dmitri", "dmitry", "puck"] else "Aoede"
 
@@ -104,7 +121,13 @@ class AIService:
                 )
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
-                async with client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config) as session:
+                
+                cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+                session = None
+                
+                try:
+                    # ЖЕСТКИЙ ТАЙМАУТ ПОДКЛЮЧЕНИЯ (8 сек)
+                    session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
                     
                     if prompt_text:
                         await session.send_realtime_input(text=prompt_text)
@@ -116,7 +139,11 @@ class AIService:
 
                     await session.send_realtime_input(audio_stream_end=True)
 
-                    async for response in session.receive():
+                    receive_iterator = session.receive().__aiter__()
+                    while True:
+                        # ЖЕСТКИЙ ТАЙМАУТ ОЖИДАНИЯ ОТВЕТА (8 сек)
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=8.0)
+                        
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription:
@@ -133,7 +160,6 @@ class AIService:
                         if response.tool_call:
                             extracted_commands = []
                             function_responses = []
-                            
                             for fc in response.tool_call.function_calls:
                                 args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                                 if isinstance(args_dict, dict) and "actions" in args_dict:
@@ -144,17 +170,26 @@ class AIService:
                                 yield {"type": "commands", "commands": extracted_commands}
                             
                             await session.send_tool_response(function_responses=function_responses)
+                            
+                except asyncio.TimeoutError:
+                    raise Exception("Таймаут подключения/стрима (зависание)")
+                except StopAsyncIteration:
+                    pass
+                finally:
+                    if session:
+                        try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                        except: pass
                 
-                return
+                return # Успешно отработали, выходим
 
             except Exception as e:
-                logger.warning(f"[API ERROR] Ошибка Live API на ключе {self.current_key_index}: {e}")
+                logger.warning(f"[API ERROR] Ошибка/Таймаут на ключе {self.current_key_index}: {e}")
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys):
                     await asyncio.sleep(1)
                 else:
                     break
 
-        raise Exception("AI Live Service Unavailable")
+        raise Exception("AI Live Service Unavailable (Все ключи перебраны или недоступны)")
 
 ai_instance = AIService()

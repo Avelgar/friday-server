@@ -71,7 +71,6 @@ async def async_send(websocket, data):
         logger.error(f"Ошибка отправки сообщения: {e}")
 
 async def handle_web_client_auth(websocket, data):
-    # Код авторизации WEB клиента оставлен без изменений...
     conn = None
     cursor = None
     try:
@@ -129,6 +128,7 @@ async def handle_command(websocket, data):
     user_msg_id = None
     bot_message_id = None
     audio_chunks_count = 0
+    has_commands = False
 
     final_user_text_full = ""
     final_bot_text_full = ""
@@ -231,15 +231,14 @@ async def handle_command(websocket, data):
                         await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
 
             elif chunk["type"] == "commands":
+                if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
                 filtered_commands = []
                 
-                # === ПЕРЕХВАТ МАРШРУТИЗАТОРА ===
                 for cmd in extracted_commands:
                     filtered_actions = []
                     for act in cmd.get('actions', []):
                         if act.get('action_type') == "check_network_devices":
-                            # Перехватываем: в клиент НЕ отправляем, дергаем Агента 2
                             logger.info(f"[INTERCEPT] ИИ запрашивает сеть. Активирую Маршрутизатор.")
                             pseudo_data = {
                                 "internal_routing": "check_network_devices",
@@ -247,7 +246,8 @@ async def handle_command(websocket, data):
                                 "source_name": sender_name,
                                 "mac": mac,
                                 "user_id": sender_device.get('user_id'),
-                                "user_msg_id": user_msg_id
+                                "user_msg_id": user_msg_id,
+                                "voice_type": voice_name
                             }
                             asyncio.create_task(handle_target_command(websocket, pseudo_data))
                         else:
@@ -257,7 +257,6 @@ async def handle_command(websocket, data):
                         cmd['actions'] = filtered_actions
                         filtered_commands.append(cmd)
                 
-                # Оставшиеся обычные команды (например, get_running_processes) рассылаем клиентам
                 for cmd in filtered_commands:
                     target_device_name = cmd.get('target_device', '').strip()
                     actions = cmd.get('actions', [])
@@ -304,14 +303,25 @@ async def handle_command(websocket, data):
                     sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
                     if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
-        if not final_bot_text_full.strip() and audio_chunks_count == 0:
-            cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,)); conn.commit()
+        # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ ===
+        if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
+            # ИИ ничего не сказал и не вызвал ни одну функцию (таймаут или пустота)
+            cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
+            conn.commit()
+            if sender_device['websocket_id']:
+                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                if sender_ws:
+                    # Приказываем клиенту удалить баббл
+                    await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+                    # И кидаем пустой пакет чтобы разблокировать микрофон
+                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         else:
-            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id)); conn.commit()
-
-        if sender_device['websocket_id']:
-            sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-            if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
+            # Стандартное обновление если всё ок
+            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
+            conn.commit()
+            if sender_device['websocket_id']:
+                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Первичный цикл завершен.\n" + "="*50)
 
@@ -320,7 +330,12 @@ async def handle_command(websocket, data):
         try:
             if sender_device and sender_device['websocket_id']:
                 sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-                if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "[Ошибка сервера]", "actions": []})
+                if sender_ws:
+                    # В случае ошибки на сервере тоже удаляем мусор
+                    cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
+                    conn.commit()
+                    await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         except: pass
 
 
@@ -334,7 +349,7 @@ async def handle_target_command(websocket, data):
         cursor = conn.cursor(dictionary=True, buffered=True)
         
         is_internal = data.get("internal_routing")
-        voice_name = "Aoede"
+        voice_name = data.get('voice_type', 'Aoede')
         name = data.get('name', 'Пятница')
 
         if is_internal == "check_network_devices":
@@ -346,7 +361,7 @@ async def handle_target_command(websocket, data):
             
             cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = cursor.fetchone()
-            sender_device = source_device_info # Имитация: мы общаемся сами с собой
+            sender_device = source_device_info 
             
             accessible_devices_list = get_accessible_devices(cursor, mac, user_id)
             accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет устройств в сети"
@@ -487,7 +502,6 @@ async def handle_target_command(websocket, data):
         if conn: conn.close()
 
 async def handle_device_registration(websocket, data):
-    # Код регистрации оставлен без изменений...
     conn = None
     cursor = None
     try:
