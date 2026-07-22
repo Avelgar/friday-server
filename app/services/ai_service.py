@@ -3,7 +3,6 @@ import base64
 import asyncio
 import logging
 import json
-import websockets
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -26,7 +25,6 @@ def send_device_commands(target_device: str, actions: list[DeviceAction]):
 class AIService:
     def __init__(self):
         self.api_keys = GEMINI_KEYS
-        self.api_robot_keys = self.api_keys[:30] if len(self.api_keys) >= 30 else self.api_keys
         self.current_key_index = 0
 
     def _get_client(self):
@@ -37,11 +35,8 @@ class AIService:
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
 
-    # Статическое аудио для удаленных устройств (через стабильный SDK)
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
-        # ПЕРЕКЛЮЧАЕМ КЛЮЧ ПРИ КАЖДОМ ЗАПРОСЕ
         self._rotate_key()
-        
         mapped_voice = "Puck" if voice_name.lower() in ["dmitri", "dmitry", "puck"] else "Aoede"
         client = self._get_client()
         config = types.LiveConnectConfig(
@@ -60,17 +55,13 @@ class AIService:
             logger.error(f"Static audio error: {e}")
             return None
 
-    # ГЛАВНЫЙ ГЕНЕРАТОР ПОТОКА LIVE API (SDK)
-    async def generate_audio_stream(self, prompt_text, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница"):
+    # ОБНОВЛЕНИЕ: Теперь system_instruction передается аргументом извне!
+    async def generate_audio_stream(self, prompt_text, system_instruction, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница"):
         mapped_voice = "Puck" if voice_name.lower() in ["dmitri", "dmitry", "puck"] else "Aoede"
 
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
-            # Убрано условие if. ТЕПЕРЬ ПЕРЕКЛЮЧАЕТСЯ ВСЕГДА!
-            # При первом входе в метод (новый запрос) ключ сменится на следующий.
-            # Если возникнет ошибка API, цикл повторится, и ключ снова сменится.
             self._rotate_key()
-            
             try:
                 client = self._get_client()
                 
@@ -82,7 +73,7 @@ class AIService:
                             parameters=types.Schema(
                                 type=types.Type.OBJECT,
                                 properties={
-                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства СТРОГО из списка доступных."),
+                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
                                     "actions": types.Schema(
                                         type=types.Type.ARRAY,
                                         items=types.Schema(
@@ -100,26 +91,13 @@ class AIService:
                         )
                     ]
                 )
-                
-                system_instruction = f"""Ты — ИИ-помощник {assistant_name}.
-ПРАВИЛА ОБЩЕНИЯ И УПРАВЛЕНИЯ:
-1. Ты общаешься ТОЛЬКО ГОЛОСОМ. Говори естественно и кратко.
-2. Используй функцию send_device_commands ТОЛЬКО для управления устройствами (если пользователь просит что-то включить, открыть, настроить, получить данные).
-3. **НИКОГДА не вызывай send_device_commands с action_type="голосовой ответ" для устройства-отправителя!** Твой голос автоматически транслируется ему.
-4. Если нужно сказать что-то на ДРУГОМ устройстве, тогда используй send_device_commands с action_type="голосовой ответ" и нужным текстом.
-5. Устройства:
-   [КОМПЬЮТЕР]: открытие ссылки (принимает ссылку), напечатать текст (принимает текст, используй \\n для переноса строки), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (x,y), уведомление (принимает текст), музыка(включить/выключить/следующий/предыдущий), смена имени(новое имя), смена голоса(Irina/Dmitri), очистка истории(любой текст), изменение громкости(число от 0 до 100), изменение яркости(число от 0 до 100), data_request (paths_to_programs/running_processes/need_repeat).
-   [ТЕЛЕФОН]: открытие ссылки(принимает ссылку), изменение громкости(число от 0 до 100), изменение яркости(число от 0 до 100), музыка, очистка истории(любой текст), режим камеры(любой текст), выключить режим камеры(любой текст), data_request (paths_to_programs/running_processes).
-
-ИСТОРИЯ ДИАЛОГА:
-{history_text}"""
 
                 config = types.LiveConnectConfig(
                     response_modalities=["AUDIO"], 
                     system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                     tools=[device_control_tool],
-                    input_audio_transcription={},  # Включаем транскрипцию голоса пользователя
-                    output_audio_transcription={}, # Включаем транскрипцию ответа бота
+                    input_audio_transcription={},  
+                    output_audio_transcription={}, 
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     )
@@ -128,45 +106,30 @@ class AIService:
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 async with client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config) as session:
                     
-                    # 1. ОТПРАВЛЯЕМ ТЕКСТ (ТОЛЬКО ЕСЛИ ОН ЕСТЬ)
                     if prompt_text:
                         await session.send_realtime_input(text=prompt_text)
-                    
-                    # 2. ОТПРАВЛЯЕМ КАРТИНКУ (ТОЛЬКО ЕСЛИ ОНА ЕСТЬ)
                     if image_bytes:
                         await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
-
-                    # 3. ОТПРАВЛЯЕМ АУДИО
                     if audio_bytes:
                         pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
                         await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
 
-                    # 4. Сообщаем, что мы закончили говорить
                     await session.send_realtime_input(audio_stream_end=True)
 
-                    # 5. ЧИТАЕМ ОТВЕТЫ (Пока сессия активна)
                     async for response in session.receive():
                         sc = response.server_content
                         if sc:
-                            # А. Транскрипция пользователя
                             if sc.input_transcription:
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
-
-                            # Б. Транскрипция ответа бота (Текст для чата)
                             if sc.output_transcription:
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
-
-                            # В. Аудио бота
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
                                         yield {"type": "audio", "data": part.inline_data.data}
-
-                            # Г. Флаг завершения хода (Просто логируем)
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила свою реплику (turn_complete).")
                         
-                        # Д. Вызов инструментов
                         if response.tool_call:
                             extracted_commands = []
                             function_responses = []
@@ -182,16 +145,15 @@ class AIService:
                             
                             await session.send_tool_response(function_responses=function_responses)
                 
-                # Если цикл `async for` штатно завершился, выходим из `while` ротации ключей
                 return
 
             except Exception as e:
-                logger.warning(f"[API ERROR] Ошибка Live API на ключе {self.current_key_index} (попытка {total_keys_tried + 1}/{len(self.api_keys)}): {e}")
+                logger.warning(f"[API ERROR] Ошибка Live API на ключе {self.current_key_index}: {e}")
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys):
-                    await asyncio.sleep(1) # Ждем секунду перед попыткой с другим ключом
+                    await asyncio.sleep(1)
                 else:
-                    break # Все ключи испробованы, выходим
+                    break
 
         raise Exception("AI Live Service Unavailable")
 
