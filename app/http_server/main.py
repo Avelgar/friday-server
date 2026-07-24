@@ -8,11 +8,11 @@ import logging
 import secrets
 import hashlib
 import jwt
+import asyncio # <--- ИСПРАВЛЕНИЕ ОШИБКИ 500
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 
-# Добавляем путь к корню проекта, чтобы Python видел пакет 'app'
 sys.path.append('/opt/friday')
 
 from app.config.settings import JWT_SECRET
@@ -20,14 +20,12 @@ from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 from app.utils.email_sender import send_email
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("HTTP_Server")
 
-# --- Фоновая задача очистки токенов ---
 def clean_expired_tokens():
     last_web_cleanup = time.time()
-    web_cleanup_interval = 86400  # 24 часа
+    web_cleanup_interval = 86400  
 
     while True:
         conn = None
@@ -37,19 +35,16 @@ def clean_expired_tokens():
             conn = get_db_connection()
             cursor = conn.cursor()
             
-            # 1. Очищаем просроченные Recovery токены
             cursor.execute(
                 "UPDATE users SET RecoveryToken = NULL, RecoveryTokenDelTime = NULL "
                 "WHERE RecoveryToken IS NOT NULL AND RecoveryTokenDelTime < NOW()"
             )
             
-            # 2. Удаляем пользователей с просроченными SingUp токенами
             cursor.execute(
                 "DELETE FROM users WHERE SingUpToken IS NOT NULL AND SingUpTokenDelTime < NOW()"
             )
             conn.commit()
             
-            # 3. Очистка устаревших web-устройств (каждые 24 часа)
             current_time = time.time()
             if current_time - last_web_cleanup >= web_cleanup_interval:
                 logger.info("Запуск очистки устаревших web-устройств...")
@@ -75,16 +70,13 @@ def clean_expired_tokens():
             if conn: conn.close()
             time.sleep(3600)
 
-# Запуск потока очистки
 threading.Thread(target=clean_expired_tokens, daemon=True).start()
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    """Многопоточный сервер"""
     pass
 
 class HTTPRequestHandler(BaseHTTPRequestHandler):
     
-    # --- Хелперы ---
     def send_json(self, status_code, data):
         self.send_response(status_code)
         self.send_header('Content-type', 'application/json')
@@ -104,10 +96,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self.send_error(404, "File Not Found")
 
-    # --- Обработка запросов ---
-    
     def handle_one_request(self):
-        """Переопределение для поддержки 'сырого' JSON без заголовков"""
         try:
             self.raw_requestline = self.rfile.readline(65537)
             if not self.raw_requestline:
@@ -119,31 +108,18 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             except:
                 self.requestline = str(self.raw_requestline[:100])
 
-            # Если это не стандартный HTTP метод, пробуем распарсить как JSON
             if not self.raw_requestline.startswith((b'GET', b'POST', b'PUT', b'DELETE', b'HEAD', b'OPTIONS')):
                 try:
                     remaining_bytes = 65537 - len(self.raw_requestline)
                     if remaining_bytes > 0:
-                        # Внимание: это блокирующая операция, если клиент не закрыл соединение,
-                        # но таймаут сервера должен сработать. В оригинале было read(remaining_bytes).
-                        # Для надежности читаем сколько есть.
                         pass 
-                        # В оригинальном коде тут было чтение. Если это работает у вас сейчас - оставляем.
-                        # Но обычно rfile.read() без content-length опасен.
-                        # Предполагаем, что raw_json приходит одной пачкой.
-
-                    # Пытаемся склеить буфер (в оригинале была дочитка, тут упростим для безопасности,
-                    # либо предположим что raw_requestline содержит весь json если он короткий)
-                    # Если нужно поведение 1-в-1 как в index.py:
-                    # self.raw_requestline += self.rfile.read(remaining_bytes) 
-                    
                     data = json.loads(self.raw_requestline.decode('utf-8').strip())
 
                     self.requestline = "POST /raw_json HTTP/1.1"
                     self.command = "POST"
                     self.path = "/raw_json"
                     self.headers = {}
-                    self.raw_data = data # Сохраняем данные
+                    self.raw_data = data
 
                     self.do_POST()
                     return
@@ -188,8 +164,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
               self.send_response(200)
               self.send_header('Content-Type', 'text/html; charset=UTF-8')
               self.end_headers()
-              
-              # Прямо из кода отдаем то, что требует Яндекс
               html_content = """<html>
                   <head>
                       <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
@@ -218,7 +192,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 if not cursor.fetchone():
                     return self.redirect('/?message=recovery_invalid_token')
                 
-                # Отдаем HTML
                 self.serve_file('recovery.html', 'text/html; charset=utf-8')
             finally:
                 conn.close()
@@ -271,7 +244,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        # Получение данных
         if hasattr(self, 'raw_data'):
             data = self.raw_data
         else:
@@ -305,7 +277,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 if message_history:
                     history_text = "\n\nИСТОРИЯ СООБЩЕНИЙ ГОСТЯ:\n"
                     for msg in message_history:
-                        role = "Пользователь" if msg.get('role') == 'user' else "Ассистент"
+                        role = "Пользователь" if msg.get('role') == 'user' else "Бот"
                         content = msg.get('content', '')[:500]
                         history_text += f"{role}: {content}\n"
 
@@ -317,7 +289,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 4. Если пользователь просит сменить имя, вызови action_type="смена имени" и action_value="Новое Имя".
 {history_text}
 """
-                # Асинхронная обертка для вызова Live API
                 async def run_ai():
                     bot_text = ""
                     audio_data = bytearray()
@@ -333,7 +304,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                         system_instruction=system_instruction,
                         audio_bytes=audio_bytes,
                         image_bytes=image_bytes,
-                        history_text="", # История уже вшита в system_instruction
+                        history_text="",
                         voice_name=voice_type,
                         assistant_name=bot_name
                     ):
@@ -347,25 +318,19 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     return bot_text, audio_data, extracted_commands
 
                 try:
-                    # Запускаем асинхронный генератор в синхронном потоке
                     bot_text, audio_data, ai_commands = asyncio.run(run_ai())
                 except Exception as ex:
                     logger.error(f"Генерация HTTP провалилась: {ex}")
                     return self.send_json(500, {"status": "error", "message": f"Ошибка ИИ: {str(ex)}"})
 
-                # Формируем ответ для фронта
                 actions = []
-                
-                # Добавляем сгенерированный текст как текстовой ответ (чтобы он отобразился в баббле чата)
                 if bot_text.strip():
                     actions.append({"type": "текстовой ответ", "content": bot_text.strip()})
                     
-                # Добавляем технические команды (если он решил очистить историю или сменить имя)
                 for cmd in ai_commands:
                     for act in cmd.get('actions', []):
                         actions.append({"type": act.get('action_type', ''), "content": act.get('action_value', '')})
 
-                # Отдаем JSON + готовый Base64 звук!
                 response_data = {
                     "status": "success", 
                     "actions": actions,
@@ -381,9 +346,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     return self.send_json(400, {"status": "error", "message": "Промпт не может быть пустым"})
 
                 try:
-                    # Вызываем наш новый метод из ai_instance
                     image_base64 = ai_instance.generate_image(prompt)
-                    
                     self.send_json(200, {
                         "status": "success", 
                         "image_base64": image_base64,
@@ -540,14 +503,12 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 my_devices = []
                 processed_macs = {mac}
 
-                # Устройства аккаунта
                 if device['user_id']:
                     cursor.execute("SELECT mac, device_name, (websocket_id IS NOT NULL) as is_online FROM devices WHERE user_id = %s AND mac != %s", (device['user_id'], mac))
                     for d in cursor.fetchall():
                         account_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": True})
                         processed_macs.add(d['mac'])
 
-                # Access list
                 access_list = device['access_list'] or ''
                 access_macs = [m.strip() for m in access_list.split(';') if m.strip() and m.strip() not in processed_macs]
                 
