@@ -148,6 +148,7 @@ async def handle_command(websocket, data):
         audio_base64 = data.get('audio_base64') 
         mac = data.get('mac')
         ui_msg_id = data.get('ui_msg_id')
+        logger.info(mac)
         
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
@@ -214,6 +215,7 @@ async def handle_command(websocket, data):
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
         
         logger.info(f"[API] Отправляю в Gemini...")
+        logger.info(f"[PROMPT] {prompt}")
 
         async for chunk in ai_instance.generate_audio_stream(
             prompt_text=prompt, 
