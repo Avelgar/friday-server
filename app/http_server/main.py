@@ -9,6 +9,7 @@ import secrets
 import hashlib
 import jwt
 import asyncio # <--- ИСПРАВЛЕНИЕ ОШИБКИ 500
+import base64
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
