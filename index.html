@@ -28,16 +28,7 @@
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
-
-body {
-font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-line-height: 1.6;
-background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-color: #333;
-min-height: 100vh;
-padding: 20px;
-}
-
+body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #333; min-height: 100vh; padding: 20px; }
 .container { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1.5fr; gap: 20px; }
 @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
 header { grid-column: 1 / -1; text-align: center; margin-bottom: 30px; color: white; position: relative; }
@@ -64,7 +55,6 @@ h1 { font-size: 2.5rem; margin-bottom: 10px; text-shadow: 2px 2px 4px rgba(0, 0,
 .description ul { padding-left: 20px; margin-bottom: 15px; }
 .description li { margin-bottom: 8px; }
 
-/* Chat Section */
 .chat-section { display: flex; flex-direction: column; height: 600px; }
 .chat-header { padding: 15px 20px; background: var(--primary); color: white; display: flex; align-items: center; gap: 10px; }
 .chat-controls { display: flex; padding: 15px; background: #f0f5ff; border-bottom: 1px solid #ddd; flex-wrap: wrap; gap: 15px; align-items: center; }
@@ -264,10 +254,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
     
 <div id="registerModal" class="modal">
   <div class="modal-content">
-    <div class="modal-header">
-      <h2>Регистрация</h2>
-      <span class="modal-close">&times;</span>
-    </div>
+    <div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div>
     <form id="registerForm">
       <div class="form-group"><label for="regEmail">Email:</label><input type="email" id="regEmail" required></div>
       <div class="form-group"><label for="regLogin">Логин:</label><input type="text" id="regLogin" required></div>
@@ -281,10 +268,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
 
 <div id="loginModal" class="modal">
   <div class="modal-content">
-    <div class="modal-header">
-      <h2>Вход</h2>
-      <span class="modal-close">&times;</span>
-    </div>
+    <div class="modal-header"><h2>Вход</h2><span class="modal-close">&times;</span></div>
     <form id="loginForm">
       <div class="form-group"><label for="loginEmail">Email или логин:</label><input type="text" id="loginEmail" required></div>
       <div class="form-group"><label for="loginPassword">Пароль:</label><input type="password" id="loginPassword" required></div>
@@ -297,10 +281,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
     
 <div id="recoveryModal" class="modal">
   <div class="modal-content">
-    <div class="modal-header">
-      <h2>Восстановление пароля</h2>
-      <span class="recovery-close">&times;</span>
-    </div>
+    <div class="modal-header"><h2>Восстановление пароля</h2><span class="recovery-close">&times;</span></div>
     <form id="recoveryForm">
       <div class="form-group"><label for="recoveryEmail">Email:</label><input type="email" id="recoveryEmail" required></div>
       <button type="submit" class="modal-btn">Восстановить пароль</button>
@@ -310,10 +291,55 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
 </div>
 
     <script>
-        // === Web Audio API PCM Player (24kHz Gemini Response) ===
         let streamAudioContext = null;
         let nextPlayTime = 0;
+        let vadState = 'idle'; // idle, listening, recording, processing, playing
+        
+        // --- Web Speech API (только для стоп-слов во время проигрывания аудио) ---
+        let stopWordRecognizer = null;
+        const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
+        
+        function initStopWordDetection() {
+            if (!stopWordRecognizer && ('webkitSpeechRecognition' in window)) {
+                stopWordRecognizer = new webkitSpeechRecognition();
+                stopWordRecognizer.continuous = true;
+                stopWordRecognizer.interimResults = true;
+                stopWordRecognizer.lang = 'ru-RU';
+                stopWordRecognizer.onresult = function(e) {
+                    if (vadState !== 'playing') return;
+                    for (let i = e.resultIndex; i < e.results.length; i++) {
+                        const transcript = e.results[i][0].transcript.toLowerCase();
+                        if (stopWords.some(w => transcript.includes(w))) {
+                            console.log("ОБНАРУЖЕНО СТОП-СЛОВО! Остановка аудио.");
+                            stopPlayback();
+                            break;
+                        }
+                    }
+                };
+            }
+        }
+        
+        function startStopWordDetection() {
+            if (stopWordRecognizer) { try { stopWordRecognizer.start(); } catch(e){} }
+        }
+        function stopStopWordDetection() {
+            if (stopWordRecognizer) { try { stopWordRecognizer.stop(); } catch(e){} }
+        }
 
+        function stopPlayback() {
+            if (streamAudioContext) {
+                streamAudioContext.close();
+                streamAudioContext = null;
+                nextPlayTime = 0;
+            }
+            stopStopWordDetection();
+            if (vadState === 'playing') {
+                vadState = 'listening';
+                document.getElementById('voiceStatusText').textContent = 'Слушаю...';
+            }
+        }
+
+        // --- Web Audio API PCM Player (24kHz Gemini Response) ---
         async function playPCM24kHz(base64Data) {
             if (!base64Data) return;
             try {
@@ -322,29 +348,39 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                 }
                 const binaryString = window.atob(base64Data);
                 const bytes = new Uint8Array(binaryString.length);
-                for (let i = 0; i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                }
+                for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+                
                 const pcm16 = new Int16Array(bytes.buffer);
                 const audioBuffer = streamAudioContext.createBuffer(1, pcm16.length, 24000);
                 const channelData = audioBuffer.getChannelData(0);
-                for (let i = 0; i < pcm16.length; i++) {
-                    channelData[i] = pcm16[i] / 32768.0;
-                }
+                for (let i = 0; i < pcm16.length; i++) channelData[i] = pcm16[i] / 32768.0;
+                
                 const source = streamAudioContext.createBufferSource();
                 source.buffer = audioBuffer;
                 source.connect(streamAudioContext.destination);
 
-                if (nextPlayTime < streamAudioContext.currentTime) {
-                    nextPlayTime = streamAudioContext.currentTime;
-                }
+                if (nextPlayTime < streamAudioContext.currentTime) nextPlayTime = streamAudioContext.currentTime;
+                
+                vadState = 'playing';
+                document.getElementById('voiceStatusText').textContent = 'Бот говорит...';
+                startStopWordDetection();
+
+                source.onended = () => {
+                    if (streamAudioContext && streamAudioContext.currentTime >= nextPlayTime - 0.1) {
+                        if (vadState === 'playing') {
+                            vadState = 'listening';
+                            document.getElementById('voiceStatusText').textContent = 'Слушаю...';
+                            stopStopWordDetection();
+                        }
+                    }
+                };
+
                 source.start(nextPlayTime);
                 nextPlayTime += audioBuffer.duration;
             } catch (e) {
                 console.error("Ошибка воспроизведения аудио:", e);
             }
         }
-
         // ========================================================
 
         let userLogin = null;
@@ -352,6 +388,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
         let pingInterval = null;
         let currentFile = null;
         let messageHistory = []; 
+        let pendingBubbleId = null;
 
         function addMessage(role, content, skipHistory = false) {
             const chatMessages = document.getElementById('chatMessages');
@@ -359,23 +396,36 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             messageElement.classList.add('message');
             messageElement.classList.add(role === 'user' ? 'user-message' : 'bot-message');
 
+            if (content === '🎤 [Слушаю...]') {
+                pendingBubbleId = 'msg_' + Date.now();
+                messageElement.id = pendingBubbleId;
+            }
+
             const now = new Date();
             const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-            function escapeHtml(text) {
-                return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-            }
-
-            const displayContent = escapeHtml(content);
-
-            messageElement.innerHTML = `<div>${displayContent}</div><div class="message-time">${timeString}</div>`;
+            function escapeHtml(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
+            
+            messageElement.innerHTML = `<div>${escapeHtml(content)}</div><div class="message-time">${timeString}</div>`;
             chatMessages.appendChild(messageElement);
             chatMessages.scrollTop = chatMessages.scrollHeight;
             
-            if (!localStorage.getItem('token') && !skipHistory && role === 'user' && content !== '🎤 [Голосовое сообщение]') {
+            if (!localStorage.getItem('token') && !skipHistory && role === 'user' && !content.includes('🎤')) {
                 messageHistory.push({ role: role, content: content, timestamp: now.toISOString() });
                 localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
             }
+        }
+
+        function updatePendingBubble(text) {
+            if (!pendingBubbleId) return;
+            const b = document.getElementById(pendingBubbleId);
+            if (b) b.querySelector('div').textContent = text;
+        }
+
+        function removePendingBubble() {
+            if (!pendingBubbleId) return;
+            const b = document.getElementById(pendingBubbleId);
+            if (b) { b.remove(); pendingBubbleId = null; }
         }
         
         function processBotActions(actions) {
@@ -394,13 +444,15 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             });
             if (displayText.trim()) {
                 addMessage('assistant', displayText.trim());
+                if (!localStorage.getItem('token')) {
+                    messageHistory.push({ role: 'assistant', content: displayText.trim(), timestamp: new Date().toISOString() });
+                    localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
+                }
             }
         }
 
         const clearHistoryBtn = document.getElementById('clear-history');
-        clearHistoryBtn.addEventListener('click', async function() {
-            clearHistory();
-        });
+        clearHistoryBtn.addEventListener('click', async function() { clearHistory(); });
 
         async function clearHistory(){
             const token = localStorage.getItem('token');
@@ -418,12 +470,8 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                         chatMessages.innerHTML = '';
                         if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
                         showNotification(data.message, 'success');
-                    } else {
-                        showNotification(data.message, 'error');
-                    }
-                } catch (error) {
-                    showNotification('Произошла ошибка при очистке истории', 'error');
-                }
+                    } else showNotification(data.message, 'error');
+                } catch (error) { showNotification('Произошла ошибка при очистке истории', 'error'); }
             } else {
                 messageHistory = [];
                 localStorage.removeItem('guestMessageHistory');
@@ -446,7 +494,6 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             websocketConnection.onopen = function(event) {
                 const authMessage = JSON.stringify({ type: 'web_client_auth', token: token, login: userLogin });
                 websocketConnection.send(btoa(unescape(encodeURIComponent(authMessage))));
-                
                 pingInterval = setInterval(() => {
                     if (websocketConnection.readyState === WebSocket.OPEN) {
                         websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'ping', timestamp: Date.now() })))));
@@ -464,11 +511,9 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                         const welcomeMessage = chatMessages.querySelector('.bot-message');
                         chatMessages.innerHTML = '';
                         if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
-                        
                         data.history.forEach(msg => {
-                            if (msg.sender === 'Вы') {
-                                addMessage('user', msg.text);
-                            } else {
+                            if (msg.sender === 'Вы') addMessage('user', msg.text);
+                            else {
                                 const actionBlocks = msg.text.split('⸵');
                                 let displayText = "";
                                 actionBlocks.forEach(action => {
@@ -480,25 +525,29 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                             }
                         });
                     }
+
+                    if (data.type === 'user_transcription') {
+                        updatePendingBubble(data.text);
+                        pendingBubbleId = null; 
+                    }
                     
                     if (data.type === 'new_message' && data.actions && Array.isArray(data.actions)) {
                         if (data.text) addMessage('assistant', data.text);
                         data.actions.forEach(action => {
                             if (action.action_type === 'очистка истории') clearHistory();
-                            if (action.action_type === 'смена имени') {
-                                document.getElementById('bot-name').value = action.action_value;
-                                saveSettingsToLocalStorage();
-                            }
+                            if (action.action_type === 'смена имени') { document.getElementById('bot-name').value = action.action_value; saveSettingsToLocalStorage(); }
                         });
+                    }
+
+                    if (data.type === 'delete_message') {
+                        removePendingBubble();
                     }
 
                     if (data.type === 'audio_chunk') {
                         playPCM24kHz(data.audio_base64);
                     }
                     
-                    if (data.type === 'notification') {
-                        showNotification(data.message, data.level || 'info');
-                    }
+                    if (data.type === 'notification') showNotification(data.message, data.level || 'info');
                 } catch (error) { }
             };
             
@@ -549,15 +598,12 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                 const response = await fetch(`/verify_token?token=${encodeURIComponent(token)}`, { method: 'GET' });
                 const data = await response.json();
                 if (response.ok && data.status === 'success') {
-                    userLogin = data.user_login;
-                    return true;
+                    userLogin = data.user_login; return true;
                 } else {
-                    localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null;
-                    return false;
+                    localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null; return false;
                 }
             } catch (error) {
-                localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null;
-                return false;
+                localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null; return false;
             }
         }
 
@@ -567,9 +613,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                 if (websocketConnection) { websocketConnection.close(); websocketConnection = null; }
                 if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
                 if (token) {
-                    try {
-                        await fetch('/logout_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) });
-                    } catch (error) {}
+                    try { await fetch('/logout_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) }); } catch (error) {}
                 }
                 localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null;
                 updateAuthUI();
@@ -613,15 +657,11 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
         document.addEventListener('DOMContentLoaded', async function() {
             loadSettingsFromLocalStorage();
             loadGuestMessageHistory();
-            const hasValidToken = await verifyToken();
+            initStopWordDetection();
 
-            if (hasValidToken) {
-                updateAuthUI();
-                showNotification(`Добро пожаловать, ${userLogin}!`, 'success');
-                connectWebSocket();
-            } else {
-                updateAuthUI();
-            }
+            const hasValidToken = await verifyToken();
+            if (hasValidToken) { updateAuthUI(); connectWebSocket(); } 
+            else { updateAuthUI(); }
 
             const messageInput = document.getElementById('messageInput');
             const sendButton = document.getElementById('sendMessage');
@@ -643,20 +683,16 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                 this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px';
             });
 
-            // === VAD & PCM RECORDER (AudioWorklet) ===
-            let micAudioContext;
-            let stream;
-            let analyser;
-            let workletNode;
-            let zeroGain;
-            let isMicrophoneActive = false;
-            let isSpeaking = false;
-            let silenceTimeout = null;
+            // === AudioWorklet VAD RECORDER ===
+            let micAudioContext = null;
+            let audioWorkletNode = null;
+            let micStream = null;
             let pcmBuffer = [];
             let preBuffer = [];
-            const PRE_BUFFER_SIZE = 8000; // 0.5 секунд пребуфера
-            const SILENCE_THRESHOLD = 3; 
-            const SILENCE_WAIT_MS = 1500;
+            let silenceFrames = 0;
+            const VAD_THRESHOLD = 0.015; // Порог громкости (чувствительность)
+            const SILENCE_FRAMES = 16000 * 1.5; // 1.5 сек тишины
+            const PRE_BUFFER_FRAMES = 8000; // 0.5 сек пребуфера
 
             const workletCode = `
             class PCMProcessor extends AudioWorkletProcessor {
@@ -665,11 +701,13 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                     if (input && input.length > 0) {
                         const channelData = input[0];
                         const pcm16 = new Int16Array(channelData.length);
+                        let sum = 0;
                         for (let i = 0; i < channelData.length; i++) {
                             let s = Math.max(-1, Math.min(1, channelData[i]));
                             pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                            sum += Math.abs(s);
                         }
-                        this.port.postMessage(pcm16);
+                        this.port.postMessage({ pcm: pcm16, volume: sum / channelData.length });
                     }
                     return true;
                 }
@@ -688,116 +726,84 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             }
 
             microphoneBtn.addEventListener('click', async function() {
-                if (!isMicrophoneActive) {
+                if (vadState === 'idle') {
                     try {
-                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
                         micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-
+                        
                         const blob = new Blob([workletCode], { type: 'application/javascript' });
                         const workletUrl = URL.createObjectURL(blob);
                         await micAudioContext.audioWorklet.addModule(workletUrl);
 
-                        const source = micAudioContext.createMediaStreamSource(stream);
-                        analyser = micAudioContext.createAnalyser();
-                        analyser.fftSize = 512;
-                        analyser.smoothingTimeConstant = 0.1;
-
-                        workletNode = new AudioWorkletNode(micAudioContext, 'pcm-processor');
-                        zeroGain = micAudioContext.createGain();
-                        zeroGain.gain.value = 0; // Глушим звук, чтобы не было эха
-
-                        source.connect(analyser);
-                        analyser.connect(workletNode);
-                        workletNode.connect(zeroGain);
+                        const source = micAudioContext.createMediaStreamSource(micStream);
+                        audioWorkletNode = new AudioWorkletNode(micAudioContext, 'pcm-processor');
+                        
+                        const zeroGain = micAudioContext.createGain();
+                        zeroGain.gain.value = 0;
+                        
+                        source.connect(audioWorkletNode);
+                        audioWorkletNode.connect(zeroGain);
                         zeroGain.connect(micAudioContext.destination);
 
-                        workletNode.port.onmessage = (e) => {
-                            const chunk = e.data;
-                            if (isSpeaking) {
-                                pcmBuffer.push(...chunk);
-                            } else {
-                                preBuffer.push(...chunk);
-                                if (preBuffer.length > PRE_BUFFER_SIZE) {
-                                    preBuffer.splice(0, preBuffer.length - PRE_BUFFER_SIZE);
-                                }
-                            }
-                        };
-
-                        isMicrophoneActive = true;
+                        vadState = 'listening';
                         this.classList.add('active');
                         this.querySelector('span').textContent = 'Микрофон включен';
                         voiceStatus.classList.add('active');
-                        voiceStatusText.textContent = 'Жду голос...';
-                        
-                        checkVolume();
+                        voiceStatusText.textContent = 'Слушаю...';
+
+                        audioWorkletNode.port.onmessage = (e) => {
+                            if (vadState === 'playing' || vadState === 'processing') return;
+
+                            const { pcm, volume } = e.data;
+
+                            if (vadState === 'listening') {
+                                preBuffer.push(...pcm);
+                                if (preBuffer.length > PRE_BUFFER_FRAMES) preBuffer.splice(0, preBuffer.length - PRE_BUFFER_FRAMES);
+
+                                if (volume > VAD_THRESHOLD) {
+                                    vadState = 'recording';
+                                    pcmBuffer = [...preBuffer];
+                                    silenceFrames = 0;
+                                    voiceStatusText.textContent = 'Распознавание...';
+                                    voiceStatus.classList.add('listening');
+                                    addMessage('user', '🎤 [Слушаю...]');
+                                }
+                            } else if (vadState === 'recording') {
+                                pcmBuffer.push(...pcm);
+                                if (volume < VAD_THRESHOLD) {
+                                    silenceFrames += pcm.length;
+                                    if (silenceFrames > SILENCE_FRAMES) {
+                                        vadState = 'processing';
+                                        voiceStatusText.textContent = 'Отправка...';
+                                        voiceStatus.classList.remove('listening');
+                                        
+                                        const pcm16 = new Int16Array(pcmBuffer);
+                                        const base64Audio = bufferToBase64(pcm16.buffer);
+                                        pcmBuffer = []; preBuffer = [];
+                                        
+                                        sendToServer("", "голосовое сообщение", base64Audio);
+                                    }
+                                } else {
+                                    silenceFrames = 0;
+                                }
+                            }
+                        };
                     } catch (err) {
                         showNotification('Ошибка доступа к микрофону', 'error');
                     }
                 } else {
-                    isMicrophoneActive = false;
+                    vadState = 'idle';
                     this.classList.remove('active');
                     this.querySelector('span').textContent = 'Включить микрофон';
                     voiceStatus.classList.remove('active', 'listening');
+                    pcmBuffer = []; preBuffer = [];
                     
-                    if (silenceTimeout) { clearTimeout(silenceTimeout); silenceTimeout = null; }
-                    isSpeaking = false;
-                    pcmBuffer = [];
-                    preBuffer = [];
-
-                    if (workletNode && micAudioContext) {
-                        workletNode.disconnect();
-                        analyser.disconnect();
-                        zeroGain.disconnect();
-                        stream.getTracks().forEach(track => track.stop());
-                        micAudioContext.close();
-                    }
+                    if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null; }
+                    if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
+                    if (micAudioContext) { micAudioContext.close(); micAudioContext = null; }
+                    stopPlayback();
                 }
             });
-
-            function checkVolume() {
-                if (!isMicrophoneActive) return;
-
-                const dataArray = new Uint8Array(analyser.frequencyBinCount);
-                analyser.getByteFrequencyData(dataArray);
-
-                let sum = 0;
-                for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-                const average = sum / dataArray.length;
-
-                if (average > SILENCE_THRESHOLD) {
-                    if (!isSpeaking) {
-                        isSpeaking = true;
-                        pcmBuffer = [...preBuffer];
-                        preBuffer = [];
-                        voiceStatus.classList.add('listening');
-                        voiceStatusText.textContent = 'Слушаю вас...';
-                    }
-                    if (silenceTimeout) { clearTimeout(silenceTimeout); silenceTimeout = null; }
-                } else {
-                    if (isSpeaking && !silenceTimeout) {
-                        silenceTimeout = setTimeout(() => {
-                            isSpeaking = false;
-                            silenceTimeout = null;
-                            voiceStatus.classList.remove('listening');
-                            voiceStatusText.textContent = 'Отправка...';
-                            sendAudioData();
-                        }, SILENCE_WAIT_MS);
-                    }
-                }
-                requestAnimationFrame(checkVolume);
-            }
-
-            function sendAudioData() {
-                if (pcmBuffer.length === 0) return;
-                const pcm16 = new Int16Array(pcmBuffer);
-                const base64Audio = bufferToBase64(pcm16.buffer);
-                pcmBuffer = [];
-                preBuffer = [];
-
-                addMessage('user', '🎤 [Голосовое сообщение]');
-                sendToServer("", "голосовое сообщение", base64Audio);
-                setTimeout(() => { if (isMicrophoneActive) voiceStatusText.textContent = 'Жду голос...'; }, 500);
-            }
             // ===========================================
 
             async function sendToServer(prompt, command_type, audio_base64 = null) {
@@ -824,13 +830,13 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                             reader.onload = function() {
                                 requestData.screenshot = reader.result.split(',')[1];
                                 websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
-                                currentFile = null;
-                                document.getElementById('imagePreviewContainer').style.display = 'none';
-                                fileUpload.value = '';
+                                currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
+                                if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; }
                             };
                             reader.readAsDataURL(file);
                         } else {
                             websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
+                            if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; }
                         }
                     } else {
                         const requestData = {
@@ -854,35 +860,34 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                             sendFetchRequest(requestData);
                         }
                     }
-                } catch (error) { showNotification('Ошибка при обработке запроса', 'error'); }
+                } catch (error) { 
+                    showNotification('Ошибка при обработке запроса', 'error'); 
+                    if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; removePendingBubble(); }
+                }
             }
 
             async function sendFetchRequest(requestData) {
                 try {
-                    const response = await fetch('/generate', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(requestData)
-                    });
-
+                    const response = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestData) });
                     if (!response.ok) throw new Error(`Ошибка сервера: ${response.status}`);
                     const data = await response.json();
                     
                     if (data.status === 'success') {
-                        if (data.actions) {
-                            processBotActions(data.actions);
-                        }
-                        // Воспроизводим звук от сервера!
-                        if (data.audio_base64) {
-                            playPCM24kHz(data.audio_base64);
-                        }
-                    } else { throw new Error(data.message || 'Ошибка сервера'); }
+                        if (data.user_text && pendingBubbleId) updatePendingBubble(data.user_text);
+                        else if (!data.user_text && pendingBubbleId) removePendingBubble();
+                        
+                        if (data.actions && data.actions.length > 0) processBotActions(data.actions);
+                        if (data.audio_base64) playPCM24kHz(data.audio_base64);
+                        else if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; }
+                    } else { 
+                        throw new Error(data.message || 'Ошибка сервера'); 
+                    }
                     
-                    currentFile = null;
-                    document.getElementById('imagePreviewContainer').style.display = 'none';
-                    fileUpload.value = '';
-                    
-                } catch (error) { showNotification('Ошибка при обработке запроса', 'error'); }
+                    currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
+                } catch (error) { 
+                    showNotification('Ошибка при обработке запроса', 'error'); 
+                    if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; removePendingBubble(); }
+                }
             }
 
             sendButton.addEventListener('click', function() {
@@ -904,20 +909,16 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                 const file = e.target.files[0];
                 const previewContainer = document.getElementById('imagePreviewContainer');
                 previewContainer.innerHTML = ''; previewContainer.style.display = 'none'; currentFile = null; 
-                
                 if (file) {
                     if (!file.type.match('image/png') && !file.type.match('image/jpeg')) {
                         showNotification('Можно загружать только PNG и JPG', 'error'); this.value = ''; return;
                     }
                     currentFile = file;
-                    
                     const reader = new FileReader();
                     reader.onload = function(e) {
                         const img = document.createElement('img'); img.src = e.target.result; img.classList.add('image-preview');
                         const removeBtn = document.createElement('button'); removeBtn.classList.add('remove-image'); removeBtn.innerHTML = '&times;';
-                        removeBtn.addEventListener('click', function() {
-                            previewContainer.style.display = 'none'; fileUpload.value = ''; currentFile = null;
-                        });
+                        removeBtn.addEventListener('click', function() { previewContainer.style.display = 'none'; fileUpload.value = ''; currentFile = null; });
                         previewContainer.appendChild(img); previewContainer.appendChild(removeBtn); previewContainer.style.display = 'block';
                     };
                     reader.readAsDataURL(file);
@@ -929,7 +930,6 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
               if (event.target === document.getElementById('registerModal') || event.target === document.getElementById('loginModal') || event.target === document.getElementById('recoveryModal')) closeModals();
             });
 
-            // Обработка форм авторизации (оставлено как было у тебя)
             document.getElementById('registerForm').addEventListener('submit', async function(e) {
               e.preventDefault();
               const email = document.getElementById('regEmail').value; const login = document.getElementById('regLogin').value; const password = document.getElementById('regPassword').value; const passwordConfirm = document.getElementById('regPasswordConfirm').value; const responseElement = document.getElementById('registerResponse'); const submitButton = this.querySelector('button[type="submit"]'); const originalText = submitButton.textContent;
