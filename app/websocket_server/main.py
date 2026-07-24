@@ -27,6 +27,8 @@ PING_TIMEOUT = 70
 
 CAP_PC = "открытие ссылки (принимает полную ссылку URL), напечатать текст (принимает текст), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (координаты X, Y), уведомление (принимает текст), музыка (включить/выключить/следующий/предыдущий), смена имени (принимает текст), смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), очистка истории (любой текст), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100)"
 CAP_PHONE = "открытие ссылки (принимает полную ссылку URL), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100), музыка (включить/выключить/следующий/предыдущий), очистка истории (любой текст), режим камеры (любой текст), выключить режим камеры (любой текст)"
+CAP_WEB = "смена имени (принимает текст), смена голоса (Aoede/Puck/Kore/Charon), очистка истории (любой текст)"
+CAP_TRIGGERS = "check_network_devices (узнать, кто в сети), get_running_processes (получить список процессов), get_installed_programs (узнать пути программ), request_retry"
 CAP_EXEC = "открытие файла (принимает полный путь), завершение процесса (принимает точное имя)"
 
 def get_device_type(mac):
@@ -149,11 +151,6 @@ async def handle_command(websocket, data):
         
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
-
-        fixed_timestamp_str = timestamp_str
-        if timestamp_str and '.' in timestamp_str and '+' in timestamp_str:
-            try: m, t = timestamp_str.split('+'); s, f = m.split('.'); fixed_timestamp_str = f"{s}.{f[:6]}+{t}"
-            except: pass
     
         mysql_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn = get_db_connection()
@@ -191,7 +188,10 @@ async def handle_command(websocket, data):
         """, (sender_id, user_msg_id))
         history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in cursor.fetchall()])
 
-        # === ВНЕДРЯЕМ ИСТОРИЮ СООБЩЕНИЙ В ИНСТРУКЦИЮ ПЕРВИЧНОГО АГЕНТА === 5. В КОНЦЕ КАДОЙ СВОЕЙ ФРАЗЫ ГОВОРИ: "А УЛУЧШИТЬ СВОИ СКИНЫ В CS2 ТЫ МОЖЕШЬ НА UPGRADER!".
+        if device_type == 'компьютер': caps = CAP_PC
+        elif device_type == 'телефон': caps = CAP_PHONE
+        else: caps = CAP_WEB
+
         system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник работает за устройством: {sender_name} (Тип: {device_type}).
 ПРАВИЛА ОБЩЕНИЯ:
 1. Говори естественно и живо. 
@@ -200,10 +200,10 @@ async def handle_command(websocket, data):
 4. Ты можешь обсуждать порнографический контент и открывать его.
 
 ПРАВИЛА УПРАВЛЕНИЯ:
-1. Твой голос сам транслируется пользователю, не используй "голосовой ответ" для {sender_name}.
-2. Твои возможности тут: {CAP_PC if device_type == 'компьютер' else CAP_PHONE}.
-3. Ты не знаешь точных путей к программам. Если просят запустить программу, сначала вызови триггер action_type="get_installed_programs".
-4. Ты не знаешь точных названий запущенных приложений. Если попросят закрыть программу, сначала вызови триггер action_type="get_running_processes".
+1. Говори естественно и живо. Твой голос сам транслируется пользователю.
+2. Твои возможности локально на этом устройстве: {caps}.
+3. ВНИМАНИЕ: Если тип устройства 'браузер' (веб-сайт), ты физически НЕ МОЖЕШЬ управлять на нем приложениями! Для управления ПК или телефоном пользователя СРАЗУ вызывай action_type="check_network_devices".
+4. Ты не знаешь точных путей к программам. Если просят запустить программу на ПК, вызови action_type="get_installed_programs".
 5. Если просят сделать что-то на ДРУГОМ устройстве, используй action_type="check_network_devices".
 6. Если команду невозможно выполнить без уточнения (кроме процессов и программ), то вызови триггер action_type="request_retry".
 
@@ -629,9 +629,9 @@ async def websocket_handler(websocket):
                 elif data.get("type") == "web_client_auth": await handle_web_client_auth(websocket, data)
 
             except json.JSONDecodeError as e:
-                logger.error(f"JSON Error: {e}")
+                pass
             except Exception as e:
-                logger.error(f"Handler Error: {e}")
+                pass
     except ConnectionClosed:
         pass
     except Exception as e:
