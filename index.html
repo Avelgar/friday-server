@@ -823,20 +823,21 @@ opacity: 0.8;
             </div>
             <div class="chat-controls">
                 <div class="control-group">
-                    <label for="voice-type">Тип ввода:</label>
-                    <select id="voice-type">
-                        <option value="name-response-command" selected>имя-ответ-команда</option>
-                        <option value="name-command">имя+команда</option>
-                        <option value="conversation">разговор</option>
-                    </select>
-                </div>
-                <div class="control-group">
                     <label for="bot-name">Имя бота:</label>
                     <input type="text" id="bot-name" value="Пятница">
                 </div>
+                <div class="control-group">
+                    <label for="voice-type">Голос:</label>
+                    <select id="voice-type">
+                        <option value="Aoede" selected>Aoede (Женский)</option>
+                        <option value="Puck">Puck (Мужской)</option>
+                        <option value="Kore">Kore (Строгий)</option>
+                        <option value="Charon">Charon (Эксперт)</option>
+                    </select>
+                </div>
                 <button id="microphone-btn" class="microphone-btn">
                     <i class="fas fa-microphone"></i>
-                    <span>Включить микрофон</span>
+                    <span>Запись (Нажми и говори)</span>
                 </button>
                 <button id="clear-history" class="microphone-btn" style="background: var(--warning);">
                     <i class="fas fa-trash"></i>
@@ -1567,83 +1568,77 @@ opacity: 0.8;
                     saveSettingsToLocalStorage();
                 }, 500);
             });
-            // Проверяем поддержку Web Speech API
-            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                recognition = new SpeechRecognition();
-                recognition.continuous = true;  // Непрерывное распознавание
-                recognition.interimResults = true;
-                recognition.lang = 'ru-RU';
+            
+            // === НОВЫЙ АУДИО РЕКОРДЕР (16000Hz PCM) ===
+            let audioContext;
+            let processor;
+            let audioInput;
+            let audioChunks = [];
+            let stream;
 
-                recognition.onstart = function() {
-                    isListening = true;
-                    microphoneBtn.classList.add('listening');
-                    voiceStatus.classList.add('active', 'listening');
-                    voiceStatusText.textContent = 'Слушаю...';
-                };
-
-                recognition.onresult = function(event) {
-                    let interimTranscript = '';
-                    let finalTranscript = '';
-                    
-                    for (let i = event.resultIndex; i < event.results.length; i++) {
-                        if (event.results[i].isFinal) {
-                            finalTranscript += event.results[i][0].transcript;
-                        } else {
-                            interimTranscript += event.results[i][0].transcript;
-                        }
-                    }
-                    
-                    // Показываем промежуточные результаты
-                    if (interimTranscript) {
-                        voiceStatusText.textContent = interimTranscript;
-                    }
-                    
-                    // Обрабатываем окончательные результаты
-                    if (finalTranscript) {
-                        processVoiceCommand(finalTranscript);
-                    }
-                };
-
-                recognition.onend = function() {
-                    isListening = false;
-                    microphoneBtn.classList.remove('listening');
-                    voiceStatus.classList.remove('active', 'listening');
-                    
-                    // Если микрофон все еще активен, перезапускаем распознавание
-                    if (isMicrophoneActive) {
-                        try {
-                            recognition.start();
-                        } catch (error) {
-                            console.error('Ошибка при перезапуске распознавания:', error);
-                            showNotification('Ошибка при перезапуске распознавания речи', 'error');
-                            // В случае ошибки выключаем микрофон
-                            isMicrophoneActive = false;
-                            microphoneBtn.classList.remove('active');
-                            microphoneBtn.querySelector('span').textContent = 'Включить микрофон';
-                            microphoneBtn.querySelector('i').className = 'fas fa-microphone';
-                        }
-                    }
-                };
-
-                recognition.onerror = function(event) {
-                    console.error('Ошибка распознавания речи:', event.error);
-                    isListening = false;
-                    microphoneBtn.classList.remove('listening');
-                    voiceStatus.classList.remove('active', 'listening');
-                    
-                    if (event.error === 'not-allowed') {
-                        showNotification('Доступ к микрофону запрещен. Разрешите использование микрофона в настройках браузера.', 'error');
-                    } else {
-                        showNotification('Ошибка распознавания речи: ' + event.error, 'error');
-                    }
-                };
-            } else {
-                // Браузер не поддерживает распознавание речи
-                microphoneBtn.disabled = true;
-                microphoneBtn.title = 'Ваш браузер не поддерживает распознавание речи';
-                showNotification('Ваш браузер не поддерживает распознавание речи', 'error');
+            function bufferToBase64(buffer) {
+                let binary = '';
+                const bytes = new Uint8Array(buffer);
+                for (let i = 0; i < bytes.byteLength; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                return window.btoa(binary);
             }
+
+            microphoneBtn.addEventListener('click', async function() {
+                if (!isMicrophoneActive) {
+                    // НАЧАЛО ЗАПИСИ
+                    try {
+                        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                        audioInput = audioContext.createMediaStreamSource(stream);
+                        processor = audioContext.createScriptProcessor(4096, 1, 1);
+                        
+                        audioChunks = [];
+
+                        processor.onaudioprocess = function(e) {
+                            const channelData = e.inputBuffer.getChannelData(0);
+                            for (let i = 0; i < channelData.length; i++) {
+                                // Конвертируем Float32 (браузер) в Int16 (сервер)
+                                let s = Math.max(-1, Math.min(1, channelData[i]));
+                                audioChunks.push(s < 0 ? s * 0x8000 : s * 0x7FFF);
+                            }
+                        };
+
+                        audioInput.connect(processor);
+                        processor.connect(audioContext.destination);
+
+                        isMicrophoneActive = true;
+                        this.classList.add('active', 'listening');
+                        this.querySelector('span').textContent = 'Остановить и отправить';
+                        voiceStatus.classList.add('active', 'listening');
+                        voiceStatusText.textContent = 'Идет запись...';
+                    } catch (err) {
+                        showNotification('Ошибка доступа к микрофону', 'error');
+                        console.error(err);
+                    }
+                } else {
+                    // ОСТАНОВКА ЗАПИСИ
+                    isMicrophoneActive = false;
+                    this.classList.remove('active', 'listening');
+                    this.querySelector('span').textContent = 'Запись (Нажми и говори)';
+                    voiceStatus.classList.remove('active', 'listening');
+                    
+                    if (processor && audioInput) {
+                        processor.disconnect();
+                        audioInput.disconnect();
+                        stream.getTracks().forEach(track => track.stop());
+                        
+                        // Собираем Int16Array
+                        const pcm16 = new Int16Array(audioChunks);
+                        const base64Audio = bufferToBase64(pcm16.buffer);
+                        
+                        // Отправляем на сервер
+                        addMessage('user', '🎤 [Голосовое сообщение]');
+                        sendToServer("", "голосовое сообщение", base64Audio);
+                    }
+                }
+            });
 
             // Функция для экранирования HTML
             function escapeHtml(text) {
@@ -1757,21 +1752,23 @@ opacity: 0.8;
             }
 
 
-            async function sendToServer(prompt, command_type) {
+            async function sendToServer(prompt, command_type, audio_base64 = null) {
                 try {
                     const token = localStorage.getItem('token');
                     const userLogin = localStorage.getItem('userLogin');
                     const file = currentFile;
+                    const selectedVoice = document.getElementById('voice-type').value; // Берем голос!
                     
-                    // Если пользователь авторизован, отправляем через WebSocket
+                    // Если пользователь авторизован, отправляем через WebSocket (ЭТО МЫ НАСТРОИМ ВО ВТОРОЙ ЧАСТИ)
                     if (token && userLogin && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
-                        // Подготавливаем данные для отправки через WebSocket
                         const requestData = {
                             type: 'web_command',
                             command: prompt,
+                            audio_base64: audio_base64,
                             token: token,
                             timestamp: new Date().toISOString(),
                             name: botName.value.trim(),
+                            voice_type: selectedVoice,
                             command_type: command_type
                         };
                         
@@ -1805,13 +1802,15 @@ opacity: 0.8;
                         showNotification('Команда отправлена через WebSocket', 'info');
                         
                     } else {
+                        // HTTP ЗАПРОС (НЕАВТОРИЗОВАННЫЙ)
                         const requestData = {
                             prompt: prompt,
+                            audio_base64: audio_base64,
                             bot_name: botName.value.trim().toLowerCase(),
+                            voice_type: selectedVoice,
                             command_type: command_type
                         };
                         
-                        // Добавляем историю сообщений для неавторизованных пользователей
                         if (!token) {
                             requestData.message_history = messageHistory;
                         }
@@ -1819,26 +1818,15 @@ opacity: 0.8;
                         if (file) {
                             const reader = new FileReader();
                             reader.onload = function() {
-                                // Извлекаем чистый base64 без data URL префикса
-                                const base64Data = reader.result.split(',')[1];
-                                requestData.screenshot = base64Data;
-                                
-                                // Отправляем запрос на сервер после чтения файла
+                                requestData.screenshot = reader.result.split(',')[1];
                                 sendFetchRequest(requestData);
                             };
                             reader.readAsDataURL(file);
                         } else {
-                            // Если файла нет, отправляем сразу
                             sendFetchRequest(requestData);
                         }
                     }
                 } catch (error) {
-                    console.error('Ошибка при отправке запроса:', error);
-                    
-                    // Показываем сообщение об ошибке
-                    const errorMessage = 'Произошла ошибка при обработке запроса. Попробуйте еще раз.';
-                    addMessage('assistant', errorMessage);
-                    
                     showNotification('Ошибка при обработке запроса', 'error');
                 }
             }
@@ -1875,6 +1863,10 @@ opacity: 0.8;
                             });
                             
                             addMessage('assistant', displayText.trim());
+                        }
+                        if (data.audio_base64) {
+                            const audio = new Audio("data:audio/pcm;rate=24000;base64," + data.audio_base64);
+                            audio.play();
                         }
                     }
                     else {
