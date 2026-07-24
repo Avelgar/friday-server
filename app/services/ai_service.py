@@ -37,8 +37,9 @@ class AIService:
 
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         self._rotate_key()
+        voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
-        mapped_voice = voice_name if voice_name in valid_voices else "Aoede"
+        mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         client = self._get_client()
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"], 
@@ -73,8 +74,9 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     async def generate_audio_stream(self, prompt_text, system_instruction, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница"):
+        voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
-        mapped_voice = voice_name if voice_name in valid_voices else "Aoede"
+        mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
 
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
