@@ -339,7 +339,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             }
         }
 
-        // --- Web Audio API PCM Player (24kHz Gemini Response) ---
+        // --- Web Audio API PCM Player (Очередь воспроизведения) ---
         async function playPCM24kHz(base64Data) {
             if (!base64Data) return;
             try {
@@ -390,13 +390,16 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
         let messageHistory = []; 
         let pendingBubbleId = null;
 
-        function addMessage(role, content, skipHistory = false) {
+        // Обновленная функция addMessage с поддержкой склеивания текста по msgId
+        function addMessage(role, content, skipHistory = false, msgId = null) {
             const chatMessages = document.getElementById('chatMessages');
             const messageElement = document.createElement('div');
             messageElement.classList.add('message');
             messageElement.classList.add(role === 'user' ? 'user-message' : 'bot-message');
 
-            if (content === '🎤 [Слушаю...]') {
+            if (msgId) {
+                messageElement.id = 'msg_' + msgId;
+            } else if (content === '🎤 [Слушаю...]') {
                 pendingBubbleId = 'msg_' + Date.now();
                 messageElement.id = pendingBubbleId;
             }
@@ -411,6 +414,9 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             chatMessages.scrollTop = chatMessages.scrollHeight;
             
             if (!localStorage.getItem('token') && !skipHistory && role === 'user' && !content.includes('🎤')) {
+                messageHistory.push({ role: role, content: content, timestamp: now.toISOString() });
+                localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
+            } else if (!localStorage.getItem('token') && !skipHistory && role === 'assistant') {
                 messageHistory.push({ role: role, content: content, timestamp: now.toISOString() });
                 localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
             }
@@ -444,10 +450,6 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             });
             if (displayText.trim()) {
                 addMessage('assistant', displayText.trim());
-                if (!localStorage.getItem('token')) {
-                    messageHistory.push({ role: 'assistant', content: displayText.trim(), timestamp: new Date().toISOString() });
-                    localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
-                }
             }
         }
 
@@ -512,7 +514,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                         chatMessages.innerHTML = '';
                         if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
                         data.history.forEach(msg => {
-                            if (msg.sender === 'Вы') addMessage('user', msg.text);
+                            if (msg.sender === 'Вы') addMessage('user', msg.text, true);
                             else {
                                 const actionBlocks = msg.text.split('⸵');
                                 let displayText = "";
@@ -521,7 +523,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                                     if (sepIndex !== -1) displayText += action.substring(sepIndex + 1).trim() + '\n\n';
                                     else displayText += action + '\n\n';
                                 });
-                                if (displayText.trim()) addMessage('assistant', displayText.trim());
+                                if (displayText.trim()) addMessage('assistant', displayText.trim(), true);
                             }
                         });
                     }
@@ -531,12 +533,39 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                         pendingBubbleId = null; 
                     }
                     
-                    if (data.type === 'new_message' && data.actions && Array.isArray(data.actions)) {
-                        if (data.text) addMessage('assistant', data.text);
-                        data.actions.forEach(action => {
-                            if (action.action_type === 'очистка истории') clearHistory();
-                            if (action.action_type === 'смена имени') { document.getElementById('bot-name').value = action.action_value; saveSettingsToLocalStorage(); }
-                        });
+                    // ИСПРАВЛЕННАЯ ЛОГИКА СКЛЕИВАНИЯ БАББЛОВ В ЧАТЕ!
+                    if (data.type === 'new_message') {
+                        if (data.text) {
+                            const msgId = data.message_id || data.ui_msg_id;
+                            const bubbleId = msgId ? 'msg_' + msgId : null;
+                            let existingBubble = bubbleId ? document.getElementById(bubbleId) : null;
+
+                            if (existingBubble) {
+                                let textDiv = existingBubble.querySelector('div:first-child');
+                                textDiv.textContent += data.text; // Плавно дописываем кусок
+                                
+                                const chatMessages = document.getElementById('chatMessages');
+                                chatMessages.scrollTop = chatMessages.scrollHeight;
+
+                                // Обновляем историю для неавторизованных (если вдруг понадобится)
+                                if (!localStorage.getItem('token') && messageHistory.length > 0) {
+                                    if (messageHistory[messageHistory.length - 1].role === 'assistant') {
+                                        messageHistory[messageHistory.length - 1].content += data.text;
+                                        localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
+                                    }
+                                }
+                            } else {
+                                // Баббла еще нет, создаем новый
+                                addMessage('assistant', data.text, false, msgId);
+                            }
+                        }
+                        
+                        if (data.actions && Array.isArray(data.actions)) {
+                            data.actions.forEach(action => {
+                                if (action.action_type === 'очистка истории') clearHistory();
+                                if (action.action_type === 'смена имени') { document.getElementById('bot-name').value = action.action_value; saveSettingsToLocalStorage(); }
+                            });
+                        }
                     }
 
                     if (data.type === 'delete_message') {
@@ -690,9 +719,9 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             let pcmBuffer = [];
             let preBuffer = [];
             let silenceFrames = 0;
-            const VAD_THRESHOLD = 0.015; // Порог громкости (чувствительность)
-            const SILENCE_FRAMES = 16000 * 1.5; // 1.5 сек тишины
-            const PRE_BUFFER_FRAMES = 8000; // 0.5 сек пребуфера
+            const VAD_THRESHOLD = 0.015;
+            const SILENCE_FRAMES = 16000 * 1.5; 
+            const PRE_BUFFER_FRAMES = 8000; 
 
             const workletCode = `
             class PCMProcessor extends AudioWorkletProcessor {
