@@ -210,7 +210,8 @@ async def handle_command(websocket, data):
 {history_for_prompt}
 """
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
-        
+        logger.info(f"system_instruction: {system_instruction}")
+        logger.info(f"caps: {caps}")
         logger.info(f"[API] Отправляю в Gemini...")
 
         async for chunk in ai_instance.generate_audio_stream(
