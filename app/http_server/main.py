@@ -236,9 +236,9 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     async for chunk in ai_instance.generate_audio_stream(
                         prompt_text=prompt_formatted,
                         system_instruction=system_instruction,
+                        allowed_actions="смена имени, смена голоса, очистка истории", # <--- ВОТ ЭТО
                         audio_bytes=audio_bytes,
                         image_bytes=image_bytes,
-                        history_text="", 
                         voice_name=voice_type,
                         assistant_name=bot_name
                     ):

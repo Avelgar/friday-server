@@ -73,7 +73,7 @@ class AIService:
                 
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
-    async def generate_audio_stream(self, prompt_text, system_instruction, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница"):
+    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
@@ -81,7 +81,7 @@ class AIService:
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
-            has_yielded_data = False # Флаг! Если мы уже начали отвечать, перебирать ключи ЗАПРЕЩЕНО.
+            has_yielded_data = False
             
             try:
                 client = self._get_client()
@@ -100,7 +100,7 @@ class AIService:
                                         items=types.Schema(
                                             type=types.Type.OBJECT,
                                             properties={
-                                                "action_type": types.Schema(type=types.Type.STRING, description="СТРОГО ОДИН ИЗ: открытие ссылки, открытие файла, завершение процесса, напечатать текст, музыка, изменение громкости, check_network_devices, get_running_processes, get_installed_programs"),
+                                                "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
                                                 "action_value": types.Schema(type=types.Type.STRING, description="Значение (полная ссылка, текст или пусто)")
                                             },
                                             required=["action_type", "action_value"]

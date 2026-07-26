@@ -25,10 +25,16 @@ id_to_websocket = {}
 last_ping_times = {}     
 PING_TIMEOUT = 70
 
+# Человекочитаемые описания для промпта
 CAP_PC = "открытие ссылки (принимает полную ссылку URL), напечатать текст (принимает текст), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (координаты X, Y), уведомление (принимает текст), музыка (включить/выключить/следующий/предыдущий), смена имени (принимает текст), смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), очистка истории (любой текст), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100)"
 CAP_PHONE = "открытие ссылки (принимает полную ссылку URL), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100), музыка (включить/выключить/следующий/предыдущий), очистка истории (любой текст), режим камеры (любой текст), выключить режим камеры (любой текст)"
 CAP_WEB = "смена имени (принимает текст), смена голоса (Aoede/Puck/Kore/Charon), очистка истории (любой текст)"
 CAP_EXEC = "открытие файла (принимает полный путь), завершение процесса (принимает точное имя)"
+
+# Жесткий словарь команд для JSON Схемы
+ACT_PC = "открытие ссылки, открытие файла, завершение процесса, напечатать текст, нажать кнопку мыши, переместить мышь, уведомление, музыка, смена имени, смена голоса, очистка истории, изменение громкости, изменение яркости, check_network_devices, get_running_processes, get_installed_programs, request_retry"
+ACT_PHONE = "открытие ссылки, изменение громкости, изменение яркости, музыка, очистка истории, режим камеры, выключить режим камеры, check_network_devices, get_running_processes, get_installed_programs, request_retry"
+ACT_WEB = "смена имени, смена голоса, очистка истории, check_network_devices"
 
 def get_device_type(mac):
     if not mac: return "неизвестно"
@@ -189,11 +195,17 @@ async def handle_command(websocket, data):
         """, (sender_id, user_msg_id))
         history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in cursor.fetchall()])
 
-        if device_type == 'компьютер': caps = CAP_PC
-        elif device_type == 'телефон': caps = CAP_PHONE
-        else: caps = CAP_WEB
+        if device_type == 'компьютер': 
+            caps = CAP_PC
+            allowed_actions = ACT_PC
+        elif device_type == 'телефон': 
+            caps = CAP_PHONE
+            allowed_actions = ACT_PHONE
+        else: 
+            caps = CAP_WEB
+            allowed_actions = ACT_WEB
 
-        # === ДИНАМИЧЕСКИЕ ПРАВИЛА ДЛЯ ПК И ТЕЛЕФОНА ===
+        # === ДИНАМИЧЕСКИЕ ПРАВИЛА ===
         local_rules = ""
         if device_type in ['компьютер', 'телефон']:
             local_rules = f"""
@@ -215,14 +227,15 @@ async def handle_command(websocket, data):
 {history_for_prompt}
 """
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
+        
         logger.info(f"[API] Отправляю в Gemini...")
 
         async for chunk in ai_instance.generate_audio_stream(
             prompt_text=prompt, 
             system_instruction=system_instruction,
+            allowed_actions=allowed_actions, # <--- ПЕРЕДАЕМ ЖЕСТКИЙ СПИСОК В СХЕМУ
             audio_bytes=audio_bytes,
             image_bytes=image_bytes, 
-            history_text=history_for_prompt, 
             voice_name=voice_name, 
             assistant_name=name
         ):
@@ -382,6 +395,11 @@ async def handle_target_command(websocket, data):
             
             accessible_devices_list = get_accessible_devices(cursor, mac, user_id)
             accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет устройств в сети"
+
+            allowed_actions = ACT_PC if 'компьютер' in accessible_devices else ACT_PHONE
+
+            if not accessible_devices_list:
+                 allowed_actions = ACT_WEB
             
             logger.info("\n" + "="*50)
             logger.info(f"[ROUTE] ВТОРИЧНЫЙ АГЕНТ-МАРШРУТИЗАТОР. Инициатор: {source_name}")
@@ -414,6 +432,9 @@ async def handle_target_command(websocket, data):
             
             cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = cursor.fetchone()
+
+            target_device_type = get_device_type(sender_device.get('mac'))
+            allowed_actions = ACT_PC if target_device_type == 'компьютер' else ACT_PHONE
             
             logger.info("\n" + "="*50)
             logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ-ИСПОЛНИТЕЛЬ. Данные от: {sender_device['device_name']}")
@@ -448,7 +469,7 @@ async def handle_target_command(websocket, data):
         async for chunk in ai_instance.generate_audio_stream(
             prompt_text=prompt_context, 
             system_instruction=system_instruction,
-            history_text=history_text, 
+            allowed_actions=allowed_actions,
             voice_name=voice_name, 
             assistant_name=name
         ):
