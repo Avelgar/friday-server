@@ -193,6 +193,13 @@ async def handle_command(websocket, data):
         elif device_type == 'телефон': caps = CAP_PHONE
         else: caps = CAP_WEB
 
+        # === ДИНАМИЧЕСКИЕ ПРАВИЛА ДЛЯ ПК И ТЕЛЕФОНА ===
+        local_rules = ""
+        if device_type in ['компьютер', 'телефон']:
+            local_rules = f"""
+4. Ты не знаешь точных путей к программам. Если просят запустить программу на устройстве {sender_name}, то вызови action_type="get_installed_programs".
+5. Ты не знаешь точных названий запущенных програм. Если просят закрыть программу на устройстве {sender_name}, то вызови action_type="get_running_processes"."""
+
         system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник работает за устройством: {sender_name} (Тип: {device_type}).
 ПРАВИЛА ОБЩЕНИЯ:
 1. Говори естественно и живо. Твой голос сам транслируется пользователю. 
@@ -202,16 +209,12 @@ async def handle_command(websocket, data):
 ПРАВИЛА УПРАВЛЕНИЯ:
 1. Твои возможности локально на этом устройстве: {caps}.
 2. Если просят сделать что-то на ДРУГОМ устройстве, используй action_type="check_network_devices".
-3. Если команду невозможно выполнить без повторного дейтсвия (кроме процессов и программ), то вызови триггер action_type="request_retry".
-4. Ты не знаешь точных путей к программам. Если просят запустить программу на устройстве {sender_name}, то вызови action_type="get_installed_programs".
-5. Ты не знаешь точных названий запущенных програм. Если просят закрыть программу на устройстве {sender_name}, то вызови action_type="get_running_processes".
+3. Если команду невозможно выполнить без повторного дейтсвия (кроме процессов и программ), то вызови триггер action_type="request_retry".{local_rules}
 
 ИСТОРИЯ ДИАЛОГА (КОНТЕКСТ):
 {history_for_prompt}
 """
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
-        logger.info(f"system_instruction: {system_instruction}")
-        logger.info(f"caps: {caps}")
         logger.info(f"[API] Отправляю в Gemini...")
 
         async for chunk in ai_instance.generate_audio_stream(
