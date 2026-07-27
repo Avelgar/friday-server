@@ -255,7 +255,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                         allowed_actions="смена голоса, очистка истории",
                         audio_bytes=audio_bytes,
                         image_bytes=image_bytes,
-                        history_text="", 
                         voice_name=voice_type,
                         assistant_name=bot_name
                     ):
