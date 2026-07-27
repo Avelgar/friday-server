@@ -16,7 +16,9 @@ from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 
-logging.getLogger("websockets").setLevel(logging.WARNING)
+# === ЖЕСТКО ГЛУШИМ СПАМ БИБЛИОТЕКИ WEBSOCKETS ===
+logging.getLogger("websockets").setLevel(logging.CRITICAL)
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("WS_Server")
 
@@ -25,16 +27,13 @@ id_to_websocket = {}
 last_ping_times = {}     
 PING_TIMEOUT = 70
 
-# Человекочитаемые описания для промпта
 CAP_PC = "открытие ссылки (принимает полную ссылку URL), напечатать текст (принимает текст), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (координаты X, Y), уведомление (принимает текст), музыка (включить/выключить/следующий/предыдущий), смена имени (принимает текст), смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), очистка истории (любой текст), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100)"
 CAP_PHONE = "открытие ссылки (принимает полную ссылку URL), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100), музыка (включить/выключить/следующий/предыдущий), очистка истории (любой текст), режим камеры (любой текст), выключить режим камеры (любой текст)"
-CAP_WEB = "смена имени (принимает текст), смена голоса (Aoede/Puck/Kore/Charon), очистка истории (любой текст)"
-CAP_EXEC = "открытие файла (принимает полный путь), завершение процесса (принимает точное имя)"
+CAP_WEB = "смена голоса (Aoede/Puck/Kore/Charon), очистка истории (любой текст)"
 
-# Жесткий словарь команд для JSON Схемы
 ACT_PC = "открытие ссылки, открытие файла, завершение процесса, напечатать текст, нажать кнопку мыши, переместить мышь, уведомление, музыка, смена имени, смена голоса, очистка истории, изменение громкости, изменение яркости, check_network_devices, get_running_processes, get_installed_programs, request_retry"
 ACT_PHONE = "открытие ссылки, изменение громкости, изменение яркости, музыка, очистка истории, режим камеры, выключить режим камеры, check_network_devices, get_running_processes, get_installed_programs, request_retry"
-ACT_WEB = "смена имени, смена голоса, очистка истории, check_network_devices"
+ACT_WEB = "смена голоса, очистка истории, check_network_devices"
 
 def get_device_type(mac):
     if not mac: return "неизвестно"
@@ -66,7 +65,6 @@ def get_accessible_devices(cursor, current_mac, user_id):
             cursor.execute(f"SELECT mac, device_name FROM devices WHERE mac IN ({placeholders}) AND websocket_id IS NOT NULL AND mac != %s", tuple(my_macs) + (current_mac,))
             for row in cursor.fetchall():
                 devices[row['mac']] = f"{row['device_name']} ({get_device_type(row['mac'])})"
-
     return list(devices.values())
 
 async def async_send(websocket, data):
@@ -75,9 +73,7 @@ async def async_send(websocket, data):
         json_data = json.dumps(data, ensure_ascii=False)
         encoded_data = base64.b64encode(json_data.encode('utf-8')).decode('utf-8')
         await websocket.send(encoded_data)
-    except ConnectionClosed:
-        pass
-    except Exception as e:
+    except Exception:
         pass
 
 async def handle_web_client_auth(websocket, data):
@@ -142,8 +138,6 @@ async def handle_command(websocket, data):
 
     final_user_text_full = ""
     final_bot_text_full = ""
-    
-    # --- СПИСОК ОЖИДАЮЩИХ ЗАПРОСОВ К ДРУГИМ УСТРОЙСТВАМ ---
     pending_routes = []
 
     try:
@@ -205,7 +199,6 @@ async def handle_command(websocket, data):
             caps = CAP_WEB
             allowed_actions = ACT_WEB
 
-        # === ДИНАМИЧЕСКИЕ ПРАВИЛА ===
         local_rules = ""
         if device_type in ['компьютер', 'телефон']:
             local_rules = f"""
@@ -227,15 +220,15 @@ async def handle_command(websocket, data):
 {history_for_prompt}
 """
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
-        
         logger.info(f"[API] Отправляю в Gemini...")
 
         async for chunk in ai_instance.generate_audio_stream(
             prompt_text=prompt, 
             system_instruction=system_instruction,
-            allowed_actions=allowed_actions, # <--- ПЕРЕДАЕМ ЖЕСТКИЙ СПИСОК В СХЕМУ
+            allowed_actions=allowed_actions,
             audio_bytes=audio_bytes,
             image_bytes=image_bytes, 
+            history_text="", 
             voice_name=voice_name, 
             assistant_name=name
         ):
@@ -278,7 +271,6 @@ async def handle_command(websocket, data):
                                 "user_msg_id": user_msg_id,
                                 "voice_type": voice_name
                             }
-                            # КЛАДЕМ В ОЧЕРЕДЬ, НЕ ЗАПУСКАЕМ СРАЗУ!
                             pending_routes.append(pseudo_data)
                         else:
                             filtered_actions.append(act)
@@ -334,7 +326,6 @@ async def handle_command(websocket, data):
                     if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
-            logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
             if sender_device['websocket_id']:
@@ -351,7 +342,6 @@ async def handle_command(websocket, data):
 
         logger.info(f"[DONE] Первичный цикл завершен.\n" + "="*50)
 
-        # === ЗАПУСК ВТОРИЧНОГО АГЕНТА ТОЛЬКО ПОСЛЕ ЗАВЕРШЕНИЯ ПЕРВИЧНОГО ===
         for route_data in pending_routes:
             await handle_target_command(websocket, route_data)
 
@@ -395,15 +385,13 @@ async def handle_target_command(websocket, data):
             
             accessible_devices_list = get_accessible_devices(cursor, mac, user_id)
             accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет устройств в сети"
-
-            allowed_actions = ACT_PC if 'компьютер' in accessible_devices else ACT_PHONE
-
-            if not accessible_devices_list:
-                 allowed_actions = ACT_WEB
             
             logger.info("\n" + "="*50)
             logger.info(f"[ROUTE] ВТОРИЧНЫЙ АГЕНТ-МАРШРУТИЗАТОР. Инициатор: {source_name}")
             
+            allowed_actions = ACT_PC if 'компьютер' in accessible_devices else ACT_PHONE
+            if not accessible_devices_list: allowed_actions = ACT_WEB 
+
             system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Сетевой Маршрутизатор.
 Пользователь с устройства {source_name} попросил: "{original_command}".
 Доступные устройства в сети: {accessible_devices}.
@@ -432,12 +420,12 @@ async def handle_target_command(websocket, data):
             
             cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = cursor.fetchone()
-
-            target_device_type = get_device_type(sender_device.get('mac'))
-            allowed_actions = ACT_PC if target_device_type == 'компьютер' else ACT_PHONE
             
             logger.info("\n" + "="*50)
             logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ-ИСПОЛНИТЕЛЬ. Данные от: {sender_device['device_name']}")
+
+            target_device_type = get_device_type(sender_device.get('mac'))
+            allowed_actions = ACT_PC if target_device_type == 'компьютер' else ACT_PHONE
 
             system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Исполнитель-Аналитик.
 Пользователь с устройства {source_name} изначально просил: "{original_command}".
@@ -470,6 +458,7 @@ async def handle_target_command(websocket, data):
             prompt_text=prompt_context, 
             system_instruction=system_instruction,
             allowed_actions=allowed_actions,
+            history_text="", 
             voice_name=voice_name, 
             assistant_name=name
         ):
