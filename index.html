@@ -390,7 +390,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
         let messageHistory = []; 
         let pendingBubbleId = null;
 
-        // Обновленная функция addMessage с поддержкой склеивания текста по msgId
+        // Добавление сообщения в интерфейс
         function addMessage(role, content, skipHistory = false, msgId = null) {
             const chatMessages = document.getElementById('chatMessages');
             const messageElement = document.createElement('div');
@@ -413,6 +413,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             chatMessages.appendChild(messageElement);
             chatMessages.scrollTop = chatMessages.scrollHeight;
             
+            // Если гость, сохраняем в localStorage (но не пустышку от микрофона)
             if (!localStorage.getItem('token') && !skipHistory && role === 'user' && !content.includes('🎤')) {
                 messageHistory.push({ role: role, content: content, timestamp: now.toISOString() });
                 localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
@@ -422,10 +423,18 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             }
         }
 
+        // Обновление песочных часов на реальный текст транскрибации
         function updatePendingBubble(text) {
             if (!pendingBubbleId) return;
             const b = document.getElementById(pendingBubbleId);
-            if (b) b.querySelector('div').textContent = text;
+            if (b) {
+                b.querySelector('div').textContent = text;
+                // ИСПРАВЛЕНИЕ 3: Сохраняем расшифровку голоса гостя в локальную историю
+                if (!localStorage.getItem('token')) {
+                    messageHistory.push({ role: 'user', content: text, timestamp: new Date().toISOString() });
+                    localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
+                }
+            }
         }
 
         function removePendingBubble() {
@@ -434,21 +443,37 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
             if (b) { b.remove(); pendingBubbleId = null; }
         }
         
+        // Обработка команд от бота
         function processBotActions(actions) {
             let displayText = '';
             actions.forEach(action => {
                 if (typeof action === 'object') {
-                    if (action.type === 'текстовой ответ' || action.type === 'голосовой ответ') {
-                        displayText += action.content + '\n\n';
-                    } else if (action.type === 'очистка истории') {
+                    const aType = action.type || action.action_type;
+                    const aValue = action.content || action.action_value;
+
+                    if (aType === 'текстовой ответ' || aType === 'голосовой ответ') {
+                        displayText += aValue + '\n\n';
+                    } else if (aType === 'очистка истории') {
                         clearHistory();
-                    } else if (action.type === 'смена имени') {
-                        document.getElementById('bot-name').value = action.content;
+                    } else if (aType === 'смена имени') {
+                        document.getElementById('bot-name').value = aValue;
                         saveSettingsToLocalStorage();
+                    } else if (aType === 'смена голоса') {
+                        // ИСПРАВЛЕНИЕ 2: Меняем голос в выпадающем списке
+                        const select = document.getElementById('voice-type');
+                        for (let i = 0; i < select.options.length; i++) {
+                            if (select.options[i].value.toLowerCase() === String(aValue).toLowerCase()) {
+                                select.selectedIndex = i;
+                                saveSettingsToLocalStorage();
+                                break;
+                            }
+                        }
                     }
                 }
             });
-            if (displayText.trim()) {
+
+            // Для HTTP (гостей) текст добавляем целым бабблом, так как стриминга нет
+            if (displayText.trim() && !localStorage.getItem('token')) {
                 addMessage('assistant', displayText.trim());
             }
         }
@@ -533,8 +558,14 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                         pendingBubbleId = null; 
                     }
                     
-                    // ИСПРАВЛЕННАЯ ЛОГИКА СКЛЕИВАНИЯ БАББЛОВ В ЧАТЕ!
+                    // ИСПРАВЛЕННАЯ ЛОГИКА СКЛЕИВАНИЯ БАББЛОВ В ЧАТЕ (СТРИМИНГ)
                     if (data.type === 'new_message') {
+                        // ИСПРАВЛЕНИЕ 1: Снимаем статус обработки, если бот начал отвечать (чтобы не моргало)
+                        if (vadState === 'processing') {
+                            vadState = 'listening';
+                            document.getElementById('voiceStatusText').textContent = 'Слушаю...';
+                        }
+
                         if (data.text) {
                             const msgId = data.message_id || data.ui_msg_id;
                             const bubbleId = msgId ? 'msg_' + msgId : null;
@@ -546,24 +577,30 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                                 
                                 const chatMessages = document.getElementById('chatMessages');
                                 chatMessages.scrollTop = chatMessages.scrollHeight;
-
-                                // Обновляем историю для неавторизованных (если вдруг понадобится)
-                                if (!localStorage.getItem('token') && messageHistory.length > 0) {
-                                    if (messageHistory[messageHistory.length - 1].role === 'assistant') {
-                                        messageHistory[messageHistory.length - 1].content += data.text;
-                                        localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
-                                    }
-                                }
                             } else {
                                 // Баббла еще нет, создаем новый
                                 addMessage('assistant', data.text, false, msgId);
                             }
                         }
                         
+                        // Проверяем команды (включая смену голоса)
                         if (data.actions && Array.isArray(data.actions)) {
                             data.actions.forEach(action => {
                                 if (action.action_type === 'очистка истории') clearHistory();
-                                if (action.action_type === 'смена имени') { document.getElementById('bot-name').value = action.action_value; saveSettingsToLocalStorage(); }
+                                if (action.action_type === 'смена имени') { 
+                                    document.getElementById('bot-name').value = action.action_value; 
+                                    saveSettingsToLocalStorage(); 
+                                }
+                                if (action.action_type === 'смена голоса') {
+                                    const select = document.getElementById('voice-type');
+                                    for (let i = 0; i < select.options.length; i++) {
+                                        if (select.options[i].value.toLowerCase() === String(action.action_value).toLowerCase()) {
+                                            select.selectedIndex = i;
+                                            saveSettingsToLocalStorage();
+                                            break;
+                                        }
+                                    }
+                                }
                             });
                         }
                     }
@@ -803,7 +840,7 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                                     silenceFrames += pcm.length;
                                     if (silenceFrames > SILENCE_FRAMES) {
                                         vadState = 'processing';
-                                        voiceStatusText.textContent = 'Отправка...';
+                                        voiceStatusText.textContent = 'Ожидание ответа...';
                                         voiceStatus.classList.remove('listening');
                                         
                                         const pcm16 = new Int16Array(pcmBuffer);
@@ -860,12 +897,12 @@ footer { grid-column: 1 / -1; text-align: center; margin-top: 30px; color: white
                                 requestData.screenshot = reader.result.split(',')[1];
                                 websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
                                 currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
-                                if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; }
+                                if (vadState === 'processing') { voiceStatusText.textContent = 'Ожидание ответа...'; }
                             };
                             reader.readAsDataURL(file);
                         } else {
                             websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
-                            if (vadState === 'processing') { vadState = 'listening'; voiceStatusText.textContent = 'Слушаю...'; }
+                            if (vadState === 'processing') { voiceStatusText.textContent = 'Ожидание ответа...'; }
                         }
                     } else {
                         const requestData = {
