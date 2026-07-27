@@ -40,6 +40,7 @@ class AIService:
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
+        
         client = self._get_client()
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"], 
@@ -73,7 +74,7 @@ class AIService:
                 
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
-    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, voice_name="Aoede", assistant_name="Пятница"):
+    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
@@ -81,7 +82,7 @@ class AIService:
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
-            has_yielded_data = False
+            has_yielded_data = False 
             
             try:
                 client = self._get_client()
@@ -177,7 +178,6 @@ class AIService:
                             await session.send_tool_response(function_responses=function_responses)
                             
                 except (asyncio.TimeoutError, TimeoutError):
-                    # Если мы уже начали отвечать, таймаут - это просто конец ответа. Выходим штатно!
                     if has_yielded_data:
                         logger.info("[API] Таймаут после отправки данных. Считаем ответ ИИ завершенным.")
                         return 
@@ -188,6 +188,10 @@ class AIService:
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
+                
+                # === ЖЕСТКАЯ ПРОВЕРКА НА ПУСТОЙ ОТВЕТ ===
+                if not has_yielded_data:
+                    raise Exception("Gemini вернул абсолютно пустой ответ (нет текста, аудио и команд)")
                 
                 return # Успешно отработали, выходим
 

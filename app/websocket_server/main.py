@@ -16,7 +16,6 @@ from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 
-# === ЖЕСТКО ГЛУШИМ СПАМ БИБЛИОТЕКИ WEBSOCKETS ===
 logging.getLogger("websockets").setLevel(logging.CRITICAL)
 logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -27,13 +26,16 @@ id_to_websocket = {}
 last_ping_times = {}     
 PING_TIMEOUT = 70
 
+# === НАСТРОЙКИ ЛИМИТОВ ===
+HISTORY_LIMIT = 10 
+
 CAP_PC = "открытие ссылки (принимает полную ссылку URL), напечатать текст (принимает текст), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (координаты X, Y), уведомление (принимает текст), музыка (включить/выключить/следующий/предыдущий), смена имени (принимает текст), смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), очистка истории (любой текст), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100)"
 CAP_PHONE = "открытие ссылки (принимает полную ссылку URL), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100), музыка (включить/выключить/следующий/предыдущий), очистка истории (любой текст), режим камеры (любой текст), выключить режим камеры (любой текст)"
-CAP_WEB = "смена голоса (Aoede/Puck/Kore/Charon), очистка истории (любой текст)"
+CAP_WEB = "смена имени (принимает текст), смена голоса (Aoede/Puck/Kore/Charon), очистка истории (любой текст)"
 
 ACT_PC = "открытие ссылки, открытие файла, завершение процесса, напечатать текст, нажать кнопку мыши, переместить мышь, уведомление, музыка, смена имени, смена голоса, очистка истории, изменение громкости, изменение яркости, check_network_devices, get_running_processes, get_installed_programs, request_retry"
 ACT_PHONE = "открытие ссылки, изменение громкости, изменение яркости, музыка, очистка истории, режим камеры, выключить режим камеры, check_network_devices, get_running_processes, get_installed_programs, request_retry"
-ACT_WEB = "смена голоса, очистка истории, check_network_devices"
+ACT_WEB = "смена имени, смена голоса, очистка истории, check_network_devices"
 
 def get_device_type(mac):
     if not mac: return "неизвестно"
@@ -187,7 +189,10 @@ async def handle_command(websocket, data):
             FROM messages m LEFT JOIN devices d ON m.send_type = CAST(d.id AS CHAR) AND m.send_type NOT IN ('Вы', 'Бот')
             WHERE m.recipient_device_id = %s AND m.id < %s ORDER BY m.time ASC
         """, (sender_id, user_msg_id))
-        history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in cursor.fetchall()])
+        
+        raw_history = cursor.fetchall()
+        raw_history = raw_history[-HISTORY_LIMIT:] if raw_history else []
+        history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in raw_history])
 
         if device_type == 'компьютер': 
             caps = CAP_PC
@@ -227,7 +232,8 @@ async def handle_command(websocket, data):
             system_instruction=system_instruction,
             allowed_actions=allowed_actions,
             audio_bytes=audio_bytes,
-            image_bytes=image_bytes,  
+            image_bytes=image_bytes, 
+            history_text="", 
             voice_name=voice_name, 
             assistant_name=name
         ):
@@ -324,14 +330,25 @@ async def handle_command(websocket, data):
                     sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
                     if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
+        # === ПРОВЕРКА И ЗАГЛУШКА СЛАБОЙ ТРАНСКРИБАЦИИ ===
+        if audio_bytes and not final_user_text_full.strip():
+            final_user_text_full = "[Аудиосообщение]"
+            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full, user_msg_id))
+            conn.commit()
+            if sender_device['websocket_id']:
+                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full})
+
+        # === УДАЛЕНИЕ ЕСЛИ ОТВЕТА НЕТ (ТОТАЛЬНЫЙ СБОЙ) ===
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
+            logger.info(f"[DONE] Тотальная пустота от ИИ. Удаляю сообщения.")
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
             if sender_device['websocket_id']:
                 sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
                 if sender_ws:
                     await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
-                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         else:
             cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             conn.commit()
@@ -353,7 +370,6 @@ async def handle_command(websocket, data):
                     cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
                     conn.commit()
                     await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
-                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         except: pass
 
 
@@ -445,7 +461,10 @@ async def handle_target_command(websocket, data):
             FROM messages m LEFT JOIN devices d ON m.send_type = CAST(d.id AS CHAR) AND m.send_type NOT IN ('Вы', 'Бот')
             WHERE m.recipient_device_id = %s ORDER BY m.time ASC
         """, (source_id,))
-        history_text = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in cursor.fetchall()])
+        
+        raw_history = cursor.fetchall()
+        raw_history = raw_history[-HISTORY_LIMIT:] if raw_history else []
+        history_text = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in raw_history])
         
         cursor.execute("INSERT INTO messages (send_type, text, time, recipient_device_id) VALUES ('Бот', '', %s, %s)", (mysql_time, source_id))
         bot_message_id = cursor.lastrowid
@@ -457,6 +476,7 @@ async def handle_target_command(websocket, data):
             prompt_text=prompt_context, 
             system_instruction=system_instruction,
             allowed_actions=allowed_actions,
+            history_text=history_text, 
             voice_name=voice_name, 
             assistant_name=name
         ):
@@ -530,14 +550,12 @@ async def handle_target_command(websocket, data):
                     if source_ws: await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
 
         if not final_text.strip() and audio_chunks_count == 0 and not has_commands:
-            logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
             conn.commit()
             if source_device_info['websocket_id']:
                 source_ws = id_to_websocket.get(int(source_device_info['websocket_id']))
                 if source_ws:
                     await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
-                    await async_send(source_ws, {"type": "new_message", "message_id": None, "ui_msg_id": str(bot_message_id), "sender": "Бот", "text": "", "actions": []})
         else:
             cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
             conn.commit()
@@ -556,7 +574,6 @@ async def handle_target_command(websocket, data):
                     cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
                     conn.commit()
                     await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
-                    await async_send(source_ws, {"type": "new_message", "message_id": None, "ui_msg_id": str(bot_message_id), "sender": "Бот", "text": "", "actions": []})
         except: pass
 
 async def handle_device_registration(websocket, data):
