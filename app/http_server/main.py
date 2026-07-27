@@ -414,6 +414,95 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     self.send_json(200, {"status": "success", "message": "Пароль изменен"})
                 else: self.send_json(400, {"status": "error", "message": "Неверный токен"})
                 
+            elif self.path == '/get_devices':
+                mac = data.get('mac')
+                cursor.execute("SELECT user_id, access_list FROM devices WHERE mac = %s", (mac,))
+                device = cursor.fetchone()
+                if not device: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                account_devices = []; my_devices = []; processed_macs = {mac}
+                if device['user_id']:
+                    cursor.execute("SELECT mac, device_name, (websocket_id IS NOT NULL) as is_online FROM devices WHERE user_id = %s AND mac != %s", (device['user_id'], mac))
+                    for d in cursor.fetchall():
+                        account_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": True})
+                        processed_macs.add(d['mac'])
+                access_list = device['access_list'] or ''
+                access_macs = [m.strip() for m in access_list.split(';') if m.strip() and m.strip() not in processed_macs]
+                if access_macs:
+                    ph = ','.join(['%s'] * len(access_macs))
+                    cursor.execute(f"SELECT mac, device_name, (websocket_id IS NOT NULL) as is_online FROM devices WHERE mac IN ({ph})", tuple(access_macs))
+                    for d in cursor.fetchall():
+                        my_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": False})
+                self.send_json(200, {"status": "success", "account_devices": account_devices, "my_devices": my_devices})
+
+            elif self.path == '/connect_device':
+                req_mac = data.get('MAC'); dev_name = data.get('DeviceName'); pwd = data.get('Password')
+                cursor.execute("SELECT mac, password, access_list FROM devices WHERE device_name = %s", (dev_name,))
+                target = cursor.fetchone()
+                cursor.execute("SELECT access_list FROM devices WHERE mac = %s", (req_mac,))
+                requester = cursor.fetchone()
+                if not target: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                if target['password'] != pwd: return self.send_json(401, {"status": "error", "message": "Неверный пароль"})
+                if req_mac == target['mac']: return self.send_json(400, {"status": "error", "message": "Само к себе"})
+                if not requester: return self.send_json(404, {"status": "error", "message": "Инициатор не найден"})
+                def add_mac(alist, mac):
+                    parts = [p for p in (alist or '').split(';') if p]
+                    if mac not in parts: parts.append(mac)
+                    return ';'.join(parts) + ';'
+                new_target_list = add_mac(target['access_list'], req_mac)
+                new_req_list = add_mac(requester['access_list'], target['mac'])
+                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_target_list, target['mac']))
+                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_req_list, req_mac))
+                conn.commit()
+                self.send_json(200, {"status": "success", "message": "Подключено", "target_mac": target['mac'], "target_device_name": dev_name})
+
+            elif self.path == '/disconnect_device':
+                req_mac = data.get('requester_mac'); target_mac = data.get('target_mac')
+                cursor.execute("SELECT mac, access_list FROM devices WHERE mac IN (%s, %s)", (req_mac, target_mac))
+                devs = {r['mac']: r for r in cursor.fetchall()}
+                if len(devs) != 2: return self.send_json(404, {"status": "error", "message": "Устройства не найдены"})
+                def remove_mac(alist, mac):
+                    parts = [p for p in (alist or '').split(';') if p and p != mac]
+                    return ';'.join(parts) + ';' if parts else ''
+                new_req = remove_mac(devs[req_mac]['access_list'], target_mac)
+                new_tar = remove_mac(devs[target_mac]['access_list'], req_mac)
+                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_req, req_mac))
+                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_tar, target_mac))
+                conn.commit()
+                self.send_json(200, {"status": "success", "message": "Отключено", "requester_new_list": new_req, "target_new_list": new_tar})
+
+            elif self.path == '/clear_history':
+                token = data.get('token'); mac = data.get('mac')
+                if token: mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
+                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+                dev = cursor.fetchone()
+                if dev:
+                    cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev['id'],))
+                    conn.commit()
+                    self.send_json(200, {"status": "success", "message": "История очищена"})
+                else: self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                
+            elif self.path == '/delete_message':
+                msg_id = data.get('msg_id'); token = data.get('token'); mac = data.get('mac')
+                if token: mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
+                if not msg_id or not mac: return self.send_json(400, {"status": "error", "message": "msg_id и mac обязательны"})
+                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+                dev = cursor.fetchone()
+                if not dev: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                cursor.execute("DELETE FROM messages WHERE id = %s AND recipient_device_id = %s", (msg_id, dev['id']))
+                conn.commit()
+                self.send_json(200, {"status": "success", "message": "Сообщение удалено"})
+
+            elif self.path == '/edit_message':
+                msg_id = data.get('msg_id'); new_text = data.get('new_text'); token = data.get('token'); mac = data.get('mac')
+                if token: mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
+                if not msg_id or not new_text or not mac: return self.send_json(400, {"status": "error", "message": "msg_id, new_text и mac обязательны"})
+                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+                dev = cursor.fetchone()
+                if not dev: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                cursor.execute("UPDATE messages SET text = %s WHERE id = %s AND recipient_device_id = %s", (new_text, msg_id, dev['id']))
+                conn.commit()
+                self.send_json(200, {"status": "success", "message": "Сообщение обновлено"})
+
             else:
                 self.send_error(404)
 
