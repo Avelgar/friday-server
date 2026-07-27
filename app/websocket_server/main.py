@@ -227,8 +227,7 @@ async def handle_command(websocket, data):
             system_instruction=system_instruction,
             allowed_actions=allowed_actions,
             audio_bytes=audio_bytes,
-            image_bytes=image_bytes, 
-            history_text="", 
+            image_bytes=image_bytes,  
             voice_name=voice_name, 
             assistant_name=name
         ):
@@ -458,7 +457,6 @@ async def handle_target_command(websocket, data):
             prompt_text=prompt_context, 
             system_instruction=system_instruction,
             allowed_actions=allowed_actions,
-            history_text="", 
             voice_name=voice_name, 
             assistant_name=name
         ):
