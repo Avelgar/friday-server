@@ -571,6 +571,8 @@ async def handle_device_registration(websocket, data):
         cursor.execute("SELECT * FROM devices WHERE mac = %s", (mac,))
         device = cursor.fetchone()
         
+        response = {"status": "success", "message": "Данные успешно обработаны!"}
+        
         if device:
             # ПРОВЕРЯЕМ ХЕШ BCRYPT ПРИ РЕГИСТРАЦИИ C# КЛИЕНТА!
             if not bcrypt.checkpw(password.encode('utf-8'), device['password'].encode('utf-8')):
@@ -579,6 +581,14 @@ async def handle_device_registration(websocket, data):
             
             cursor.execute("UPDATE devices SET device_name = %s, is_online = TRUE WHERE id = %s", (device_name, device['id']))
             device_id = device['id']
+            
+            # === ВОТ ТОТ САМЫЙ КУСОК, КОТОРЫЙ ВЕРНЕТ ЛОГИН НА КЛИЕНТ ===
+            if device.get('user_id'):
+                cursor.execute("SELECT login FROM users WHERE id = %s", (device['user_id'],))
+                user_rec = cursor.fetchone()
+                if user_rec:
+                    response['user_login'] = user_rec['login']
+                    
         else:
             cursor.execute("SELECT id FROM devices WHERE device_name = %s", (device_name,))
             if cursor.fetchone():
@@ -602,8 +612,11 @@ async def handle_device_registration(websocket, data):
         for msg in messages:
             history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg['time'].strftime('%Y-%m-%d %H:%M:%S')})
         
+        response["history"] = history
         conn.commit()
-        await async_send(websocket, {"status": "success", "message": "Данные успешно обработаны!", "history": history})
+        
+        # Отправляем ответ клиенту (теперь вместе с логином!)
+        await async_send(websocket, response)
         
     except Exception as e:
         logger.error(f"Ошибка регистрации устройства: {e}")
