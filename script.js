@@ -1,7 +1,10 @@
 let streamAudioContext = null;
 let nextPlayTime = 0;
-let vadState = 'idle'; 
-let isMicrophoneActive = false; 
+
+// Разделенные состояния:
+let isPlaying = false; // Состояние воспроизведения аудио от бота
+let vadState = 'idle'; // Состояние диктофона (idle, recording, processing)
+let isMicrophoneActive = false; // Включен ли микрофон кнопкой в UI
 
 let stopWordRecognizer = null;
 const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
@@ -13,7 +16,7 @@ function initStopWordDetection() {
         stopWordRecognizer.interimResults = true;
         stopWordRecognizer.lang = 'ru-RU';
         stopWordRecognizer.onresult = function(e) {
-            if (vadState !== 'playing') return;
+            if (!isPlaying) return;
             for (let i = e.resultIndex; i < e.results.length; i++) {
                 const transcript = e.results[i][0].transcript.toLowerCase();
                 if (stopWords.some(w => transcript.includes(w))) {
@@ -31,10 +34,7 @@ function stopStopWordDetection() { if (stopWordRecognizer) { try { stopWordRecog
 function stopPlayback() {
     if (streamAudioContext) { streamAudioContext.close(); streamAudioContext = null; nextPlayTime = 0; }
     stopStopWordDetection();
-    if (vadState === 'playing') {
-        vadState = isMicrophoneActive ? 'listening' : 'idle';
-        updatePendingBubble('');
-    }
+    isPlaying = false;
 }
 
 async function playPCM24kHz(base64Data) {
@@ -56,13 +56,13 @@ async function playPCM24kHz(base64Data) {
 
         if (nextPlayTime < streamAudioContext.currentTime) nextPlayTime = streamAudioContext.currentTime;
         
-        vadState = 'playing';
+        isPlaying = true;
         if (isMicrophoneActive) startStopWordDetection();
 
         source.onended = () => {
             if (streamAudioContext && streamAudioContext.currentTime >= nextPlayTime - 0.1) {
-                if (vadState === 'playing') {
-                    vadState = isMicrophoneActive ? 'listening' : 'idle';
+                if (isPlaying) {
+                    isPlaying = false;
                     stopStopWordDetection();
                 }
             }
@@ -193,6 +193,10 @@ function handleIncomingStreamData(data) {
         const userBubble = document.getElementById('msg_' + data.ui_msg_id);
         if (userBubble) {
             userBubble.id = 'msg_' + data.user_msg_id;
+            // ИСПРАВЛЕНИЕ: Обновляем pendingBubbleId, если он совпадал с временным ID
+            if (pendingBubbleId === 'msg_' + data.ui_msg_id) {
+                pendingBubbleId = 'msg_' + data.user_msg_id;
+            }
             const editBtn = userBubble.querySelector('button[title="Редактировать"]');
             const delBtn = userBubble.querySelector('button[title="Удалить"]');
             if (editBtn) editBtn.setAttribute('onclick', `editMessage('${data.user_msg_id}')`);
@@ -215,7 +219,7 @@ function handleIncomingStreamData(data) {
     }
     
     if (data.type === 'new_message') {
-        if (vadState === 'processing') vadState = 'listening';
+        if (vadState === 'processing') vadState = 'idle'; // Возвращаем VAD в режим ожидания
 
         if (data.text) {
             const msgId = data.message_id || data.ui_msg_id;
@@ -442,12 +446,14 @@ document.addEventListener('DOMContentLoaded', async function() {
     voiceType.addEventListener('change', saveSettingsToLocalStorage);
     messageInput.addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; });
 
+    // Инициализация аудио-переменных
     let micAudioContext = null;
     let audioWorkletNode = null;
     let micStream = null;
     let pcmBuffer = [];
     let preBuffer = [];
     let silenceFrames = 0;
+    
     const VAD_THRESHOLD = 0.015;
     const SILENCE_FRAMES = 16000 * 1.5; 
     const PRE_BUFFER_FRAMES = 8000; 
@@ -481,80 +487,97 @@ document.addEventListener('DOMContentLoaded', async function() {
         return window.btoa(binary);
     }
 
+    function sendCurrentRecording() {
+        vadState = 'processing';
+        updatePendingBubble('⏳ Транскрибирую...');
+        const pcm16 = new Int16Array(pcmBuffer);
+        const base64Audio = bufferToBase64(pcm16.buffer);
+        pcmBuffer = []; preBuffer = [];
+        const actualUiMsgId = pendingBubbleId ? pendingBubbleId.replace('msg_', '') : null;
+        sendToServer("", "голосовое сообщение", base64Audio, actualUiMsgId);
+    }
+
+    async function startMicStream() {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        
+        const blob = new Blob([workletCode], { type: 'application/javascript' });
+        const workletUrl = URL.createObjectURL(blob);
+        await micAudioContext.audioWorklet.addModule(workletUrl);
+
+        const source = micAudioContext.createMediaStreamSource(micStream);
+        audioWorkletNode = new AudioWorkletNode(micAudioContext, 'pcm-processor');
+        
+        const zeroGain = micAudioContext.createGain();
+        zeroGain.gain.value = 0;
+        
+        source.connect(audioWorkletNode);
+        audioWorkletNode.connect(zeroGain);
+        zeroGain.connect(micAudioContext.destination);
+
+        audioWorkletNode.port.onmessage = (e) => {
+            if (!isMicrophoneActive) return; // Если микрофон выключен аппаратно, игнорируем
+            if (isPlaying || vadState === 'processing') return; // Игнорируем, если бот говорит или мы в обработке
+
+            const { pcm, volume } = e.data;
+
+            if (vadState === 'idle') {
+                preBuffer.push(...pcm);
+                if (preBuffer.length > PRE_BUFFER_FRAMES) preBuffer.splice(0, preBuffer.length - PRE_BUFFER_FRAMES);
+
+                if (volume > VAD_THRESHOLD) {
+                    vadState = 'recording';
+                    pcmBuffer = [...preBuffer];
+                    silenceFrames = 0;
+                    addMessage('user', '🎤 [Слушаю...]');
+                }
+            } else if (vadState === 'recording') {
+                pcmBuffer.push(...pcm);
+                if (volume < VAD_THRESHOLD) {
+                    silenceFrames += pcm.length;
+                    if (silenceFrames > SILENCE_FRAMES) {
+                        sendCurrentRecording();
+                    }
+                } else {
+                    silenceFrames = 0;
+                }
+            }
+        };
+    }
+    
+    function stopMicStream() {
+        if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null; }
+        if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
+        if (micAudioContext) { micAudioContext.close(); micAudioContext = null; }
+    }
+
     microphoneBtn.addEventListener('click', async function() {
-        if (vadState === 'idle') {
+        if (!isMicrophoneActive) {
+            // Включаем микрофон
             try {
-                micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-                micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-                
-                const blob = new Blob([workletCode], { type: 'application/javascript' });
-                const workletUrl = URL.createObjectURL(blob);
-                await micAudioContext.audioWorklet.addModule(workletUrl);
-
-                const source = micAudioContext.createMediaStreamSource(micStream);
-                audioWorkletNode = new AudioWorkletNode(micAudioContext, 'pcm-processor');
-                
-                const zeroGain = micAudioContext.createGain();
-                zeroGain.gain.value = 0;
-                
-                source.connect(audioWorkletNode);
-                audioWorkletNode.connect(zeroGain);
-                zeroGain.connect(micAudioContext.destination);
-
-                vadState = 'listening';
+                await startMicStream();
                 isMicrophoneActive = true;
+                vadState = 'idle';
                 this.classList.add('active');
                 this.querySelector('span').textContent = 'Микрофон включен';
-
-                audioWorkletNode.port.onmessage = (e) => {
-                    if (vadState === 'playing' || vadState === 'processing') return;
-
-                    const { pcm, volume } = e.data;
-
-                    if (vadState === 'listening') {
-                        preBuffer.push(...pcm);
-                        if (preBuffer.length > PRE_BUFFER_FRAMES) preBuffer.splice(0, preBuffer.length - PRE_BUFFER_FRAMES);
-
-                        if (volume > VAD_THRESHOLD) {
-                            vadState = 'recording';
-                            pcmBuffer = [...preBuffer];
-                            silenceFrames = 0;
-                            addMessage('user', '🎤 [Слушаю...]');
-                        }
-                    } else if (vadState === 'recording') {
-                        pcmBuffer.push(...pcm);
-                        if (volume < VAD_THRESHOLD) {
-                            silenceFrames += pcm.length;
-                            if (silenceFrames > SILENCE_FRAMES) {
-                                vadState = 'processing';
-                                updatePendingBubble('⏳ Транскрибирую...');
-                                
-                                const pcm16 = new Int16Array(pcmBuffer);
-                                const base64Audio = bufferToBase64(pcm16.buffer);
-                                pcmBuffer = []; preBuffer = [];
-                                
-                                const actualUiMsgId = pendingBubbleId ? pendingBubbleId.replace('msg_', '') : null;
-                                sendToServer("", "голосовое сообщение", base64Audio, actualUiMsgId);
-                            }
-                        } else {
-                            silenceFrames = 0;
-                        }
-                    }
-                };
             } catch (err) {
                 showNotification('Ошибка доступа к микрофону', 'error');
             }
         } else {
-            vadState = 'idle';
+            // Выключаем микрофон
             isMicrophoneActive = false;
             this.classList.remove('active');
             this.querySelector('span').textContent = 'Включить микрофон';
-            pcmBuffer = []; preBuffer = [];
             
-            if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null; }
-            if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
-            if (micAudioContext) { micAudioContext.close(); micAudioContext = null; }
-            stopPlayback();
+            if (vadState === 'recording') {
+                // Если мы что-то наговорили и нажали "выключить" - принудительно отправляем!
+                sendCurrentRecording();
+            } else {
+                vadState = 'idle';
+                pcmBuffer = []; preBuffer = [];
+                removePendingBubble(); // Удаляем плашку слушаю, если ничего не было сказано
+            }
+            stopMicStream();
         }
     });
 
@@ -615,7 +638,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
         } catch (error) { 
             showNotification('Ошибка при обработке запроса', 'error'); 
-            if (vadState === 'processing') { vadState = isMicrophoneActive ? 'listening' : 'idle'; removePendingBubble(); }
+            vadState = 'idle';
+            removePendingBubble();
         }
     }
 
@@ -649,7 +673,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
         } catch (error) { 
             showNotification('Ошибка при обработке запроса', 'error'); 
-            if (vadState === 'processing') { vadState = isMicrophoneActive ? 'listening' : 'idle'; removePendingBubble(); }
+            vadState = 'idle';
+            removePendingBubble(); 
         }
     }
 
