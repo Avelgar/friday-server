@@ -572,15 +572,19 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (vadState === 'recording') {
                 // Если мы что-то наговорили и нажали "выключить" - принудительно отправляем!
                 sendCurrentRecording();
+            } else if (vadState === 'processing') {
+                // ИСПРАВЛЕНИЕ: Запрос уже ушел на сервер (Транскрибирую...). 
+                // Ничего не сбрасываем и плашку НЕ удаляем! Просто ждем ответа.
             } else {
+                // Если мы просто молчали (idle)
                 vadState = 'idle';
                 pcmBuffer = []; preBuffer = [];
-                removePendingBubble(); // Удаляем плашку слушаю, если ничего не было сказано
+                removePendingBubble(); // Удаляем плашку "Слушаю..."
             }
             stopMicStream();
         }
     });
-
+    
     async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id = null) {
         try {
             const token = localStorage.getItem('token');
