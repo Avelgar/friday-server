@@ -10,6 +10,7 @@ import hashlib
 import jwt
 import asyncio
 import base64
+import bcrypt
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -24,8 +25,8 @@ from app.utils.email_sender import send_email
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("HTTP_Server")
 
-HISTORY_LIMIT = 10
 CAP_WEB = "смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
+ACT_WEB = "смена голоса, выключить микрофон, очистка истории"
 
 def clean_expired_tokens():
     last_web_cleanup = time.time()
@@ -43,7 +44,7 @@ def clean_expired_tokens():
             
             current_time = time.time()
             if current_time - last_web_cleanup >= web_cleanup_interval:
-                cursor.execute("SELECT id FROM devices WHERE mac LIKE 'WEB%' AND (websocket_id IS NULL OR websocket_id = '') AND created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
+                cursor.execute("SELECT id FROM devices WHERE mac LIKE 'WEB%' AND is_online = FALSE AND created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)")
                 devices_to_delete = cursor.fetchall()
                 for device in devices_to_delete:
                     cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (device[0],))
@@ -226,7 +227,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
                 history_text = ""
                 if message_history:
-                    message_history = message_history[-HISTORY_LIMIT:]
+                    message_history = message_history[-10:] # ОГРАНИЧЕНИЕ В 10 СООБЩЕНИЙ
                     history_text = "\n\nИСТОРИЯ ДИАЛОГА (КОНТЕКСТ):\n"
                     for msg in message_history:
                         role = "Пользователь" if msg.get('role') == 'user' else "Ассистент"
@@ -242,7 +243,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 ПРАВИЛА УПРАВЛЕНИЯ:
 1. Гости сайта НЕ ИМЕЮТ доступа к устройствам (ПК или телефону). Ты не можешь открывать им программы или искать устройства в сети.
 2. Доступные локальные команды управления сайтом: {CAP_WEB}. 
-3. Если пользователь просит сменить голос или очистить историю, вызови соответствующий action_type. Имена не меняй.
+3. Если пользователь просит сменить голос, выключить микрофон или очистить историю, вызови соответствующий action_type. Имена не меняй.
 {history_text}
 """
                 
@@ -267,7 +268,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                     async for chunk in ai_instance.generate_audio_stream(
                         prompt_text=prompt_formatted,
                         system_instruction=system_instruction,
-                        allowed_actions="смена голоса, очистка истории",
+                        allowed_actions=ACT_WEB,
                         audio_bytes=audio_bytes,
                         image_bytes=image_bytes,
                         history_text="", 
@@ -339,7 +340,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 token = secrets.token_urlsafe(32)
                 link = f"https://friday-assistant.ru/verify?token={token}"
                 if send_email(email, "Подтверждение регистрации", f"Ссылка: {link}"):
-                    cursor.execute("INSERT INTO users (email, login, password, SingUpToken, SingUpTokenDelTime) VALUES (%s, %s, %s, %s, NOW() + INTERVAL 1 DAY)", (email, login, password, token))
+                    hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                    cursor.execute("INSERT INTO users (email, login, password, SingUpToken, SingUpTokenDelTime) VALUES (%s, %s, %s, %s, NOW() + INTERVAL 1 DAY)", (email, login, hashed_pw, token))
                     conn.commit()
                     self.send_json(201, {"status": "success", "message": "Письмо отправлено"})
                 else: self.send_json(500, {"status": "error", "message": "Ошибка отправки письма"})
@@ -348,7 +350,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 login = data.get('login'); password = data.get('password'); mac = data.get('mac')
                 cursor.execute("SELECT * FROM users WHERE email = %s OR login = %s", (login, login))
                 user = cursor.fetchone()
-                if not user or user['password'] != password: return self.send_json(401, {"status": "error", "message": "Неверный логин или пароль"})
+                if not user or not bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
+                    return self.send_json(401, {"status": "error", "message": "Неверный логин или пароль"})
                 if user['SingUpToken']: return self.send_json(403, {"status": "error", "message": "Аккаунт не подтвержден"})
                 device_info = {'user_login': user['login']}
                 if mac:
@@ -361,7 +364,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 login = data.get('login'); password = data.get('password')
                 cursor.execute("SELECT * FROM users WHERE email = %s OR login = %s", (login, login))
                 user = cursor.fetchone()
-                if not user or user['password'] != password: return self.send_json(401, {"status": "error", "message": "Неверный логин или пароль"})
+                if not user or not bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')): 
+                    return self.send_json(401, {"status": "error", "message": "Неверный логин или пароль"})
                 if user['SingUpToken']: return self.send_json(403, {"status": "error", "message": "Аккаунт не подтвержден"})
                 token = jwt.encode({'user_id': user['id'], 'exp': datetime.utcnow() + timedelta(days=7)}, JWT_SECRET, algorithm='HS256')
                 if isinstance(token, bytes): token = token.decode('utf-8')
@@ -411,7 +415,8 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 cursor.execute("SELECT id FROM users WHERE RecoveryToken = %s AND RecoveryTokenDelTime > NOW()", (token,))
                 user = cursor.fetchone()
                 if user:
-                    cursor.execute("UPDATE users SET password = %s, RecoveryToken = NULL, RecoveryTokenDelTime = NULL WHERE id = %s", (password, user['id']))
+                    hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                    cursor.execute("UPDATE users SET password = %s, RecoveryToken = NULL, RecoveryTokenDelTime = NULL WHERE id = %s", (hashed_pw, user['id']))
                     cursor.execute("UPDATE devices SET user_id = NULL WHERE user_id = %s", (user['id'],))
                     conn.commit()
                     self.send_json(200, {"status": "success", "message": "Пароль изменен"})
@@ -419,59 +424,73 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 
             elif self.path == '/get_devices':
                 mac = data.get('mac')
-                cursor.execute("SELECT user_id, access_list FROM devices WHERE mac = %s", (mac,))
+                cursor.execute("SELECT id, user_id FROM devices WHERE mac = %s", (mac,))
                 device = cursor.fetchone()
                 if not device: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-                account_devices = []; my_devices = []; processed_macs = {mac}
+
+                account_devices = []
+                my_devices = []
+                processed_macs = {mac}
+
                 if device['user_id']:
-                    cursor.execute("SELECT mac, device_name, (websocket_id IS NOT NULL) as is_online FROM devices WHERE user_id = %s AND mac != %s", (device['user_id'], mac))
+                    cursor.execute("SELECT mac, device_name, is_online FROM devices WHERE user_id = %s AND mac != %s", (device['user_id'], mac))
                     for d in cursor.fetchall():
                         account_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": True})
                         processed_macs.add(d['mac'])
-                access_list = device['access_list'] or ''
-                access_macs = [m.strip() for m in access_list.split(';') if m.strip() and m.strip() not in processed_macs]
-                if access_macs:
-                    ph = ','.join(['%s'] * len(access_macs))
-                    cursor.execute(f"SELECT mac, device_name, (websocket_id IS NOT NULL) as is_online FROM devices WHERE mac IN ({ph})", tuple(access_macs))
-                    for d in cursor.fetchall():
+
+                # Кто дал доступ мне (я в гостях)
+                cursor.execute("""
+                    SELECT d.mac, d.device_name, d.is_online 
+                    FROM device_access da JOIN devices d ON da.owner_id = d.id 
+                    WHERE da.guest_id = %s
+                """, (device['id'],))
+                for d in cursor.fetchall():
+                    if d['mac'] not in processed_macs:
                         my_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": False})
+                        processed_macs.add(d['mac'])
+
+                # Кому я дал доступ
+                cursor.execute("""
+                    SELECT d.mac, d.device_name, d.is_online 
+                    FROM device_access da JOIN devices d ON da.guest_id = d.id 
+                    WHERE da.owner_id = %s
+                """, (device['id'],))
+                for d in cursor.fetchall():
+                    if d['mac'] not in processed_macs:
+                        my_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": False})
+                        processed_macs.add(d['mac'])
+
                 self.send_json(200, {"status": "success", "account_devices": account_devices, "my_devices": my_devices})
 
             elif self.path == '/connect_device':
                 req_mac = data.get('MAC'); dev_name = data.get('DeviceName'); pwd = data.get('Password')
-                cursor.execute("SELECT mac, password, access_list FROM devices WHERE device_name = %s", (dev_name,))
+                cursor.execute("SELECT id, mac, password FROM devices WHERE device_name = %s", (dev_name,))
                 target = cursor.fetchone()
-                cursor.execute("SELECT access_list FROM devices WHERE mac = %s", (req_mac,))
+                cursor.execute("SELECT id FROM devices WHERE mac = %s", (req_mac,))
                 requester = cursor.fetchone()
+                
                 if not target: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-                if target['password'] != pwd: return self.send_json(401, {"status": "error", "message": "Неверный пароль"})
+                if not bcrypt.checkpw(pwd.encode('utf-8'), target['password'].encode('utf-8')): return self.send_json(401, {"status": "error", "message": "Неверный пароль"})
                 if req_mac == target['mac']: return self.send_json(400, {"status": "error", "message": "Само к себе"})
                 if not requester: return self.send_json(404, {"status": "error", "message": "Инициатор не найден"})
-                def add_mac(alist, mac):
-                    parts = [p for p in (alist or '').split(';') if p]
-                    if mac not in parts: parts.append(mac)
-                    return ';'.join(parts) + ';'
-                new_target_list = add_mac(target['access_list'], req_mac)
-                new_req_list = add_mac(requester['access_list'], target['mac'])
-                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_target_list, target['mac']))
-                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_req_list, req_mac))
+                
+                cursor.execute("INSERT IGNORE INTO device_access (owner_id, guest_id) VALUES (%s, %s), (%s, %s)", (target['id'], requester['id'], requester['id'], target['id']))
                 conn.commit()
                 self.send_json(200, {"status": "success", "message": "Подключено", "target_mac": target['mac'], "target_device_name": dev_name})
 
             elif self.path == '/disconnect_device':
                 req_mac = data.get('requester_mac'); target_mac = data.get('target_mac')
-                cursor.execute("SELECT mac, access_list FROM devices WHERE mac IN (%s, %s)", (req_mac, target_mac))
-                devs = {r['mac']: r for r in cursor.fetchall()}
+                cursor.execute("SELECT id, mac FROM devices WHERE mac IN (%s, %s)", (req_mac, target_mac))
+                devs = {r['mac']: r['id'] for r in cursor.fetchall()}
+                
                 if len(devs) != 2: return self.send_json(404, {"status": "error", "message": "Устройства не найдены"})
-                def remove_mac(alist, mac):
-                    parts = [p for p in (alist or '').split(';') if p and p != mac]
-                    return ';'.join(parts) + ';' if parts else ''
-                new_req = remove_mac(devs[req_mac]['access_list'], target_mac)
-                new_tar = remove_mac(devs[target_mac]['access_list'], req_mac)
-                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_req, req_mac))
-                cursor.execute("UPDATE devices SET access_list = %s WHERE mac = %s", (new_tar, target_mac))
+                
+                req_id = devs[req_mac]
+                tar_id = devs[target_mac]
+                
+                cursor.execute("DELETE FROM device_access WHERE (owner_id=%s AND guest_id=%s) OR (owner_id=%s AND guest_id=%s)", (req_id, tar_id, tar_id, req_id))
                 conn.commit()
-                self.send_json(200, {"status": "success", "message": "Отключено", "requester_new_list": new_req, "target_new_list": new_tar})
+                self.send_json(200, {"status": "success", "message": "Отключено"})
 
             elif self.path == '/clear_history':
                 token = data.get('token'); mac = data.get('mac')
