@@ -1,6 +1,7 @@
 let streamAudioContext = null;
 let nextPlayTime = 0;
 let vadState = 'idle'; // idle, listening, recording, processing, playing
+let isMicrophoneActive = false; // Глобальный рубильник
 
 // --- Web Speech API (только для стоп-слов) ---
 let stopWordRecognizer = null;
@@ -32,8 +33,8 @@ function stopPlayback() {
     if (streamAudioContext) { streamAudioContext.close(); streamAudioContext = null; nextPlayTime = 0; }
     stopStopWordDetection();
     if (vadState === 'playing') {
-        vadState = 'listening';
-        updatePendingBubble(''); // Очищаем статус, если микрофон включен
+        vadState = isMicrophoneActive ? 'listening' : 'idle';
+        updatePendingBubble('');
     }
 }
 
@@ -58,12 +59,16 @@ async function playPCM24kHz(base64Data) {
         if (nextPlayTime < streamAudioContext.currentTime) nextPlayTime = streamAudioContext.currentTime;
         
         vadState = 'playing';
-        startStopWordDetection();
+        // ИСПРАВЛЕНИЕ: Слушаем стоп-слова, ТОЛЬКО если микрофон реально включен пользователем!
+        if (isMicrophoneActive) {
+            startStopWordDetection();
+        }
 
         source.onended = () => {
             if (streamAudioContext && streamAudioContext.currentTime >= nextPlayTime - 0.1) {
                 if (vadState === 'playing') {
-                    vadState = 'listening';
+                    // ИСПРАВЛЕНИЕ: Возвращаемся в 'listening' только если микрофон не выключен
+                    vadState = isMicrophoneActive ? 'listening' : 'idle';
                     stopStopWordDetection();
                 }
             }
@@ -81,24 +86,88 @@ let currentFile = null;
 let messageHistory = []; 
 let pendingBubbleId = null;
 
+// Функции для кнопок редактирования и удаления
+window.editMessage = async function(msgId) {
+    const bubble = document.getElementById('msg_' + msgId);
+    if (!bubble) return;
+    const textDiv = bubble.querySelector('div:first-child');
+    const oldText = textDiv.textContent;
+    
+    const newText = prompt("Редактировать сообщение:", oldText);
+    if (newText && newText.trim() !== "" && newText !== oldText) {
+        textDiv.textContent = newText;
+        const token = localStorage.getItem('token');
+        if (token) {
+            try {
+                await fetch('/edit_message', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: token, msg_id: msgId, new_text: newText })
+                });
+            } catch (e) { showNotification("Ошибка редактирования", "error"); }
+        } else {
+            // Для гостей правим историю локально
+            const msgObj = messageHistory.find(m => m.timestamp && m.content === oldText);
+            if(msgObj) { msgObj.content = newText; localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory)); }
+        }
+    }
+}
+
+window.deleteMessage = async function(msgId) {
+    const bubble = document.getElementById('msg_' + msgId);
+    if (!bubble) return;
+    
+    const token = localStorage.getItem('token');
+    if (token) {
+        try {
+            const resp = await fetch('/delete_message', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: token, msg_id: msgId })
+            });
+            if (resp.ok) bubble.remove();
+        } catch (e) { showNotification("Ошибка удаления", "error"); }
+    } else {
+        const text = bubble.querySelector('div:first-child').textContent;
+        messageHistory = messageHistory.filter(m => m.content !== text);
+        localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
+        bubble.remove();
+    }
+}
+
 function addMessage(role, content, skipHistory = false, msgId = null) {
     const chatMessages = document.getElementById('chatMessages');
     const messageElement = document.createElement('div');
     messageElement.classList.add('message');
     messageElement.classList.add(role === 'user' ? 'user-message' : 'bot-message');
 
-    if (msgId) {
-        messageElement.id = 'msg_' + msgId;
-    } else if (content === '🎤 [Слушаю...]') {
-        pendingBubbleId = 'msg_' + Date.now();
+    // Если нет msgId, генерируем временный для фронта
+    const actualMsgId = msgId || Date.now() + Math.floor(Math.random()*1000);
+    
+    if (content === '🎤 [Слушаю...]') {
+        pendingBubbleId = 'msg_' + actualMsgId;
         messageElement.id = pendingBubbleId;
+    } else {
+        messageElement.id = 'msg_' + actualMsgId;
     }
 
     const now = new Date();
     const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
     function escapeHtml(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
-    messageElement.innerHTML = `<div>${escapeHtml(content)}</div><div class="message-time">${timeString}</div>`;
+    
+    // ДОБАВЛЯЕМ КНОПКИ РЕДАКТИРОВАНИЯ/УДАЛЕНИЯ ТОЛЬКО НА ГОТОВЫЕ СООБЩЕНИЯ
+    let actionsHtml = '';
+    if (!content.includes('🎤') && !content.includes('⏳')) {
+        actionsHtml = `
+            <div class="message-actions">
+                <button onclick="editMessage('${actualMsgId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button>
+                <button onclick="deleteMessage('${actualMsgId}')" title="Удалить"><i class="fas fa-trash"></i></button>
+            </div>
+        `;
+    }
+
+    messageElement.innerHTML = `<div>${escapeHtml(content)}</div><div class="message-time">${timeString}</div>${actionsHtml}`;
     chatMessages.appendChild(messageElement);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     
@@ -115,8 +184,8 @@ function updatePendingBubble(text) {
     if (!pendingBubbleId) return;
     const b = document.getElementById(pendingBubbleId);
     if (b) {
-        b.querySelector('div').textContent = text;
-        if (!text.includes('⏳') && !text.includes('🎤') && !localStorage.getItem('token')) {
+        b.querySelector('div:first-child').textContent = text;
+        if (!text.includes('⏳') && !text.includes('🎤') && !text.includes('Аудиосообщение') && !localStorage.getItem('token')) {
             messageHistory.push({ role: 'user', content: text, timestamp: new Date().toISOString() });
             localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
         }
@@ -129,10 +198,20 @@ function removePendingBubble() {
     if (b) { b.remove(); pendingBubbleId = null; }
 }
 
-// Единая функция для обработки стрима (И для WebSocket, и для HTTP SSE)
 function handleIncomingStreamData(data) {
     if (data.type === 'user_transcription') {
         updatePendingBubble(data.text);
+        
+        // После получения транскрипции добавляем к бабблу кнопки управления
+        const b = document.getElementById(pendingBubbleId);
+        if (b && !data.text.includes('Аудиосообщение')) {
+            const actualId = pendingBubbleId.replace('msg_', '');
+            b.insertAdjacentHTML('beforeend', `
+            <div class="message-actions">
+                <button onclick="editMessage('${actualId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button>
+                <button onclick="deleteMessage('${actualId}')" title="Удалить"><i class="fas fa-trash"></i></button>
+            </div>`);
+        }
         pendingBubbleId = null; 
     }
     
@@ -163,6 +242,12 @@ function handleIncomingStreamData(data) {
         if (data.actions && Array.isArray(data.actions)) {
             data.actions.forEach(action => {
                 if (action.action_type === 'очистка истории') clearHistory();
+                if (action.action_type === 'выключить микрофон') {
+                    if (isMicrophoneActive) {
+                        document.getElementById('microphone-btn').click();
+                        showNotification("Микрофон выключен ассистентом", "info");
+                    }
+                }
                 if (action.action_type === 'смена голоса') {
                     const select = document.getElementById('voice-type');
                     for (let i = 0; i < select.options.length; i++) {
@@ -234,7 +319,7 @@ function connectWebSocket() {
                 chatMessages.innerHTML = '';
                 if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
                 data.history.forEach(msg => {
-                    if (msg.sender === 'Вы') addMessage('user', msg.text, true);
+                    if (msg.sender === 'Вы') addMessage('user', msg.text, true, msg.id);
                     else {
                         const actionBlocks = msg.text.split('⸵');
                         let displayText = "";
@@ -243,11 +328,11 @@ function connectWebSocket() {
                             if (sepIndex !== -1) displayText += action.substring(sepIndex + 1).trim() + '\n\n';
                             else displayText += action + '\n\n';
                         });
-                        if (displayText.trim()) addMessage('assistant', displayText.trim(), true);
+                        if (displayText.trim()) addMessage('assistant', displayText.trim(), true, msg.id);
                     }
                 });
             } else {
-                handleIncomingStreamData(data); // Отдаем парсеру
+                handleIncomingStreamData(data);
             }
         } catch (error) { }
     };
@@ -333,7 +418,7 @@ function loadGuestMessageHistory() {
             const welcomeMessage = chatMessages.querySelector('.bot-message');
             chatMessages.innerHTML = '';
             if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
-            messageHistory.forEach(msg => { addMessage(msg.role, msg.content, true); });
+            messageHistory.forEach((msg, idx) => { addMessage(msg.role, msg.content, true, 'guest_' + idx); });
         } catch (error) { messageHistory = []; }
     }
 }
@@ -397,9 +482,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         return window.btoa(binary);
     }
 
-    // ИСПРАВЛЕНО: Микрофон больше не вызывает stopPlayback при клике
     microphoneBtn.addEventListener('click', async function() {
-        if (vadState === 'idle') {
+        if (!isMicrophoneActive) {
             try {
                 micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
                 micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -419,6 +503,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 zeroGain.connect(micAudioContext.destination);
 
                 vadState = 'listening';
+                isMicrophoneActive = true;
                 this.classList.add('active');
                 this.querySelector('span').textContent = 'Микрофон включен';
 
@@ -461,6 +546,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
         } else {
             vadState = 'idle';
+            isMicrophoneActive = false;
             this.classList.remove('active');
             this.querySelector('span').textContent = 'Включить микрофон';
             pcmBuffer = []; preBuffer = [];
@@ -468,8 +554,44 @@ document.addEventListener('DOMContentLoaded', async function() {
             if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null; }
             if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
             if (micAudioContext) { micAudioContext.close(); micAudioContext = null; }
+            stopPlayback();
         }
     });
+
+    // ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ ДЛЯ СТРИМА HTTP
+    async function sendFetchRequest(requestData) {
+        try {
+            const response = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestData) });
+            if (!response.ok) throw new Error(`Ошибка сервера`);
+            
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder("utf-8");
+            let buffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                
+                buffer += decoder.decode(value, { stream: true });
+                let messages = buffer.split('\n\n');
+                buffer = messages.pop(); 
+
+                for (let msg of messages) {
+                    if (msg.startsWith('data: ')) {
+                        try {
+                            const data = JSON.parse(msg.substring(6));
+                            handleIncomingStreamData(data);
+                        } catch(e) {}
+                    }
+                }
+            }
+            
+            currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
+        } catch (error) { 
+            showNotification('Ошибка при обработке запроса', 'error'); 
+            if (vadState === 'processing') { vadState = isMicrophoneActive ? 'listening' : 'idle'; removePendingBubble(); }
+        }
+    }
 
     async function sendToServer(prompt, command_type, audio_base64 = null) {
         try {
@@ -525,42 +647,7 @@ document.addEventListener('DOMContentLoaded', async function() {
             }
         } catch (error) { 
             showNotification('Ошибка при обработке запроса', 'error'); 
-            if (vadState === 'processing') { vadState = 'listening'; removePendingBubble(); }
-        }
-    }
-
-    // ИСПРАВЛЕНО: Теперь HTTP-запрос читает SSE-стрим
-    async function sendFetchRequest(requestData) {
-        try {
-            const response = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestData) });
-            if (!response.ok) throw new Error(`Ошибка сервера`);
-            
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder("utf-8");
-            let buffer = "";
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                
-                buffer += decoder.decode(value, { stream: true });
-                let messages = buffer.split('\n\n');
-                buffer = messages.pop(); 
-
-                for (let msg of messages) {
-                    if (msg.startsWith('data: ')) {
-                        try {
-                            const data = JSON.parse(msg.substring(6));
-                            handleIncomingStreamData(data); // Передаем в тот же парсер, что и WS!
-                        } catch(e) {}
-                    }
-                }
-            }
-            
-            currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
-        } catch (error) { 
-            showNotification('Ошибка при обработке запроса', 'error'); 
-            if (vadState === 'processing') { vadState = 'listening'; removePendingBubble(); }
+            if (vadState === 'processing') { vadState = isMicrophoneActive ? 'listening' : 'idle'; removePendingBubble(); }
         }
     }
 

@@ -62,6 +62,13 @@ select, input[type="text"] { padding: 8px 12px; border-radius: 6px; border: 1px 
 .bot-message { align-self: flex-start; background: var(--chat-bot); color: #333; border-bottom-left-radius: 4px; }
 .message-time { font-size: 0.7rem; opacity: 0.7; margin-top: 5px; text-align: right; }
 
+/* === НОВЫЕ КНОПКИ РЕДАКТИРОВАНИЯ И УДАЛЕНИЯ === */
+.message-actions { display: none; position: absolute; bottom: -15px; right: 10px; background: white; border-radius: 12px; box-shadow: 0 2px 5px rgba(0,0,0,0.2); padding: 2px 5px; z-index: 10; gap: 5px; }
+.message:hover .message-actions { display: flex; }
+.message-actions button { background: none; border: none; cursor: pointer; font-size: 0.85rem; padding: 4px; color: #555; transition: color 0.2s; }
+.message-actions button:hover { color: var(--primary); }
+.user-message .message-actions { left: 10px; right: auto; } /* Для сообщений юзера кнопки слева */
+
 .chat-input { display: flex; padding: 20px; background: white; border-top: 1px solid #e0e0e0; align-items: flex-end; }
 .chat-input-wrapper { flex: 1; position: relative; display: flex; align-items: center; background: #f9f9f9; border-radius: 24px; border: 1px solid #ddd; padding: 5px 15px; min-height: 46px; }
 .chat-input textarea { flex: 1; border: none; outline: none; font-size: 1rem; resize: none; background: transparent; max-height: 120px; padding: 8px 0; font-family: inherit; }
