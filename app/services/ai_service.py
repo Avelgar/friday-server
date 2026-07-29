@@ -38,25 +38,16 @@ class AIService:
 
     def generate_image(self, prompt, model_type="generate"):
         """
-        Синхронная функция генерации картинок Imagen 4. 
-        Принимает prompt и model_type (fast, generate, ultra).
+        Генерация картинок через новые модели Gemini Image (например, gemini-2.5-flash-image)
+        с использованием метода generate_content вместо устаревшего predict.
         """
+        # Маппинг на новые модели, которые действительно поддерживаются вашими ключами
         models_map = {
-            "fast": "models/imagen-4.0-fast-generate-001",
-            "generate": "models/imagen-4.0-generate-001",
-            "ultra": "models/imagen-4.0-ultra-generate-001"
+            "fast": "gemini-3.1-flash-lite-image",
+            "generate": "gemini-2.5-flash-image",
+            "ultra": "gemini-3-pro-image"
         }
         model_id = models_map.get(model_type, models_map["generate"])
-
-        config = {
-            "number_of_images": 1,
-            "person_generation": "ALLOW_ADULT",
-            "aspect_ratio": "1:1",
-        }
-        
-        # Fast модель не принимает image_size, для остальных ставим 1K
-        if model_type != "fast":
-            config["image_size"] = "1K"
 
         total_keys_tried = 0
         last_error_msg = ""
@@ -66,41 +57,59 @@ class AIService:
             try:
                 client = self._get_client()
                 
-                logger.info(f"[IMAGE GEN] Попытка генерации {model_type} (Ключ: {self.current_key_index})")
+                logger.info(f"[IMAGE GEN] Генерация через {model_id} (Ключ индекс: {self.current_key_index})")
                 
-                result = client.models.generate_images(
+                # Новые модельные ряды gemini-*-image используют generate_content
+                response = client.models.generate_content(
                     model=model_id,
-                    prompt=prompt,
-                    config=config
+                    contents=prompt,
+                    # Можно указать конфигурацию, если требуется, но для дефолта достаточно contents
                 )
 
-                if not result.generated_images:
-                    raise Exception("Изображения не были сгенерированы (возможно блок фильтров безопасности).")
+                image_bytes = None
 
-                generated_image = result.generated_images[0]
-                image_data = None
+                # Ищем инлайн-данные (изображение) в ответе модели
+                if response.candidates:
+                    for candidate in response.candidates:
+                        if candidate.content and candidate.content.parts:
+                            for part in candidate.content.parts:
+                                # Проверяем, есть ли картинка в байтах или в file_data/inline_data
+                                if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                                    image_bytes = part.inline_data.data
+                                    break
+                        if image_bytes:
+                            break
 
-                # Пытаемся извлечь байты (зависит от версии библиотеки google-genai)
-                if hasattr(generated_image.image, 'image_bytes') and generated_image.image.image_bytes:
-                    image_data = generated_image.image.image_bytes
-                else:
-                    # Фоллбек через BytesIO (если SDK возвращает PIL Image или объект с методом save)
-                    buffered = io.BytesIO()
-                    # Сохраняем в память (вместо файла)
-                    generated_image.image.save(buffered, format="JPEG")
-                    image_data = buffered.getvalue()
+                # Альтернативный вариант поиска байтов через sdk-структуры
+                if not image_bytes and hasattr(response, 'inline_data') and response.inline_data:
+                    image_bytes = response.inline_data.data
 
-                if not image_data:
-                    raise Exception("Не удалось получить байты изображения")
+                # Если модель вернула картинку в тексте как base64 или иным способом (на всякий случай)
+                if not image_bytes and response.text:
+                    # Некоторые версии могут вернуть текст, попробуем забрать из кандидатов напрямую
+                    pass
 
-                return base64.b64encode(image_data).decode('utf-8')
+                if not image_bytes:
+                    # Попробуем пройтись по всем частям ответа универсально
+                    try:
+                        for part in response.parts:
+                            if part.inline_data:
+                                image_bytes = part.inline_data.data
+                                break
+                    except Exception:
+                        pass
+
+                if not image_bytes:
+                    raise Exception(f"Модель {model_id} не вернула байты изображения в ответе.")
+
+                return base64.b64encode(image_bytes).decode('utf-8')
 
             except Exception as e:
                 logger.warning(f"[IMAGE GEN ERROR] Ошибка на ключе {self.current_key_index}: {e}")
                 last_error_msg = str(e)
                 total_keys_tried += 1
                 
-        raise Exception(f"AI Image Service недоступен (Перебраны все ключи). Последняя ошибка: {last_error_msg}")
+        raise Exception(f"AI Image Service недоступен. Последняя ошибка: {last_error_msg}")
 
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         self._rotate_key()
