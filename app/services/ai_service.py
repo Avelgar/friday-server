@@ -3,6 +3,7 @@ import base64
 import asyncio
 import logging
 import json
+import io
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -34,6 +35,72 @@ class AIService:
         if len(self.api_keys) <= 1: return False
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
+
+    def generate_image(self, prompt, model_type="generate"):
+        """
+        Синхронная функция генерации картинок Imagen 4. 
+        Принимает prompt и model_type (fast, generate, ultra).
+        """
+        models_map = {
+            "fast": "models/imagen-4.0-fast-generate-001",
+            "generate": "models/imagen-4.0-generate-001",
+            "ultra": "models/imagen-4.0-ultra-generate-001"
+        }
+        model_id = models_map.get(model_type, models_map["generate"])
+
+        config = {
+            "number_of_images": 1,
+            "person_generation": "ALLOW_ADULT",
+            "aspect_ratio": "1:1",
+        }
+        
+        # Fast модель не принимает image_size, для остальных ставим 1K
+        if model_type != "fast":
+            config["image_size"] = "1K"
+
+        total_keys_tried = 0
+        last_error_msg = ""
+        
+        while total_keys_tried < len(self.api_keys):
+            self._rotate_key()
+            try:
+                client = self._get_client()
+                
+                logger.info(f"[IMAGE GEN] Попытка генерации {model_type} (Ключ: {self.current_key_index})")
+                
+                result = client.models.generate_images(
+                    model=model_id,
+                    prompt=prompt,
+                    config=config
+                )
+
+                if not result.generated_images:
+                    raise Exception("Изображения не были сгенерированы (возможно блок фильтров безопасности).")
+
+                generated_image = result.generated_images[0]
+                image_data = None
+
+                # Пытаемся извлечь байты (зависит от версии библиотеки google-genai)
+                if hasattr(generated_image.image, 'image_bytes') and generated_image.image.image_bytes:
+                    image_data = generated_image.image.image_bytes
+                else:
+                    # Фоллбек через BytesIO (если SDK возвращает PIL Image или объект с методом save)
+                    buffered = io.BytesIO()
+                    # Сохраняем в память (вместо файла)
+                    generated_image.image.save(buffered, format="JPEG")
+                    image_data = buffered.getvalue()
+
+                if not image_data:
+                    raise Exception("Не удалось получить байты изображения")
+
+                return base64.b64encode(image_data).decode('utf-8')
+
+            except Exception as e:
+                logger.warning(f"[IMAGE GEN ERROR] Ошибка на ключе {self.current_key_index}: {e}")
+                last_error_msg = str(e)
+                total_keys_tried += 1
+                
+        raise Exception(f"AI Image Service недоступен (Перебраны все ключи). Последняя ошибка: {last_error_msg}")
 
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         self._rotate_key()
