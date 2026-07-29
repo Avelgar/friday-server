@@ -2,12 +2,14 @@ let streamAudioContext = null;
 let nextPlayTime = 0;
 
 // Разделенные состояния:
-let isPlaying = false; // Состояние воспроизведения аудио от бота
-let vadState = 'idle'; // Состояние диктофона (idle, recording, processing)
-let isMicrophoneActive = false; // Включен ли микрофон кнопкой в UI
+let isPlaying = false; 
+let vadState = 'idle'; 
+let isMicrophoneActive = false; 
 
 let stopWordRecognizer = null;
 const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
+
+let ignoredMessageId = null; // Флаг для игнорирования текста после очистки истории
 
 function initStopWordDetection() {
     if (!stopWordRecognizer && ('webkitSpeechRecognition' in window)) {
@@ -193,7 +195,6 @@ function handleIncomingStreamData(data) {
         const userBubble = document.getElementById('msg_' + data.ui_msg_id);
         if (userBubble) {
             userBubble.id = 'msg_' + data.user_msg_id;
-            // ИСПРАВЛЕНИЕ: Обновляем pendingBubbleId, если он совпадал с временным ID
             if (pendingBubbleId === 'msg_' + data.ui_msg_id) {
                 pendingBubbleId = 'msg_' + data.user_msg_id;
             }
@@ -218,11 +219,38 @@ function handleIncomingStreamData(data) {
         pendingBubbleId = null; 
     }
     
-    if (data.type === 'new_message') {
-        if (vadState === 'processing') vadState = 'idle'; // Возвращаем VAD в режим ожидания
+    // Обработка действий (actions) идет ДО отрисовки текста,
+    // чтобы мы могли перехватить "очистку истории" и скрыть текст.
+    if (data.actions && Array.isArray(data.actions)) {
+        data.actions.forEach(action => {
+            if (action.action_type === 'очистка истории') {
+                ignoredMessageId = data.message_id || data.ui_msg_id;
+                clearHistory();
+            }
+            if (action.action_type === 'выключить микрофон') {
+                if (isMicrophoneActive) {
+                    document.getElementById('microphone-btn').click();
+                    showNotification("Микрофон выключен ассистентом", "info");
+                }
+            }
+            if (action.action_type === 'смена голоса') {
+                const select = document.getElementById('voice-type');
+                for (let i = 0; i < select.options.length; i++) {
+                    if (select.options[i].value.toLowerCase() === String(action.action_value).toLowerCase()) {
+                        select.selectedIndex = i; saveSettingsToLocalStorage(); break;
+                    }
+                }
+            }
+        });
+    }
 
-        if (data.text) {
-            const msgId = data.message_id || data.ui_msg_id;
+    if (data.type === 'new_message') {
+        if (vadState === 'processing') vadState = 'idle';
+
+        const msgId = data.message_id || data.ui_msg_id;
+
+        // Отрисовываем текст ТОЛЬКО если это сообщение не было проигнорировано при очистке
+        if (data.text && msgId !== ignoredMessageId) {
             const bubbleId = msgId ? 'msg_' + msgId : null;
             let existingBubble = bubbleId ? document.getElementById(bubbleId) : null;
 
@@ -241,26 +269,6 @@ function handleIncomingStreamData(data) {
                 addMessage('assistant', data.text, false, msgId);
             }
         }
-        
-        if (data.actions && Array.isArray(data.actions)) {
-            data.actions.forEach(action => {
-                if (action.action_type === 'очистка истории') clearHistory();
-                if (action.action_type === 'выключить микрофон') {
-                    if (isMicrophoneActive) {
-                        document.getElementById('microphone-btn').click();
-                        showNotification("Микрофон выключен ассистентом", "info");
-                    }
-                }
-                if (action.action_type === 'смена голоса') {
-                    const select = document.getElementById('voice-type');
-                    for (let i = 0; i < select.options.length; i++) {
-                        if (select.options[i].value.toLowerCase() === String(action.action_value).toLowerCase()) {
-                            select.selectedIndex = i; saveSettingsToLocalStorage(); break;
-                        }
-                    }
-                }
-            });
-        }
     }
 
     if (data.type === 'delete_message') removePendingBubble();
@@ -272,25 +280,20 @@ const clearHistoryBtn = document.getElementById('clear-history');
 clearHistoryBtn.addEventListener('click', async function() { clearHistory(); });
 
 async function clearHistory(){
+    // Сразу моментально очищаем интерфейс
+    document.getElementById('chatMessages').innerHTML = '';
+    
     const token = localStorage.getItem('token');
     if (token) {
         try {
             const response = await fetch('/clear_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) });
             const data = await response.json();
             if (data.status === 'success') {
-                const chatMessages = document.getElementById('chatMessages');
-                const welcomeMessage = chatMessages.querySelector('.bot-message');
-                chatMessages.innerHTML = '';
-                if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
                 showNotification(data.message, 'success');
             } else showNotification(data.message, 'error');
         } catch (error) { showNotification('Произошла ошибка при очистке истории', 'error'); }
     } else {
         messageHistory = []; localStorage.removeItem('guestMessageHistory');
-        const chatMessages = document.getElementById('chatMessages');
-        const welcomeMessage = chatMessages.querySelector('.bot-message');
-        chatMessages.innerHTML = '';
-        if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
         showNotification('История чата очищена', 'info');
     }
 }
@@ -318,9 +321,16 @@ function connectWebSocket() {
             
             if (data.status === 'success' && data.history && Array.isArray(data.history)) {
                 const chatMessages = document.getElementById('chatMessages');
-                const welcomeMessage = chatMessages.querySelector('.bot-message');
                 chatMessages.innerHTML = '';
-                if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
+                
+                if (data.history.length === 0) {
+                    chatMessages.innerHTML = `
+                        <div class="message bot-message">
+                            <div>Привет! Я ваш персональный ассистент Friday. Чем могу помочь?</div>
+                            <div class="message-time">Только что</div>
+                        </div>`;
+                }
+
                 data.history.forEach(msg => {
                     if (msg.sender === 'Вы') addMessage('user', msg.text, true, msg.id);
                     else {
@@ -395,10 +405,13 @@ async function logout() {
         localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null;
         updateAuthUI();
         messageHistory = []; localStorage.removeItem('guestMessageHistory');
-        const chatMessages = document.getElementById('chatMessages');
-        const welcomeMessage = chatMessages.querySelector('.bot-message');
-        chatMessages.innerHTML = '';
-        if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
+        
+        document.getElementById('chatMessages').innerHTML = `
+            <div class="message bot-message">
+                <div>Привет! Я ваш персональный ассистент Friday. Чем могу помочь?</div>
+                <div class="message-time">Только что</div>
+            </div>`;
+            
         showNotification('Вы успешно вышли из системы', 'success');
     } catch (error) { showNotification('Произошла ошибка при выходе из системы', 'error'); }
 }
@@ -417,11 +430,10 @@ function loadGuestMessageHistory() {
     if (savedHistory && !localStorage.getItem('token')) {
         try {
             messageHistory = JSON.parse(savedHistory);
-            const chatMessages = document.getElementById('chatMessages');
-            const welcomeMessage = chatMessages.querySelector('.bot-message');
-            chatMessages.innerHTML = '';
-            if (welcomeMessage) chatMessages.appendChild(welcomeMessage);
-            messageHistory.forEach((msg, idx) => { addMessage(msg.role, msg.content, true, 'guest_' + idx); });
+            if (messageHistory.length > 0) {
+                document.getElementById('chatMessages').innerHTML = '';
+                messageHistory.forEach((msg, idx) => { addMessage(msg.role, msg.content, true, 'guest_' + idx); });
+            }
         } catch (error) { messageHistory = []; }
     }
 }
@@ -446,7 +458,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     voiceType.addEventListener('change', saveSettingsToLocalStorage);
     messageInput.addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; });
 
-    // Инициализация аудио-переменных
     let micAudioContext = null;
     let audioWorkletNode = null;
     let micStream = null;
@@ -516,8 +527,8 @@ document.addEventListener('DOMContentLoaded', async function() {
         zeroGain.connect(micAudioContext.destination);
 
         audioWorkletNode.port.onmessage = (e) => {
-            if (!isMicrophoneActive) return; // Если микрофон выключен аппаратно, игнорируем
-            if (isPlaying || vadState === 'processing') return; // Игнорируем, если бот говорит или мы в обработке
+            if (!isMicrophoneActive) return; 
+            if (isPlaying || vadState === 'processing') return; 
 
             const { pcm, volume } = e.data;
 
@@ -553,7 +564,6 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     microphoneBtn.addEventListener('click', async function() {
         if (!isMicrophoneActive) {
-            // Включаем микрофон
             try {
                 await startMicStream();
                 isMicrophoneActive = true;
@@ -564,27 +574,23 @@ document.addEventListener('DOMContentLoaded', async function() {
                 showNotification('Ошибка доступа к микрофону', 'error');
             }
         } else {
-            // Выключаем микрофон
             isMicrophoneActive = false;
             this.classList.remove('active');
             this.querySelector('span').textContent = 'Включить микрофон';
             
             if (vadState === 'recording') {
-                // Если мы что-то наговорили и нажали "выключить" - принудительно отправляем!
                 sendCurrentRecording();
             } else if (vadState === 'processing') {
-                // ИСПРАВЛЕНИЕ: Запрос уже ушел на сервер (Транскрибирую...). 
-                // Ничего не сбрасываем и плашку НЕ удаляем! Просто ждем ответа.
+                // Ждем ответа, ничего не сбрасываем
             } else {
-                // Если мы просто молчали (idle)
                 vadState = 'idle';
                 pcmBuffer = []; preBuffer = [];
-                removePendingBubble(); // Удаляем плашку "Слушаю..."
+                removePendingBubble();
             }
             stopMicStream();
         }
     });
-    
+
     async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id = null) {
         try {
             const token = localStorage.getItem('token');
