@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("WS_Server")
 
 active_connections = {}  
-mac_to_websocket = {} # НОВАЯ СИСТЕМА ОНЛАЙН СТАТУСОВ
+mac_to_websocket = {} 
 ws_to_mac = {}
 last_ping_times = {}     
 PING_TIMEOUT = 70
@@ -32,13 +32,12 @@ HISTORY_LIMIT = 10
 
 CAP_PC = "открытие ссылки (принимает полную ссылку URL), напечатать текст (принимает текст), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (координаты X, Y), уведомление (принимает текст), музыка (включить/выключить/следующий/предыдущий), смена имени (принимает текст), смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100)"
 CAP_PHONE = "открытие ссылки (принимает полную ссылку URL), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100), музыка (включить/выключить/следующий/предыдущий), выключить микрофон (принимает любой текст), очистка истории (любой текст), режим камеры (любой текст), выключить режим камеры (любой текст)"
-CAP_WEB = "смена голоса (Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
+CAP_WEB = "смена имени (принимает текст), смена голоса (Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
 
 ACT_PC = "открытие ссылки, открытие файла, завершение процесса, напечатать текст, нажать кнопку мыши, переместить мышь, уведомление, музыка, смена имени, смена голоса, выключить микрофон, очистка истории, изменение громкости, изменение яркости, check_network_devices, get_running_processes, get_installed_programs, request_retry"
 ACT_PHONE = "открытие ссылки, изменение громкости, изменение яркости, музыка, выключить микрофон, очистка истории, режим камеры, выключить режим камеры, check_network_devices, get_running_processes, get_installed_programs, request_retry"
-ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
+ACT_WEB = "смена имени, смена голоса, выключить микрофон, очистка истории, check_network_devices"
 
-# === ПРИ СТАРТЕ СЕРВЕРА СБРАСЫВАЕМ ВСЕ СТАТУСЫ В ОФФЛАЙН ===
 try:
     startup_conn = get_db_connection()
     startup_cursor = startup_conn.cursor()
@@ -121,7 +120,6 @@ async def handle_web_client_auth(websocket, data):
         else:
             cursor.execute("INSERT INTO devices (mac, device_name, password, is_online, user_id) VALUES (%s, %s, '123', TRUE, %s)", (mac, device_name, user_id))
         
-        # Сохраняем онлайн-статус в память
         mac_to_websocket[mac] = websocket
         ws_to_mac[websocket] = mac
 
@@ -153,7 +151,6 @@ async def handle_command(websocket, data):
     bot_message_id = None
     audio_chunks_count = 0
     has_commands = False
-
     final_user_text_full = ""
     final_bot_text_full = ""
     pending_routes = []
@@ -167,10 +164,9 @@ async def handle_command(websocket, data):
         audio_base64 = data.get('audio_base64') 
         ui_msg_id = data.get('ui_msg_id')
         
-        # === ИСПРАВЛЕНИЕ: БЕРЕМ MAC ИЗ ПАМЯТИ СЕРВЕРА (ДЛЯ САЙТА) ===
         mac = ws_to_mac.get(websocket)
         if not mac:
-            mac = data.get('mac') # Резервный вариант для C# клиента
+            mac = data.get('mac')
             
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
@@ -242,6 +238,8 @@ async def handle_command(websocket, data):
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
         logger.info(f"[API] Отправляю в Gemini...")
 
+        sender_ws = mac_to_websocket.get(mac)
+
         async for chunk in ai_instance.generate_audio_stream(
             prompt_text=prompt, 
             system_instruction=system_instruction,
@@ -255,18 +253,14 @@ async def handle_command(websocket, data):
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
                 logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
-                if sender_device['websocket_id']:
-                    sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-                    if sender_ws:
-                        await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
 
             elif chunk["type"] == "bot_text":
                 final_bot_text_full += chunk["text"] + " "
                 logger.info(f"[TTS] Бот: {chunk['text'].strip()}")
-                if sender_device['websocket_id']:
-                    sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-                    if sender_ws:
-                        await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
 
             elif chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
@@ -337,33 +331,28 @@ async def handle_command(websocket, data):
 
             elif chunk["type"] == "audio":
                 audio_chunks_count += 1
-                await async_send(websocket, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
         if audio_bytes:
             if final_user_text_full.strip():
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
                 conn.commit()
             else:
-                if sender_device['websocket_id']:
-                    sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-                    if sender_ws:
-                        await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": "[Аудиосообщение]"})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": "[Аудиосообщение]"})
 
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
             logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
-            if sender_device['websocket_id']:
-                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-                if sender_ws:
-                    await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
-                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
+            if sender_ws:
+                await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+                await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         else:
             cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             conn.commit()
-            if sender_device['websocket_id']:
-                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
-                if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
+            if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Первичный цикл завершен.\n" + "="*50)
 
@@ -375,7 +364,10 @@ async def handle_command(websocket, data):
         try:
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
-            await async_send(websocket, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+            sender_ws = mac_to_websocket.get(mac)
+            if sender_ws:
+                await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+                await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         except: pass
     finally:
         if cursor: cursor.close()
@@ -437,11 +429,12 @@ async def handle_target_command(websocket, data):
             original_command = command
             user_msg_id = data.get('user_msg_id')
             
-            cursor.execute("SELECT * FROM devices WHERE mac = %s", (ws_to_mac.get(websocket),))
+            mac = ws_to_mac.get(websocket)
+            cursor.execute("SELECT id, device_name, mac FROM devices WHERE mac = %s", (mac,))
             sender_device = cursor.fetchone()
             if not sender_device: raise Exception("Устройство не найдено")
             
-            cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
+            cursor.execute("SELECT id, mac, device_name FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = cursor.fetchone()
             
             logger.info("\n" + "="*50)
@@ -595,7 +588,6 @@ async def handle_device_registration(websocket, data):
         response = {"status": "success", "message": "Данные успешно обработаны!"}
         
         if device:
-            # ПРОВЕРЯЕМ ХЕШ BCRYPT ПРИ РЕГИСТРАЦИИ C# КЛИЕНТА!
             if not bcrypt.checkpw(password.encode('utf-8'), device['password'].encode('utf-8')):
                 await async_send(websocket, {"status": "error", "message": "Неверный пароль устройства. В доступе отказано."})
                 return
@@ -603,7 +595,6 @@ async def handle_device_registration(websocket, data):
             cursor.execute("UPDATE devices SET device_name = %s, is_online = TRUE WHERE id = %s", (device_name, device['id']))
             device_id = device['id']
             
-            # === ВОТ ТОТ САМЫЙ КУСОК, КОТОРЫЙ ВЕРНЕТ ЛОГИН НА КЛИЕНТ ===
             if device.get('user_id'):
                 cursor.execute("SELECT login FROM users WHERE id = %s", (device['user_id'],))
                 user_rec = cursor.fetchone()
@@ -636,7 +627,6 @@ async def handle_device_registration(websocket, data):
         response["history"] = history
         conn.commit()
         
-        # Отправляем ответ клиенту (теперь вместе с логином!)
         await async_send(websocket, response)
         
     except Exception as e:
