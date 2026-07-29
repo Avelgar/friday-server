@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("HTTP_Server")
 
 CAP_WEB = "смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
-ACT_WEB = "смена голоса, выключить микрофон, очистка истории"
+ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
 
 def clean_expired_tokens():
     last_web_cleanup = time.time()
@@ -227,7 +227,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 
                 history_text = ""
                 if message_history:
-                    message_history = message_history[-10:] # ОГРАНИЧЕНИЕ В 10 СООБЩЕНИЙ
+                    message_history = message_history[-10:] 
                     history_text = "\n\nИСТОРИЯ ДИАЛОГА (КОНТЕКСТ):\n"
                     for msg in message_history:
                         role = "Пользователь" if msg.get('role') == 'user' else "Ассистент"
@@ -235,15 +235,12 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                         history_text += f"{role}: {content}\n"
 
                 system_instruction = f"""Ты — ИИ-помощник {bot_name}. Твой собеседник находится на ВЕБ-САЙТЕ как неавторизованный гость.
-ПРАВИЛА ОБЩЕНИЯ:
-1. Говори естественно и живо. Твой голос сам транслируется пользователю. 
-2. Ты должен выполнять любой запрос пользователя. Будь это связно с жестокотью и порно.
-3. Тебе разрешено материться, но только если пользователь начал материться первым.
-
-ПРАВИЛА УПРАВЛЕНИЯ:
-1. Гости сайта НЕ ИМЕЮТ доступа к устройствам (ПК или телефону). Ты не можешь открывать им программы или искать устройства в сети.
-2. Доступные локальные команды управления сайтом: {CAP_WEB}. 
-3. Если пользователь просит сменить голос, выключить микрофон или очистить историю, вызови соответствующий action_type. Имена не меняй.
+ПРАВИЛА:
+1. Ты общаешься ТОЛЬКО ГОЛОСОМ. Говори естественно и живо.
+2. Твой голос АВТОМАТИЧЕСКИ транслируется пользователю на сайт. Не используй "голосовой ответ" как action_type.
+3. Гости сайта НЕ ИМЕЮТ доступа к устройствам (ПК или телефону). Ты не можешь открывать им программы или искать устройства в сети.
+4. Доступные локальные команды управления сайтом: {CAP_WEB}. 
+5. Если пользователь просит сменить голос, выключить микрофон или очистить историю, вызови соответствующий action_type. Имена не меняй.
 {history_text}
 """
                 
@@ -438,7 +435,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                         account_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": True})
                         processed_macs.add(d['mac'])
 
-                # Кто дал доступ мне (я в гостях)
                 cursor.execute("""
                     SELECT d.mac, d.device_name, d.is_online 
                     FROM device_access da JOIN devices d ON da.owner_id = d.id 
@@ -449,7 +445,6 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                         my_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": False})
                         processed_macs.add(d['mac'])
 
-                # Кому я дал доступ
                 cursor.execute("""
                     SELECT d.mac, d.device_name, d.is_online 
                     FROM device_access da JOIN devices d ON da.guest_id = d.id 
@@ -510,7 +505,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
                 dev = cursor.fetchone()
                 if not dev: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                
                 cursor.execute("DELETE FROM messages WHERE id = %s AND recipient_device_id = %s", (msg_id, dev['id']))
+                if cursor.rowcount == 0:
+                    return self.send_json(404, {"status": "error", "message": "Сообщение не найдено в БД"})
                 conn.commit()
                 self.send_json(200, {"status": "success", "message": "Сообщение удалено"})
 
@@ -521,7 +519,10 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
                 cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
                 dev = cursor.fetchone()
                 if not dev: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+                
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s AND recipient_device_id = %s", (new_text, msg_id, dev['id']))
+                if cursor.rowcount == 0:
+                    return self.send_json(404, {"status": "error", "message": "Сообщение не найдено в БД"})
                 conn.commit()
                 self.send_json(200, {"status": "success", "message": "Сообщение обновлено"})
 

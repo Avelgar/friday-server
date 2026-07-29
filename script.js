@@ -1,9 +1,8 @@
 let streamAudioContext = null;
 let nextPlayTime = 0;
-let vadState = 'idle'; // idle, listening, recording, processing, playing
-let isMicrophoneActive = false; // Глобальный рубильник
+let vadState = 'idle'; 
+let isMicrophoneActive = false; 
 
-// --- Web Speech API (только для стоп-слов) ---
 let stopWordRecognizer = null;
 const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
 
@@ -38,7 +37,6 @@ function stopPlayback() {
     }
 }
 
-// --- Web Audio API PCM Player ---
 async function playPCM24kHz(base64Data) {
     if (!base64Data) return;
     try {
@@ -59,15 +57,11 @@ async function playPCM24kHz(base64Data) {
         if (nextPlayTime < streamAudioContext.currentTime) nextPlayTime = streamAudioContext.currentTime;
         
         vadState = 'playing';
-        // ИСПРАВЛЕНИЕ: Слушаем стоп-слова, ТОЛЬКО если микрофон реально включен пользователем!
-        if (isMicrophoneActive) {
-            startStopWordDetection();
-        }
+        if (isMicrophoneActive) startStopWordDetection();
 
         source.onended = () => {
             if (streamAudioContext && streamAudioContext.currentTime >= nextPlayTime - 0.1) {
                 if (vadState === 'playing') {
-                    // ИСПРАВЛЕНИЕ: Возвращаемся в 'listening' только если микрофон не выключен
                     vadState = isMicrophoneActive ? 'listening' : 'idle';
                     stopStopWordDetection();
                 }
@@ -86,7 +80,6 @@ let currentFile = null;
 let messageHistory = []; 
 let pendingBubbleId = null;
 
-// Функции для кнопок редактирования и удаления
 window.editMessage = async function(msgId) {
     const bubble = document.getElementById('msg_' + msgId);
     if (!bubble) return;
@@ -106,7 +99,6 @@ window.editMessage = async function(msgId) {
                 });
             } catch (e) { showNotification("Ошибка редактирования", "error"); }
         } else {
-            // Для гостей правим историю локально
             const msgObj = messageHistory.find(m => m.timestamp && m.content === oldText);
             if(msgObj) { msgObj.content = newText; localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory)); }
         }
@@ -141,8 +133,7 @@ function addMessage(role, content, skipHistory = false, msgId = null) {
     messageElement.classList.add('message');
     messageElement.classList.add(role === 'user' ? 'user-message' : 'bot-message');
 
-    // Если нет msgId, генерируем временный для фронта
-    const actualMsgId = msgId || Date.now() + Math.floor(Math.random()*1000);
+    const actualMsgId = msgId || (Date.now().toString() + Math.floor(Math.random()*1000).toString());
     
     if (content === '🎤 [Слушаю...]') {
         pendingBubbleId = 'msg_' + actualMsgId;
@@ -156,7 +147,6 @@ function addMessage(role, content, skipHistory = false, msgId = null) {
 
     function escapeHtml(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
     
-    // ДОБАВЛЯЕМ КНОПКИ РЕДАКТИРОВАНИЯ/УДАЛЕНИЯ ТОЛЬКО НА ГОТОВЫЕ СООБЩЕНИЯ
     let actionsHtml = '';
     if (!content.includes('🎤') && !content.includes('⏳')) {
         actionsHtml = `
@@ -199,10 +189,19 @@ function removePendingBubble() {
 }
 
 function handleIncomingStreamData(data) {
+    if (data.type === 'msg_id_map') {
+        const userBubble = document.getElementById('msg_' + data.ui_msg_id);
+        if (userBubble) {
+            userBubble.id = 'msg_' + data.user_msg_id;
+            const editBtn = userBubble.querySelector('button[title="Редактировать"]');
+            const delBtn = userBubble.querySelector('button[title="Удалить"]');
+            if (editBtn) editBtn.setAttribute('onclick', `editMessage('${data.user_msg_id}')`);
+            if (delBtn) delBtn.setAttribute('onclick', `deleteMessage('${data.user_msg_id}')`);
+        }
+    }
+
     if (data.type === 'user_transcription') {
         updatePendingBubble(data.text);
-        
-        // После получения транскрипции добавляем к бабблу кнопки управления
         const b = document.getElementById(pendingBubbleId);
         if (b && !data.text.includes('Аудиосообщение')) {
             const actualId = pendingBubbleId.replace('msg_', '');
@@ -483,7 +482,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     microphoneBtn.addEventListener('click', async function() {
-        if (!isMicrophoneActive) {
+        if (vadState === 'idle') {
             try {
                 micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
                 micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
@@ -534,7 +533,8 @@ document.addEventListener('DOMContentLoaded', async function() {
                                 const base64Audio = bufferToBase64(pcm16.buffer);
                                 pcmBuffer = []; preBuffer = [];
                                 
-                                sendToServer("", "голосовое сообщение", base64Audio);
+                                const actualUiMsgId = pendingBubbleId ? pendingBubbleId.replace('msg_', '') : null;
+                                sendToServer("", "голосовое сообщение", base64Audio, actualUiMsgId);
                             }
                         } else {
                             silenceFrames = 0;
@@ -558,7 +558,67 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     });
 
-    // ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ ДЛЯ СТРИМА HTTP
+    async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id = null) {
+        try {
+            const token = localStorage.getItem('token');
+            const userLogin = localStorage.getItem('userLogin');
+            const file = currentFile;
+            const selectedVoice = document.getElementById('voice-type').value;
+            const finalUiMsgId = ui_msg_id || (Date.now().toString() + Math.floor(Math.random()*1000).toString());
+            
+            if (token && userLogin && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
+                const requestData = {
+                    type: 'web_command',
+                    command: prompt,
+                    audio_base64: audio_base64,
+                    token: token,
+                    timestamp: new Date().toISOString(),
+                    name: "Пятница",
+                    voice_type: selectedVoice,
+                    command_type: command_type,
+                    ui_msg_id: finalUiMsgId
+                };
+                
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function() {
+                        requestData.screenshot = reader.result.split(',')[1];
+                        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
+                        currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
+                }
+            } else {
+                const requestData = {
+                    prompt: prompt,
+                    audio_base64: audio_base64,
+                    bot_name: "Пятница",
+                    voice_type: selectedVoice,
+                    command_type: command_type,
+                    ui_msg_id: finalUiMsgId
+                };
+                
+                if (!token) requestData.message_history = messageHistory;
+                
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = function() {
+                        requestData.screenshot = reader.result.split(',')[1];
+                        sendFetchRequest(requestData);
+                    };
+                    reader.readAsDataURL(file);
+                } else {
+                    sendFetchRequest(requestData);
+                }
+            }
+        } catch (error) { 
+            showNotification('Ошибка при обработке запроса', 'error'); 
+            if (vadState === 'processing') { vadState = isMicrophoneActive ? 'listening' : 'idle'; removePendingBubble(); }
+        }
+    }
+
     async function sendFetchRequest(requestData) {
         try {
             const response = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestData) });
@@ -593,75 +653,19 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     }
 
-    async function sendToServer(prompt, command_type, audio_base64 = null) {
-        try {
-            const token = localStorage.getItem('token');
-            const userLogin = localStorage.getItem('userLogin');
-            const file = currentFile;
-            const selectedVoice = document.getElementById('voice-type').value;
-            
-            if (token && userLogin && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
-                const requestData = {
-                    type: 'web_command',
-                    command: prompt,
-                    audio_base64: audio_base64,
-                    token: token,
-                    timestamp: new Date().toISOString(),
-                    name: "Пятница",
-                    voice_type: selectedVoice,
-                    command_type: command_type
-                };
-                
-                if (file) {
-                    const reader = new FileReader();
-                    reader.onload = function() {
-                        requestData.screenshot = reader.result.split(',')[1];
-                        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
-                        currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; fileUpload.value = '';
-                    };
-                    reader.readAsDataURL(file);
-                } else {
-                    websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
-                }
-            } else {
-                const requestData = {
-                    prompt: prompt,
-                    audio_base64: audio_base64,
-                    bot_name: "Пятница",
-                    voice_type: selectedVoice,
-                    command_type: command_type
-                };
-                
-                if (!token) requestData.message_history = messageHistory;
-                
-                if (file) {
-                    const reader = new FileReader();
-                    reader.onload = function() {
-                        requestData.screenshot = reader.result.split(',')[1];
-                        sendFetchRequest(requestData);
-                    };
-                    reader.readAsDataURL(file);
-                } else {
-                    sendFetchRequest(requestData);
-                }
-            }
-        } catch (error) { 
-            showNotification('Ошибка при обработке запроса', 'error'); 
-            if (vadState === 'processing') { vadState = isMicrophoneActive ? 'listening' : 'idle'; removePendingBubble(); }
-        }
-    }
-
     sendButton.addEventListener('click', function() {
         const message = messageInput.value.trim();
         if (!message && !currentFile) return;
         messageInput.style.height = 'auto';
-        if (message) addMessage('user', message);
+        const uiMsgId = Date.now().toString() + Math.floor(Math.random()*1000).toString();
+        if (message) addMessage('user', message, false, uiMsgId);
         messageInput.value = '';
         document.getElementById('imagePreviewContainer').style.display = 'none';
-        sendToServer(message, "текстовое сообщение");
+        sendToServer(message, "текстовое сообщение", null, uiMsgId);
     });
                 
     messageInput.addEventListener('keydown', function(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendButton.click(); } });
+
     fileUpload.addEventListener('change', function(e) {
         const file = e.target.files[0];
         const previewContainer = document.getElementById('imagePreviewContainer');
