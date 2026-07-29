@@ -153,6 +153,7 @@ async def handle_command(websocket, data):
     bot_message_id = None
     audio_chunks_count = 0
     has_commands = False
+
     final_user_text_full = ""
     final_bot_text_full = ""
     pending_routes = []
@@ -164,9 +165,13 @@ async def handle_command(websocket, data):
         voice_name = data.get('voice_type', 'Aoede')
         screenshot_base64 = data.get('screenshot')
         audio_base64 = data.get('audio_base64') 
-        mac = data.get('mac')
         ui_msg_id = data.get('ui_msg_id')
         
+        # === ИСПРАВЛЕНИЕ: БЕРЕМ MAC ИЗ ПАМЯТИ СЕРВЕРА (ДЛЯ САЙТА) ===
+        mac = ws_to_mac.get(websocket)
+        if not mac:
+            mac = data.get('mac') # Резервный вариант для C# клиента
+            
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
 
@@ -250,12 +255,18 @@ async def handle_command(websocket, data):
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
                 logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
-                await async_send(websocket, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
+                if sender_device['websocket_id']:
+                    sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                    if sender_ws:
+                        await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
 
             elif chunk["type"] == "bot_text":
                 final_bot_text_full += chunk["text"] + " "
                 logger.info(f"[TTS] Бот: {chunk['text'].strip()}")
-                await async_send(websocket, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
+                if sender_device['websocket_id']:
+                    sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                    if sender_ws:
+                        await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
 
             elif chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
@@ -328,21 +339,31 @@ async def handle_command(websocket, data):
                 audio_chunks_count += 1
                 await async_send(websocket, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
-        if audio_bytes and not final_user_text_full.strip():
-            final_user_text_full = "[Аудиосообщение]"
-            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full, user_msg_id))
-            conn.commit()
-            await async_send(websocket, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full})
+        if audio_bytes:
+            if final_user_text_full.strip():
+                cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
+                conn.commit()
+            else:
+                if sender_device['websocket_id']:
+                    sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                    if sender_ws:
+                        await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": "[Аудиосообщение]"})
 
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
-            logger.info(f"[DONE] Тотальная пустота от ИИ. Удаляю сообщения.")
+            logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
             cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
             conn.commit()
-            await async_send(websocket, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+            if sender_device['websocket_id']:
+                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         else:
             cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             conn.commit()
-            await async_send(websocket, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
+            if sender_device['websocket_id']:
+                sender_ws = id_to_websocket.get(int(sender_device['websocket_id']))
+                if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Первичный цикл завершен.\n" + "="*50)
 
