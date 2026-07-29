@@ -280,24 +280,20 @@ const clearHistoryBtn = document.getElementById('clear-history');
 clearHistoryBtn.addEventListener('click', async function() { clearHistory(); });
 
 async function clearHistory(){
-    // Сразу моментально очищаем интерфейс
     document.getElementById('chatMessages').innerHTML = '';
-    
     const token = localStorage.getItem('token');
     if (token) {
         try {
             const response = await fetch('/clear_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) });
             const data = await response.json();
-            if (data.status === 'success') {
-                showNotification(data.message, 'success');
-            } else showNotification(data.message, 'error');
+            if (data.status === 'success') showNotification(data.message, 'success');
+            else showNotification(data.message, 'error');
         } catch (error) { showNotification('Произошла ошибка при очистке истории', 'error'); }
     } else {
         messageHistory = []; localStorage.removeItem('guestMessageHistory');
         showNotification('История чата очищена', 'info');
     }
 }
-
 function connectWebSocket() {
     const token = localStorage.getItem('token');
     const userLogin = localStorage.getItem('userLogin');
@@ -322,14 +318,6 @@ function connectWebSocket() {
             if (data.status === 'success' && data.history && Array.isArray(data.history)) {
                 const chatMessages = document.getElementById('chatMessages');
                 chatMessages.innerHTML = '';
-                
-                if (data.history.length === 0) {
-                    chatMessages.innerHTML = `
-                        <div class="message bot-message">
-                            <div>Привет! Я ваш персональный ассистент Friday. Чем могу помочь?</div>
-                            <div class="message-time">Только что</div>
-                        </div>`;
-                }
 
                 data.history.forEach(msg => {
                     if (msg.sender === 'Вы') addMessage('user', msg.text, true, msg.id);
@@ -406,11 +394,7 @@ async function logout() {
         updateAuthUI();
         messageHistory = []; localStorage.removeItem('guestMessageHistory');
         
-        document.getElementById('chatMessages').innerHTML = `
-            <div class="message bot-message">
-                <div>Привет! Я ваш персональный ассистент Friday. Чем могу помочь?</div>
-                <div class="message-time">Только что</div>
-            </div>`;
+        document.getElementById('chatMessages').innerHTML = ''; // Оставляем пустоту
             
         showNotification('Вы успешно вышли из системы', 'success');
     } catch (error) { showNotification('Произошла ошибка при выходе из системы', 'error'); }
