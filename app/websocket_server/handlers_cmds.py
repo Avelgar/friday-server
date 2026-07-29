@@ -10,6 +10,7 @@ from app.websocket_server.utils import async_send, get_device_type, get_accessib
 logger = logging.getLogger("WS_Server")
 
 HISTORY_LIMIT = 10 
+
 CAP_PC = "открытие ссылки (принимает полную ссылку URL), напечатать текст (принимает текст), нажать кнопку мыши (лкм/пкм/скм), переместить мышь (координаты X, Y), уведомление (принимает текст), музыка (включить/выключить/следующий/предыдущий), смена имени (принимает текст), смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100)"
 CAP_PHONE = "открытие ссылки (принимает полную ссылку URL), изменение громкости (число от 0 до 100), изменение яркости (число от 0 до 100), музыка (включить/выключить/следующий/предыдущий), выключить микрофон (принимает любой текст), очистка истории (любой текст), режим камеры (любой текст), выключить режим камеры (любой текст)"
 CAP_WEB = "смена голоса (Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
@@ -20,17 +21,27 @@ ACT_PHONE = "открытие ссылки, изменение громкост�
 ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
 
 async def handle_command(websocket, data):
-    conn = None; cursor = None; user_msg_id = None; bot_message_id = None
-    audio_chunks_count = 0; has_commands = False
-    final_user_text_full = ""; final_bot_text_full = ""
+    conn = None
+    cursor = None
+    user_msg_id = None
+    bot_message_id = None
+    audio_chunks_count = 0
+    has_commands = False
+    final_user_text_full = ""
+    final_bot_text_full = ""
     pending_routes = []
 
     try:
         command = data.get('command', '')
-        name = data.get('name', 'Пятница'); voice_name = data.get('voice_type', 'Aoede')
-        screenshot_base64 = data.get('screenshot'); audio_base64 = data.get('audio_base64') 
+        name = data.get('name', 'Пятница')
+        voice_name = data.get('voice_type', 'Aoede')
+        screenshot_base64 = data.get('screenshot')
+        audio_base64 = data.get('audio_base64') 
         ui_msg_id = data.get('ui_msg_id')
-        mac = ws_to_mac.get(websocket) or data.get('mac')
+        
+        mac = ws_to_mac.get(websocket)
+        if not mac:
+            mac = data.get('mac')
             
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
@@ -43,19 +54,30 @@ async def handle_command(websocket, data):
         sender_device = cursor.fetchone()
         if not sender_device: raise Exception("Устройство отправителя не найдено")
         
-        sender_id = sender_device['id']; sender_name = sender_device['device_name']; device_type = get_device_type(mac)
+        sender_id = sender_device['id']
+        sender_name = sender_device['device_name']
+        device_type = get_device_type(mac)
+
         db_user_text = command if command else ("[Аудиосообщение]" if audio_bytes else "🖼️ [Фото]")
         
-        logger.info("\n" + "="*50); logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name}")
+        logger.info("\n" + "="*50)
+        logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name}")
 
         cursor.execute("INSERT INTO messages (send_type, text, time, recipient_device_id) VALUES ('Вы', %s, %s, %s)", (db_user_text, mysql_time, sender_id))
         user_msg_id = cursor.lastrowid
+
         cursor.execute("INSERT INTO messages (send_type, text, time, recipient_device_id) VALUES ('Бот', '', %s, %s)", (mysql_time, sender_id))
-        bot_message_id = cursor.lastrowid; conn.commit()
+        bot_message_id = cursor.lastrowid
+        conn.commit()
 
         sender_ws = mac_to_websocket.get(mac)
         if sender_ws and ui_msg_id:
-            await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
+            await async_send(sender_ws, {
+                "type": "msg_id_map",
+                "ui_msg_id": ui_msg_id,
+                "user_msg_id": user_msg_id,
+                "bot_msg_id": bot_message_id
+            })
 
         cursor.execute("""
             SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
@@ -64,11 +86,18 @@ async def handle_command(websocket, data):
         """, (sender_id, user_msg_id))
         
         raw_history = cursor.fetchall()
-        history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in (raw_history[-HISTORY_LIMIT:] if raw_history else [])])
+        raw_history = raw_history[-HISTORY_LIMIT:] if raw_history else []
+        history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in raw_history])
 
-        if device_type == 'компьютер': caps = CAP_PC; allowed_actions = ACT_PC
-        elif device_type == 'телефон': caps = CAP_PHONE; allowed_actions = ACT_PHONE
-        else: caps = CAP_WEB; allowed_actions = ACT_WEB
+        if device_type == 'компьютер': 
+            caps = CAP_PC
+            allowed_actions = ACT_PC
+        elif device_type == 'телефон': 
+            caps = CAP_PHONE
+            allowed_actions = ACT_PHONE
+        else: 
+            caps = CAP_WEB
+            allowed_actions = ACT_WEB
 
         local_rules = ""
         if device_type in ['компьютер', 'телефон']:
@@ -90,86 +119,149 @@ async def handle_command(websocket, data):
 ИСТОРИЯ ДИАЛОГА (КОНТЕКСТ):
 {history_for_prompt}
 """
-        
         prompt = f"[СИСТЕМНЫЕ ДАННЫЕ]\nУстройство: {sender_name}\n[ЗАПРОС]: {command}"
+        logger.info(f"[API] Отправляю в Gemini...")
 
         async for chunk in ai_instance.generate_audio_stream(
-            prompt_text=prompt, system_instruction=system_instruction, allowed_actions=allowed_actions,
-            audio_bytes=audio_bytes, image_bytes=image_bytes, history_text="", voice_name=voice_name, assistant_name=name
+            prompt_text=prompt, 
+            system_instruction=system_instruction,
+            allowed_actions=allowed_actions,
+            audio_bytes=audio_bytes,
+            image_bytes=image_bytes, 
+            history_text="", 
+            voice_name=voice_name, 
+            assistant_name=name
         ):
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
-                if sender_ws: await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
+                logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
+
             elif chunk["type"] == "bot_text":
                 final_bot_text_full += chunk["text"] + " "
-                if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
+                logger.info(f"[TTS] Бот: {chunk['text'].strip()}")
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": chunk["text"], "actions": []})
+
             elif chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
+                extracted_commands = chunk["commands"]
+                logger.info(f"[JSON] Команды ИИ (Первичный): {json.dumps(extracted_commands, ensure_ascii=False)}")
                 filtered_commands = []
-                for cmd in chunk["commands"]:
+                
+                for cmd in extracted_commands:
                     filtered_actions = []
                     for act in cmd.get('actions', []):
                         if act.get('action_type') == "check_network_devices":
-                            pending_routes.append({"internal_routing": "check_network_devices", "original_command": final_user_text_full.strip() or command, "source_name": sender_name, "mac": mac, "user_id": sender_device.get('user_id'), "user_msg_id": user_msg_id, "voice_type": voice_name})
-                        else: filtered_actions.append(act)
+                            pseudo_data = {
+                                "internal_routing": "check_network_devices",
+                                "original_command": final_user_text_full.strip() or command,
+                                "source_name": sender_name,
+                                "mac": mac,
+                                "user_id": sender_device.get('user_id'),
+                                "user_msg_id": user_msg_id,
+                                "voice_type": voice_name
+                            }
+                            pending_routes.append(pseudo_data)
+                        else:
+                            filtered_actions.append(act)
+                            
                     if filtered_actions:
-                        cmd['actions'] = filtered_actions; filtered_commands.append(cmd)
+                        cmd['actions'] = filtered_actions
+                        filtered_commands.append(cmd)
                 
                 for cmd in filtered_commands:
                     target_device_name = cmd.get('target_device', '').strip()
                     actions = cmd.get('actions', [])
                     if not target_device_name or not actions: continue
+                    
                     cursor.execute("SELECT id, mac FROM devices WHERE device_name = %s", (target_device_name,))
                     target_device_info = cursor.fetchone()
                     if not target_device_info:
                         cursor.execute("SELECT id, mac, device_name FROM devices WHERE is_online = TRUE")
                         for d in cursor.fetchall():
-                            if target_device_name.lower() in d['device_name'].lower(): target_device_info = d; break
+                            if d['device_name'].lower() in target_device_name.lower() or target_device_name.lower() in d['device_name'].lower():
+                                target_device_info = d; break
                     if not target_device_info: continue
 
-                    target_id = target_device_info['id']; target_mac = target_device_info['mac']
+                    target_id = target_device_info['id']
+                    target_mac = target_device_info['mac']
                     is_sender = (target_id == sender_id)
                     device_spoken_text = " ".join([a.get('action_value', '') for a in actions if a.get('action_type') in ["голосовой ответ", "текстовой ответ"]])
+
                     target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if (not is_sender and device_spoken_text.strip()) else None
+
                     target_ws = mac_to_websocket.get(target_mac)
                     if target_ws:
                         msg_id = bot_message_id if is_sender else None
                         if not is_sender and device_spoken_text:
                             cursor.execute("INSERT INTO messages (send_type, text, time, recipient_device_id) VALUES (%s, %s, %s, %s)", (str(sender_id), device_spoken_text.strip(), mysql_time, target_id))
                             msg_id = cursor.lastrowid; conn.commit()
-                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "ui_msg_id": ui_msg_id, "sender": "Бот" if is_sender else sender_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": sender_name, "original_command": final_user_text_full.strip() or command})
+                        
+                        await async_send(target_ws, {
+                            "type": "new_message",
+                            "message_id": msg_id,
+                            "ui_msg_id": ui_msg_id,
+                            "sender": "Бот" if is_sender else sender_name,
+                            "text": device_spoken_text.strip(), 
+                            "actions": actions,
+                            "audio_base64": target_audio_base64,
+                            "source_device": sender_name,
+                            "original_command": final_user_text_full.strip() or command
+                        })
 
             elif chunk["type"] == "audio":
                 audio_chunks_count += 1
-                if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
         if audio_bytes:
             if final_user_text_full.strip():
-                cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id)); conn.commit()
-            elif sender_ws: await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": "[Аудиосообщение]"})
+                cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
+                conn.commit()
+            else:
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": "[Аудиосообщение]"})
 
         if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
-            cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id)); conn.commit()
-            if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+            logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
+            cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
+            conn.commit()
+            if sender_ws:
+                await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
         else:
-            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id)); conn.commit()
+            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
+            conn.commit()
             if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
-        for route_data in pending_routes: await handle_target_command(websocket, route_data)
+        logger.info(f"[DONE] Первичный цикл завершен.\n" + "="*50)
+
+        for route_data in pending_routes:
+            await handle_target_command(websocket, route_data)
 
     except Exception as e:
         logger.error(f"[ERROR] {e}", exc_info=True)
         try:
-            cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id)); conn.commit()
+            if cursor and bot_message_id and user_msg_id:
+                cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
+                conn.commit()
             sender_ws = mac_to_websocket.get(mac)
-            if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+            if sender_ws:
+                await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
         except: pass
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
+
 
 async def handle_target_command(websocket, data):
     conn = None
     cursor = None
     audio_chunks_count = 0
     has_commands = False
+    bot_message_id = None
+    source_ws = None
     try:
         mysql_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         conn = get_db_connection()
@@ -355,7 +447,12 @@ async def handle_target_command(websocket, data):
     except Exception as e:
         logger.error(f"[ERROR] {e}", exc_info=True)
         try:
-            cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
-            conn.commit()
-            if source_ws:
+            if cursor and bot_message_id:
+                cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
+                if conn: conn.commit()
+            if source_ws and bot_message_id:
                 await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
+        except: pass
+    finally:
+        if cursor: cursor.close()
+        if conn: conn.close()
