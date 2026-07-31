@@ -2,10 +2,9 @@
 import base64
 import asyncio
 import logging
-import json
 import traceback
-import websockets
 from google import genai
+from google.genai import types
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -26,7 +25,6 @@ class AIService:
         self.current_key_index = 0
 
     def _get_client(self):
-        # Оставляем SDK только для генерации картинок (REST API работает стабильно)
         return genai.Client(http_options={"api_version": "v1beta"}, api_key=self.api_keys[self.current_key_index])
 
     def _rotate_key(self):
@@ -75,39 +73,28 @@ class AIService:
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
-        ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={self.api_keys[self.current_key_index]}"
+        client = self._get_client()
+        config = {
+            "response_modalities": ["AUDIO"], 
+            "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": mapped_voice}}}
+        }
         audio_data = bytearray()
-
+        
+        cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+        session = None
         try:
-            async with websockets.connect(ws_url, ping_interval=None) as ws:
-                setup_msg = {
-                    "setup": {
-                        "model": "models/gemini-3.1-flash-live-preview",
-                        "responseModalities": ["AUDIO"],
-                        "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": mapped_voice}}}
-                    }
-                }
-                await ws.send(json.dumps(setup_msg))
-                await ws.send(json.dumps({"realtimeInput": {"text": f"Произнеси: {text}"}}))
-
-                while True:
-                    try:
-                        msg_raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
-                        response = json.loads(msg_raw)
-                        
-                        if "serverContent" in response:
-                            sc = response["serverContent"]
-                            if "modelTurn" in sc and "parts" in sc["modelTurn"]:
-                                for part in sc["modelTurn"]["parts"]:
-                                    if "inlineData" in part:
-                                        audio_data.extend(base64.b64decode(part["inlineData"]["data"]))
-                            if sc.get("turnComplete"):
-                                break
-                    except Exception:
-                        break
-        except Exception as e:
-            logger.error(f"Static audio error: {e}")
-
+            session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
+            await session.send_client_content(turns=[{"role": "user", "parts": [{"text": f"Произнеси: {text}"}]}], turn_complete=True)
+            async for response in session.receive():
+                if response.server_content and response.server_content.model_turn:
+                    for part in response.server_content.model_turn.parts:
+                        if part.inline_data:
+                            audio_data.extend(part.inline_data.data)
+        except: pass
+        finally:
+            if session:
+                try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                except: pass
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
@@ -119,158 +106,143 @@ class AIService:
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
             has_yielded_data = False 
-            ws_url = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={self.api_keys[self.current_key_index]}"
             
             try:
-                # RAW WEBSOCKET ПОДКЛЮЧЕНИЕ НАПРЯМУЮ К GOOGLE
-                async with websockets.connect(ws_url, ping_interval=None) as ws:
-                    setup_msg = {
-                        "setup": {
-                            "model": "models/gemini-3.1-flash-live-preview",
-                            "systemInstruction": {"parts": [{"text": system_instruction}]},
-                            "tools": [{"functionDeclarations": [
-                                {
-                                    "name": "send_device_commands",
-                                    "description": "Отправляет команды на устройства пользователя.",
-                                    "parameters": {
-                                        "type": "OBJECT",
-                                        "properties": {
-                                            "target_device": {"type": "STRING", "description": "Имя устройства"},
-                                            "actions": {
-                                                "type": "ARRAY",
-                                                "items": {
-                                                    "type": "OBJECT",
-                                                    "properties": {
-                                                        "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
-                                                        "action_value": {"type": "STRING", "description": "Значение (полная ссылка, текст или пусто)"}
-                                                    },
-                                                    "required": ["action_type", "action_value"]
-                                                }
-                                            }
-                                        },
-                                        "required": ["target_device", "actions"]
+                client = self._get_client()
+                
+                # Точное соответствие официальной доке (Dict format)
+                device_control_tool = {
+                    "function_declarations": [
+                        {
+                            "name": "send_device_commands",
+                            "description": "Отправляет команды на устройства пользователя.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "target_device": {"type": "STRING", "description": "Имя устройства"},
+                                    "actions": {
+                                        "type": "ARRAY",
+                                        "items": {
+                                            "type": "OBJECT",
+                                            "properties": {
+                                                "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
+                                                "action_value": {"type": "STRING", "description": "Значение (полная ссылка, текст или пусто)"}
+                                            },
+                                            "required": ["action_type", "action_value"]
+                                        }
                                     }
-                                }
-                            ]}],
-                            "responseModalities": ["AUDIO"],
-                            "inputAudioTranscription": {},
-                            "outputAudioTranscription": {},
-                            "speechConfig": {
-                                "voiceConfig": {
-                                    "prebuiltVoiceConfig": {"voiceName": mapped_voice}
-                                }
+                                },
+                                "required": ["target_device", "actions"]
+                            }
+                        }
+                    ]
+                }
+
+                config = {
+                    "system_instruction": {"parts": [{"text": system_instruction}]},
+                    "tools": [device_control_tool],
+                    "response_modalities": ["AUDIO"],
+                    "input_audio_transcription": {},
+                    "output_audio_transcription": {},
+                    "speech_config": {
+                        "voice_config": {
+                            "prebuilt_voice_config": {
+                                "voice_name": mapped_voice
                             }
                         }
                     }
-                    
-                    logger.info(f"[CONNECT] Подключаюсь к Live API (RAW WebSocket, ключ {self.current_key_index})...")
-                    await ws.send(json.dumps(setup_msg))
-                    
-                    sender_task = None
+                }
+
+                logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
+                
+                cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+                session = None
+                sender_task = None
+                
+                try:
+                    session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
                     async def send_input_task():
                         try:
                             if prompt_text:
-                                await ws.send(json.dumps({"realtimeInput": {"text": prompt_text}}))
+                                await session.send_realtime_input(text=prompt_text)
+                            
                             if image_bytes:
-                                await ws.send(json.dumps({"realtimeInput": {"video": {"data": base64.b64encode(image_bytes).decode('utf-8'), "mimeType": "image/jpeg"}}}))
+                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
                             if audio_queue:
                                 while True:
-                                    try:
-                                        chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
-                                        if chunk is None:
-                                            # Конец стриминга - просто прерываем отправку (VAD сработает автоматически)
-                                            break
-                                        if len(chunk) > 0:
-                                            await ws.send(json.dumps({
-                                                "realtimeInput": {
-                                                    "audio": {
-                                                        "data": base64.b64encode(chunk).decode('utf-8'),
-                                                        "mimeType": "audio/pcm;rate=16000"
-                                                    }
-                                                }
-                                            }))
-                                    except asyncio.TimeoutError:
-                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
-                                        break
-                                        
+                                    chunk = await audio_queue.get()
+                                    if chunk is None:
+                                        break # Стрим закончен
+                                    if len(chunk) > 0:
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await ws.send(json.dumps({
-                                    "realtimeInput": {
-                                        "audio": {
-                                            "data": base64.b64encode(pcm_data).decode('utf-8'),
-                                            "mimeType": "audio/pcm;rate=16000"
-                                        }
-                                    }
-                                }))
+                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
                                 
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
+                    # Запускаем фоновую задачу отправки
                     sender_task = asyncio.create_task(send_input_task())
 
-                    while True:
-                        try:
-                            msg_raw = await asyncio.wait_for(ws.recv(), timeout=45.0)
-                            response = json.loads(msg_raw)
-
-                            if "serverContent" in response:
-                                sc = response["serverContent"]
-                                if "inputTranscription" in sc:
-                                    yield {"type": "user_text", "text": sc["inputTranscription"]["text"]}
-                                if "outputTranscription" in sc:
-                                    has_yielded_data = True
-                                    yield {"type": "bot_text", "text": sc["outputTranscription"]["text"]}
-                                if "modelTurn" in sc and "parts" in sc["modelTurn"]:
-                                    for part in sc["modelTurn"]["parts"]:
-                                        if "inlineData" in part:
-                                            has_yielded_data = True
-                                            yield {"type": "audio", "data": base64.b64decode(part["inlineData"]["data"])}
-                                if sc.get("turnComplete"):
-                                    logger.info("[API] Модель завершила реплику.")
-                            
-                            if "toolCall" in response:
-                                tool_call = response["toolCall"]
-                                extracted_commands = []
-                                function_responses = []
-
-                                for fc in tool_call.get("functionCalls", []):
-                                    args = fc.get("args", {})
-                                    if "actions" in args:
-                                        extracted_commands.append(args)
-                                    
-                                    function_responses.append({
-                                        "id": fc["id"],
-                                        "name": fc["name"],
-                                        "response": {"result": "OK"}
-                                    })
-
-                                if extracted_commands:
-                                    has_yielded_data = True
-                                    yield {"type": "commands", "commands": extracted_commands}
-
-                                tool_resp_msg = {"toolResponse": {"functionResponses": function_responses}}
-                                await ws.send(json.dumps(tool_resp_msg))
+                    # Каноничный цикл из доки для приема ответов
+                    async for response in session.receive():
+                        sc = response.server_content
+                        if sc:
+                            if sc.input_transcription: 
+                                yield {"type": "user_text", "text": sc.input_transcription.text}
+                            if sc.output_transcription: 
+                                has_yielded_data = True
+                                yield {"type": "bot_text", "text": sc.output_transcription.text}
+                            if sc.model_turn:
+                                for part in sc.model_turn.parts:
+                                    if part.inline_data: 
+                                        has_yielded_data = True
+                                        yield {"type": "audio", "data": part.inline_data.data}
+                            if sc.turn_complete: 
+                                logger.info("[API] Модель завершила реплику.")
+                        
+                        if response.tool_call:
+                            extracted_commands = []
+                            function_responses = []
+                            for fc in response.tool_call.function_calls:
+                                args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                                if isinstance(args_dict, dict) and "actions" in args_dict: 
+                                    extracted_commands.append(args_dict)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        id=fc.id,
+                                        name=fc.name,
+                                        response={"result": "OK"}
+                                    )
+                                )
                                 
-                        except asyncio.TimeoutError:
-                            if has_yielded_data:
-                                sender_task.cancel()
-                                return 
-                            raise Exception("Таймаут получения данных от Gemini (receive)")
-                        except websockets.exceptions.ConnectionClosed as e:
-                            logger.info(f"[API] Соединение закрыто Gemini: {e}")
-                            break
-
-                    sender_task.cancel()
-                    if not has_yielded_data:
-                        logger.warning("Gemini не вернул ни звука, ни текста.")
-                    return 
+                            if extracted_commands: 
+                                has_yielded_data = True
+                                yield {"type": "commands", "commands": extracted_commands}
+                                
+                            await session.send_tool_response(function_responses=function_responses)
+                            
+                except Exception as e:
+                    # Если мы уже получили данные, но сокет закрылся/отпал — это нормально для Live API, просто выходим
+                    if has_yielded_data and ("1007" in str(e) or "1000" in str(e) or "Timeout" in str(e)):
+                        logger.info("[API] Сессия завершилась, но данные успешно получены.")
+                        return
+                    raise e
+                    
+                finally:
+                    if sender_task: sender_task.cancel()
+                    if session:
+                        try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                        except: pass
+                
+                if not has_yielded_data: logger.warning("Gemini не вернул ни звука, ни текста.")
+                return 
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                traceback.print_exc() 
                 
                 if has_yielded_data: return
                 total_keys_tried += 1
