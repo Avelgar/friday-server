@@ -144,8 +144,8 @@ class AIService:
                     response_modalities=["AUDIO"], 
                     system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                     tools=[device_control_tool],
-                    input_audio_transcription=types.InputAudioTranscriptionConfig(),  
-                    output_audio_transcription=types.OutputAudioTranscriptionConfig(), 
+                    input_audio_transcription={},  
+                    output_audio_transcription={}, 
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     )
