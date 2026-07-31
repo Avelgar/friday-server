@@ -114,8 +114,6 @@ class AIService:
             try:
                 client = self._get_client()
                 
-                # Используем чистый DICT-формат конфигурации, как в официальной документации,
-                # чтобы избежать крашей из-за различий версий SDK pydantic
                 config_dict = {
                     "system_instruction": {"parts": [{"text": system_instruction}]},
                     "tools": [{"function_declarations": [
@@ -151,12 +149,8 @@ class AIService:
                                 "voice_name": mapped_voice
                             }
                         }
-                    },
-                    "realtime_input_config": {
-                        "automatic_activity_detection": {
-                            "disabled": True # ОТКЛЮЧАЕМ СЕРВЕРНЫЙ VAD (ждем конца стрима)
-                        }
                     }
+                    # Больше никаких realtime_input_config. Все работает по стандарту Google
                 }
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
@@ -174,31 +168,23 @@ class AIService:
                             if image_bytes: await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
                             if audio_queue:
-                                try: await session.send_realtime_input(activity_start=types.ActivityStart())
-                                except AttributeError: pass # Игнорируем, если в SDK нет этой структуры
-                                
                                 while True:
                                     try:
-                                        # Таймаут, чтобы зависший сокет клиента не повесил нам сервер навечно
                                         chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                                         if chunk is None:
-                                            try: await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                            except AttributeError: pass
+                                            await session.send_realtime_input(audio_stream_end=True)
                                             break
-                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                        if len(chunk) > 0:
+                                            await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                     except asyncio.TimeoutError:
-                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
-                                        try: await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                        except: pass
+                                        logger.warning("[API STREAM] Таймаут. Завершаем аудио стрим.")
+                                        await session.send_realtime_input(audio_stream_end=True)
                                         break
                                         
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                try: await session.send_realtime_input(activity_start=types.ActivityStart())
-                                except AttributeError: pass
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                try: await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                except AttributeError: pass
+                                await session.send_realtime_input(audio_stream_end=True)
                             else:
                                 pass # Только текст
                                 
@@ -243,7 +229,7 @@ class AIService:
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                traceback.print_exc() # Выводим полную ошибку в лог
+                traceback.print_exc() 
                 
                 if has_yielded_data: return
                 total_keys_tried += 1
