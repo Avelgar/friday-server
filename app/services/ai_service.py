@@ -4,6 +4,7 @@ import asyncio
 import logging
 import json
 import io
+import traceback
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -112,36 +113,55 @@ class AIService:
             
             try:
                 client = self._get_client()
-                device_control_tool = types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name="send_device_commands", description="Отправляет команды на устройства пользователя.",
-                            parameters=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
-                                    "actions": types.Schema(type=types.Type.ARRAY, items=types.Schema(type=types.Type.OBJECT, properties={"action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"), "action_value": types.Schema(type=types.Type.STRING, description="Значение")}, required=["action_type", "action_value"]))
-                                },
-                                required=["target_device", "actions"]
-                            )
-                        )
-                    ]
-                )
-
-                config = types.LiveConnectConfig(
-                    response_modalities=["AUDIO"], 
-                    system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
-                    tools=[device_control_tool],
-                    input_audio_transcription=types.InputAudioTranscriptionConfig(),  
-                    output_audio_transcription=types.OutputAudioTranscriptionConfig(), 
-                    speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))),
-                    # ОТКЛЮЧАЕМ СЕРВЕРНЫЙ VAD. ТЕПЕРЬ ОН ЖДЕТ НАШЕЙ КОМАНДЫ ОТБОЯ.
-                    realtime_input_config=types.RealtimeInputConfig(
-                        automatic_activity_detection=types.AutomaticActivityDetectionConfig(disabled=True)
-                    )
-                )
                 
-                cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+                # Используем чистый DICT-формат конфигурации, как в официальной документации,
+                # чтобы избежать крашей из-за различий версий SDK pydantic
+                config_dict = {
+                    "system_instruction": {"parts": [{"text": system_instruction}]},
+                    "tools": [{"function_declarations": [
+                        {
+                            "name": "send_device_commands",
+                            "description": "Отправляет команды на устройства пользователя.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "target_device": {"type": "STRING", "description": "Имя устройства"},
+                                    "actions": {
+                                        "type": "ARRAY",
+                                        "items": {
+                                            "type": "OBJECT",
+                                            "properties": {
+                                                "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
+                                                "action_value": {"type": "STRING", "description": "Значение (полная ссылка, текст или пусто)"}
+                                            },
+                                            "required": ["action_type", "action_value"]
+                                        }
+                                    }
+                                },
+                                "required": ["target_device", "actions"]
+                            }
+                        }
+                    ]}],
+                    "response_modalities": ["AUDIO"],
+                    "input_audio_transcription": {},
+                    "output_audio_transcription": {},
+                    "speech_config": {
+                        "voice_config": {
+                            "prebuilt_voice_config": {
+                                "voice_name": mapped_voice
+                            }
+                        }
+                    },
+                    "realtime_input_config": {
+                        "automatic_activity_detection": {
+                            "disabled": True # ОТКЛЮЧАЕМ СЕРВЕРНЫЙ VAD (ждем конца стрима)
+                        }
+                    }
+                }
+
+                logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
+                
+                cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config_dict)
                 session = None
                 sender_task = None
                 
@@ -154,20 +174,34 @@ class AIService:
                             if image_bytes: await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
                             if audio_queue:
-                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                try: await session.send_realtime_input(activity_start=types.ActivityStart())
+                                except AttributeError: pass # Игнорируем, если в SDK нет этой структуры
+                                
                                 while True:
-                                    chunk = await audio_queue.get()
-                                    if chunk is None:
-                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                    try:
+                                        # Таймаут, чтобы зависший сокет клиента не повесил нам сервер навечно
+                                        chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
+                                        if chunk is None:
+                                            try: await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                            except AttributeError: pass
+                                            break
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                    except asyncio.TimeoutError:
+                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
+                                        try: await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                        except: pass
                                         break
-                                    await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                        
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                try: await session.send_realtime_input(activity_start=types.ActivityStart())
+                                except AttributeError: pass
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                try: await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                except AttributeError: pass
                             else:
                                 pass # Только текст
+                                
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -196,7 +230,7 @@ class AIService:
                             
                 except (asyncio.TimeoutError, TimeoutError):
                     if has_yielded_data: return 
-                    raise Exception("Таймаут стрима")
+                    raise Exception("Таймаут получения данных от Gemini (receive)")
                 except StopAsyncIteration: pass
                 finally:
                     if sender_task: sender_task.cancel()
@@ -204,10 +238,13 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data: raise Exception("Пустой ответ")
+                if not has_yielded_data: raise Exception("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
+                logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
+                traceback.print_exc() # Выводим полную ошибку в лог
+                
                 if has_yielded_data: return
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
