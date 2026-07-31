@@ -2,7 +2,6 @@
 import base64
 import asyncio
 import logging
-import json
 import traceback
 from google import genai
 from google.genai import types
@@ -78,10 +77,10 @@ class AIService:
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
         client = self._get_client()
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"], 
-            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
-        )
+        config = {
+            "response_modalities": ["AUDIO"], 
+            "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": mapped_voice}}}
+        }
         audio_data = bytearray()
         
         cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
@@ -113,43 +112,44 @@ class AIService:
             try:
                 client = self._get_client()
                 
-                device_control_tool = types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name="send_device_commands",
-                            description="Отправляет команды на устройства пользователя.",
-                            parameters=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
-                                    "actions": types.Schema(
-                                        type=types.Type.ARRAY,
-                                        items=types.Schema(
-                                            type=types.Type.OBJECT,
-                                            properties={
-                                                "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение (полная ссылка, текст или пусто)")
+                # Конфигурация в виде чистого словаря (в точности как в документации)
+                config = {
+                    "system_instruction": {"parts": [{"text": system_instruction}]},
+                    "tools": [{"function_declarations": [
+                        {
+                            "name": "send_device_commands",
+                            "description": "Отправляет команды на устройства пользователя.",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {
+                                    "target_device": {"type": "STRING", "description": "Имя устройства"},
+                                    "actions": {
+                                        "type": "ARRAY",
+                                        "items": {
+                                            "type": "OBJECT",
+                                            "properties": {
+                                                "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
+                                                "action_value": {"type": "STRING", "description": "Значение"}
                                             },
-                                            required=["action_type", "action_value"]
-                                        )
-                                    )
+                                            "required": ["action_type", "action_value"]
+                                        }
+                                    }
                                 },
-                                required=["target_device", "actions"]
-                            )
-                        )
-                    ]
-                )
-
-                config = types.LiveConnectConfig(
-                    response_modalities=["AUDIO"], 
-                    system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
-                    tools=[device_control_tool],
-                    input_audio_transcription={},  
-                    output_audio_transcription={}, 
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
-                    )
-                )
+                                "required": ["target_device", "actions"]
+                            }
+                        }
+                    ]}],
+                    "response_modalities": ["AUDIO"],
+                    "input_audio_transcription": {},
+                    "output_audio_transcription": {},
+                    "speech_config": {
+                        "voice_config": {
+                            "prebuilt_voice_config": {
+                                "voice_name": mapped_voice
+                            }
+                        }
+                    }
+                }
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 
@@ -162,33 +162,40 @@ class AIService:
                     
                     async def send_input_task():
                         try:
+                            # 1. Отправляем текстовый промпт, если есть
                             if prompt_text:
-                                await session.send_realtime_input(text=prompt_text)
+                                await session.send(input=prompt_text, end_of_turn=False)
+                            
+                            # 2. Отправляем картинку, если есть
                             if image_bytes:
-                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
+                                await session.send(input=types.Blob(data=image_bytes, mime_type="image/jpeg"), end_of_turn=False)
 
-                            # 1. Если это СТРИМИНГ звука
+                            # 3. Отправляем потоковое аудио с клиента
                             if audio_queue:
                                 while True:
-                                    chunk = await audio_queue.get()
-                                    if chunk is None:
-                                        # Сигнал окончания потока -> Gemini начнет отвечать
-                                        await session.send_realtime_input(audio_stream_end=True)
+                                    try:
+                                        chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
+                                        if chunk is None:
+                                            # Завершаем стрим
+                                            await session.send(input="", end_of_turn=True)
+                                            break
+                                        if len(chunk) > 0:
+                                            # Прямая отправка сырых байтов, как в официальном прокси
+                                            await session.send(input=chunk, end_of_turn=False)
+                                    except asyncio.TimeoutError:
+                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
+                                        await session.send(input="", end_of_turn=True)
                                         break
-                                    if len(chunk) > 0:
-                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         
-                            # 2. Если это ЦЕЛЬНЫЙ ФАЙЛ звука (Имя+Команда или гость)
+                            # 4. Или отправляем цельный аудиофайл
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                # ВОТ ЭТО ВАЖНО: говорим Gemini, что аудио закончилось
-                                await session.send_realtime_input(audio_stream_end=True)
+                                await session.send(input=pcm_data, end_of_turn=True)
                             
-                            # 3. Просто текст (или фото)
+                            # 5. Только текст/фото
                             else:
-                                await session.send_realtime_input(audio_stream_end=True)
-
+                                await session.send(input="", end_of_turn=True)
+                                
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -198,8 +205,8 @@ class AIService:
                     while True:
                         response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
                         
-                        sc = response.server_content
-                        if sc:
+                        if response.server_content:
+                            sc = response.server_content
                             if sc.input_transcription:
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
                             if sc.output_transcription:
@@ -220,7 +227,14 @@ class AIService:
                                 args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                                 if isinstance(args_dict, dict) and "actions" in args_dict:
                                     extracted_commands.append(args_dict)
-                                function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                                
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        id=fc.id,
+                                        name=fc.name,
+                                        response={"result": "OK"}
+                                    )
+                                )
                             
                             if extracted_commands:
                                 has_yielded_data = True
@@ -242,7 +256,7 @@ class AIService:
                         except: pass
                 
                 if not has_yielded_data:
-                    raise Exception("Gemini не вернул ни звука, ни текста.")
+                    logger.warning("Gemini не вернул ни звука, ни текста.")
                 
                 return
 
