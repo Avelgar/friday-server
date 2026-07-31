@@ -114,6 +114,7 @@ class AIService:
             try:
                 client = self._get_client()
                 
+                # VAD работает, но с таймаутом 3 секунды. Gemini не перебьет на паузах!
                 config_dict = {
                     "system_instruction": {"parts": [{"text": system_instruction}]},
                     "tools": [{"function_declarations": [
@@ -149,8 +150,14 @@ class AIService:
                                 "voice_name": mapped_voice
                             }
                         }
+                    },
+                    "realtime_input_config": {
+                        "automatic_activity_detection": {
+                            "disabled": False,
+                            "silence_duration_ms": 3000,
+                            "prefix_padding_ms": 1000
+                        }
                     }
-                    # Больше никаких realtime_input_config. Все работает по стандарту Google
                 }
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
@@ -177,7 +184,7 @@ class AIService:
                                         if len(chunk) > 0:
                                             await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                     except asyncio.TimeoutError:
-                                        logger.warning("[API STREAM] Таймаут. Завершаем аудио стрим.")
+                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
                                         await session.send_realtime_input(audio_stream_end=True)
                                         break
                                         
@@ -224,7 +231,8 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data: raise Exception("Gemini не вернул ни звука, ни текста.")
+                # Если пустой ответ, просто пишем в лог, не крашим
+                if not has_yielded_data: logger.warning("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
