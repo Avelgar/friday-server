@@ -100,7 +100,6 @@ class AIService:
                 except: pass
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
-    # ИЗМЕНЕНИЕ ЗДЕСЬ: Добавлен параметр audio_queue
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
@@ -133,9 +132,13 @@ class AIService:
                     response_modalities=["AUDIO"], 
                     system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                     tools=[device_control_tool],
-                    input_audio_transcription={},  
-                    output_audio_transcription={}, 
-                    speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
+                    input_audio_transcription=types.InputAudioTranscriptionConfig(),  
+                    output_audio_transcription=types.OutputAudioTranscriptionConfig(), 
+                    speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))),
+                    # ОТКЛЮЧАЕМ СЕРВЕРНЫЙ VAD. ТЕПЕРЬ ОН ЖДЕТ НАШЕЙ КОМАНДЫ ОТБОЯ.
+                    realtime_input_config=types.RealtimeInputConfig(
+                        automatic_activity_detection=types.AutomaticActivityDetectionConfig(disabled=True)
+                    )
                 )
                 
                 cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
@@ -145,25 +148,26 @@ class AIService:
                 try:
                     session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
-                    # Запускаем отправку данных (аудио-поток или цельный файл) в фоне
                     async def send_input_task():
                         try:
                             if prompt_text: await session.send_realtime_input(text=prompt_text)
                             if image_bytes: await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
-                            if audio_bytes:
-                                pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(audio_stream_end=True)
-                            elif audio_queue:
+                            if audio_queue:
+                                await session.send_realtime_input(activity_start=types.ActivityStart())
                                 while True:
                                     chunk = await audio_queue.get()
-                                    if chunk is None: # Сигнал окончания потока
-                                        await session.send_realtime_input(audio_stream_end=True)
+                                    if chunk is None:
+                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
                                     await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                            elif audio_bytes:
+                                pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                                await session.send_realtime_input(activity_end=types.ActivityEnd())
                             else:
-                                await session.send_realtime_input(audio_stream_end=True)
+                                pass # Только текст
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -171,7 +175,7 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=25.0)
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription: yield {"type": "user_text", "text": sc.input_transcription.text}
