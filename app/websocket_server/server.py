@@ -31,8 +31,8 @@ async def websocket_handler(websocket):
                 elif "command" in data: await handle_command(websocket, data)
                 elif "command_to_device" in data: await handle_target_command(websocket, data)
                 elif data.get("type") == "web_client_auth": await handle_web_client_auth(websocket, data)
-                elif data.get("type") == "audio_stream_chunk": await handle_audio_chunk(websocket, data) # <---
-                elif data.get("type") == "audio_stream_end": await handle_audio_end(websocket, data)   # <---
+                elif data.get("type") == "audio_stream_chunk": await handle_audio_chunk(websocket, data)
+                elif data.get("type") == "audio_stream_end": await handle_audio_end(websocket, data)
             except Exception: pass
     except ConnectionClosed: pass
     except Exception: pass

@@ -114,7 +114,6 @@ class AIService:
             try:
                 client = self._get_client()
                 
-                # VAD работает, но с таймаутом 3 секунды. Gemini не перебьет на паузах!
                 config_dict = {
                     "system_instruction": {"parts": [{"text": system_instruction}]},
                     "tools": [{"function_declarations": [
@@ -154,13 +153,11 @@ class AIService:
                     "realtime_input_config": {
                         "automatic_activity_detection": {
                             "disabled": False,
-                            "silence_duration_ms": 3000,
+                            "silence_duration_ms": 3000, 
                             "prefix_padding_ms": 1000
                         }
                     }
                 }
-
-                logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 
                 cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config_dict)
                 session = None
@@ -171,6 +168,7 @@ class AIService:
                     
                     async def send_input_task():
                         try:
+                            # ОТПРАВЛЯЕТ ТЕКСТ ТОЛЬКО ЕСЛИ ОН ЕСТЬ (ЧЕЛОВЕК ПЕЧАТАЕТ РУКАМИ)
                             if prompt_text: await session.send_realtime_input(text=prompt_text)
                             if image_bytes: await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
@@ -179,13 +177,15 @@ class AIService:
                                     try:
                                         chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                                         if chunk is None:
-                                            await session.send_realtime_input(audio_stream_end=True)
+                                            # Завершаем стрим корректно
+                                            try: await session.send_realtime_input(audio_stream_end=True)
+                                            except: pass
                                             break
                                         if len(chunk) > 0:
                                             await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                     except asyncio.TimeoutError:
-                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
-                                        await session.send_realtime_input(audio_stream_end=True)
+                                        # ИСПРАВЛЕНИЕ: при таймауте просто выходим, не шлем stream_end, чтобы не было ошибки 1007
+                                        logger.warning("[API STREAM] Очередь аудио пуста 15 сек. Завершаем фоновую отправку.")
                                         break
                                         
                             elif audio_bytes:
@@ -193,7 +193,7 @@ class AIService:
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
                                 await session.send_realtime_input(audio_stream_end=True)
                             else:
-                                pass # Только текст
+                                pass 
                                 
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
@@ -202,7 +202,7 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=45.0)
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription: yield {"type": "user_text", "text": sc.input_transcription.text}
@@ -231,13 +231,11 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                # Если пустой ответ, просто пишем в лог, не крашим
                 if not has_yielded_data: logger.warning("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                traceback.print_exc() 
                 
                 if has_yielded_data: return
                 total_keys_tried += 1
