@@ -6,6 +6,9 @@ from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 from app.websocket_server.state import mac_to_websocket, ws_to_mac
 from app.websocket_server.utils import async_send, get_device_type, get_accessible_devices
+import asyncio
+
+active_audio_queues = {}
 
 logger = logging.getLogger("WS_Server")
 
@@ -38,6 +41,11 @@ async def handle_command(websocket, data):
         screenshot_base64 = data.get('screenshot')
         audio_base64 = data.get('audio_base64') 
         ui_msg_id = data.get('ui_msg_id')
+        
+        is_streaming = data.get('stream_audio', False)
+        audio_queue = asyncio.Queue() if is_streaming else None
+        if is_streaming and ui_msg_id:
+            active_audio_queues[ui_msg_id] = audio_queue
         
         mac = ws_to_mac.get(websocket)
         if not mac:
@@ -130,7 +138,8 @@ async def handle_command(websocket, data):
             image_bytes=image_bytes, 
             history_text="", 
             voice_name=voice_name, 
-            assistant_name=name
+            assistant_name=name,
+            audio_queue=audio_queue # <--- ДОБАВИТЬ ЭТО
         ):
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
@@ -456,3 +465,15 @@ async def handle_target_command(websocket, data):
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
+
+async def handle_audio_chunk(websocket, data):
+    ui_msg_id = data.get("ui_msg_id")
+    if ui_msg_id in active_audio_queues:
+        chunk = base64.b64decode(data.get("audio_base64", ""))
+        active_audio_queues[ui_msg_id].put_nowait(chunk)
+
+async def handle_audio_end(websocket, data):
+    ui_msg_id = data.get("ui_msg_id")
+    if ui_msg_id in active_audio_queues:
+        active_audio_queues[ui_msg_id].put_nowait(None)
+        active_audio_queues.pop(ui_msg_id, None)
