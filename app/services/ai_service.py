@@ -87,11 +87,12 @@ class AIService:
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
-            await session.send(input=f"Произнеси: {text}", end_of_turn=True)
-            receive_iterator = session.receive().__aiter__()
-            while True:
-                response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
-                if response.server_content and response.data: audio_data.extend(response.data)
+            await session.send_client_content(turns=[{"role": "user", "parts": [{"text": f"Произнеси: {text}"}]}], turn_complete=True)
+            async for response in session.receive():
+                if response.server_content and response.server_content.model_turn:
+                    for part in response.server_content.model_turn.parts:
+                        if part.inline_data:
+                            audio_data.extend(part.inline_data.data)
         except: pass
         finally:
             if session:
@@ -112,10 +113,8 @@ class AIService:
             try:
                 client = self._get_client()
                 
-                # Конфигурация в виде чистого словаря (в точности как в документации)
-                config = {
-                    "system_instruction": {"parts": [{"text": system_instruction}]},
-                    "tools": [{"function_declarations": [
+                device_control_tool = {
+                    "function_declarations": [
                         {
                             "name": "send_device_commands",
                             "description": "Отправляет команды на устройства пользователя.",
@@ -129,7 +128,7 @@ class AIService:
                                             "type": "OBJECT",
                                             "properties": {
                                                 "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
-                                                "action_value": {"type": "STRING", "description": "Значение"}
+                                                "action_value": {"type": "STRING", "description": "Значение (полная ссылка, текст или пусто)"}
                                             },
                                             "required": ["action_type", "action_value"]
                                         }
@@ -138,7 +137,12 @@ class AIService:
                                 "required": ["target_device", "actions"]
                             }
                         }
-                    ]}],
+                    ]
+                }
+
+                config = {
+                    "system_instruction": {"parts": [{"text": system_instruction}]},
+                    "tools": [device_control_tool],
                     "response_modalities": ["AUDIO"],
                     "input_audio_transcription": {},
                     "output_audio_transcription": {},
@@ -162,37 +166,33 @@ class AIService:
                     
                     async def send_input_task():
                         try:
-                            # 1. Отправляем текстовый промпт, если есть
+                            # 1. Текстовый промпт
                             if prompt_text:
                                 await session.send(input=prompt_text, end_of_turn=False)
                             
-                            # 2. Отправляем картинку, если есть
+                            # 2. Изображение
                             if image_bytes:
                                 await session.send(input=types.Blob(data=image_bytes, mime_type="image/jpeg"), end_of_turn=False)
 
-                            # 3. Отправляем потоковое аудио с клиента
+                            # 3. ПОТОКОВОЕ аудио (Десктоп Разговорный / Сайт с Авторизацией)
                             if audio_queue:
                                 while True:
-                                    try:
-                                        chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
-                                        if chunk is None:
-                                            # Завершаем стрим
-                                            await session.send(input="", end_of_turn=True)
-                                            break
-                                        if len(chunk) > 0:
-                                            # Прямая отправка сырых байтов, как в официальном прокси
-                                            await session.send(input=chunk, end_of_turn=False)
-                                    except asyncio.TimeoutError:
-                                        logger.warning("[API STREAM] Таймаут получения чанка аудио. Завершаем стрим.")
+                                    chunk = await audio_queue.get()
+                                    if chunk is None:
+                                        # Отправляем пустую строку и завершаем ход (end_of_turn=True)
                                         await session.send(input="", end_of_turn=True)
                                         break
+                                    if len(chunk) > 0:
+                                        # ОБЕРТКА BLOB ДЛЯ ПОТОКА (Фикс ошибки bytes)
+                                        await session.send(input=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"), end_of_turn=False)
                                         
-                            # 4. Или отправляем цельный аудиофайл
+                            # 4. ЦЕЛЬНОЕ аудио (Десктоп Имя+Команда / Гость Сайта HTTP)
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send(input=pcm_data, end_of_turn=True)
+                                # ОБЕРТКА BLOB ДЛЯ ФАЙЛА СРАЗУ С END_OF_TURN
+                                await session.send(input=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"), end_of_turn=True)
                             
-                            # 5. Только текст/фото
+                            # 5. Только текст/картинка (Без аудио)
                             else:
                                 await session.send(input="", end_of_turn=True)
                                 
@@ -201,23 +201,20 @@ class AIService:
 
                     sender_task = asyncio.create_task(send_input_task())
 
-                    receive_iterator = session.receive().__aiter__()
-                    while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
-                        
-                        if response.server_content:
-                            sc = response.server_content
-                            if sc.input_transcription:
+                    async for response in session.receive():
+                        sc = response.server_content
+                        if sc:
+                            if sc.input_transcription: 
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
-                            if sc.output_transcription:
+                            if sc.output_transcription: 
                                 has_yielded_data = True
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
-                                    if part.inline_data:
+                                    if part.inline_data: 
                                         has_yielded_data = True
                                         yield {"type": "audio", "data": part.inline_data.data}
-                            if sc.turn_complete:
+                            if sc.turn_complete: 
                                 logger.info("[API] Модель завершила реплику.")
                         
                         if response.tool_call:
@@ -225,9 +222,8 @@ class AIService:
                             function_responses = []
                             for fc in response.tool_call.function_calls:
                                 args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                                if isinstance(args_dict, dict) and "actions" in args_dict:
+                                if isinstance(args_dict, dict) and "actions" in args_dict: 
                                     extracted_commands.append(args_dict)
-                                
                                 function_responses.append(
                                     types.FunctionResponse(
                                         id=fc.id,
@@ -235,40 +231,35 @@ class AIService:
                                         response={"result": "OK"}
                                     )
                                 )
-                            
-                            if extracted_commands:
+                                
+                            if extracted_commands: 
                                 has_yielded_data = True
                                 yield {"type": "commands", "commands": extracted_commands}
-                            
+                                
                             await session.send_tool_response(function_responses=function_responses)
                             
-                except (asyncio.TimeoutError, TimeoutError):
-                    if has_yielded_data:
-                        logger.info("[API] Таймаут после отправки данных. Считаем ответ ИИ завершенным.")
-                        return 
-                    raise Exception("Таймаут получения данных от Gemini (receive)")
-                except StopAsyncIteration:
-                    pass
+                except Exception as e:
+                    if has_yielded_data and ("1007" in str(e) or "1000" in str(e) or "Timeout" in str(e) or "1001" in str(e)):
+                        logger.info("[API] Сессия завершилась, но данные успешно получены.")
+                        return
+                    raise e
+                    
                 finally:
                     if sender_task: sender_task.cancel()
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data:
-                    logger.warning("Gemini не вернул ни звука, ни текста.")
-                
-                return
+                if not has_yielded_data: logger.warning("Gemini не вернул ни звука, ни текста.")
+                return 
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
                 
                 if has_yielded_data: return
                 total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys):
-                    await asyncio.sleep(1)
-                else:
-                    break
+                if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
+                else: break
 
         raise Exception("AI Live Service Unavailable")
 
