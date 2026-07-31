@@ -77,10 +77,10 @@ class AIService:
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
         client = self._get_client()
-        config = {
-            "response_modalities": ["AUDIO"], 
-            "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": mapped_voice}}}
-        }
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"], 
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
+        )
         audio_data = bytearray()
         
         cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
@@ -88,11 +88,10 @@ class AIService:
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
             await session.send_client_content(turns=[{"role": "user", "parts": [{"text": f"Произнеси: {text}"}]}], turn_complete=True)
-            async for response in session.receive():
-                if response.server_content and response.server_content.model_turn:
-                    for part in response.server_content.model_turn.parts:
-                        if part.inline_data:
-                            audio_data.extend(part.inline_data.data)
+            receive_iterator = session.receive().__aiter__()
+            while True:
+                response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
+                if response.server_content and response.data: audio_data.extend(response.data)
         except: pass
         finally:
             if session:
@@ -113,47 +112,41 @@ class AIService:
             try:
                 client = self._get_client()
                 
-                device_control_tool = {
-                    "function_declarations": [
-                        {
-                            "name": "send_device_commands",
-                            "description": "Отправляет команды на устройства пользователя.",
-                            "parameters": {
-                                "type": "OBJECT",
-                                "properties": {
-                                    "target_device": {"type": "STRING", "description": "Имя устройства"},
-                                    "actions": {
-                                        "type": "ARRAY",
-                                        "items": {
-                                            "type": "OBJECT",
-                                            "properties": {
-                                                "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
-                                                "action_value": {"type": "STRING", "description": "Значение (полная ссылка, текст или пусто)"}
+                device_control_tool = types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name="send_device_commands",
+                            description="Отправляет команды на устройства пользователя.",
+                            parameters=types.Schema(
+                                type=types.Type.OBJECT,
+                                properties={
+                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
+                                    "actions": types.Schema(
+                                        type=types.Type.ARRAY,
+                                        items=types.Schema(
+                                            type=types.Type.OBJECT,
+                                            properties={
+                                                "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
+                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение")
                                             },
-                                            "required": ["action_type", "action_value"]
-                                        }
-                                    }
+                                            required=["action_type", "action_value"]
+                                        )
+                                    )
                                 },
-                                "required": ["target_device", "actions"]
-                            }
-                        }
+                                required=["target_device", "actions"]
+                            )
+                        )
                     ]
-                }
+                )
 
-                config = {
-                    "system_instruction": {"parts": [{"text": system_instruction}]},
-                    "tools": [device_control_tool],
-                    "response_modalities": ["AUDIO"],
-                    "input_audio_transcription": {},
-                    "output_audio_transcription": {},
-                    "speech_config": {
-                        "voice_config": {
-                            "prebuilt_voice_config": {
-                                "voice_name": mapped_voice
-                            }
-                        }
-                    }
-                }
+                config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"], 
+                    system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
+                    tools=[device_control_tool],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                    )
+                )
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 
@@ -166,55 +159,56 @@ class AIService:
                     
                     async def send_input_task():
                         try:
-                            # 1. Текстовый промпт
                             if prompt_text:
-                                await session.send(input=prompt_text, end_of_turn=False)
-                            
-                            # 2. Изображение
+                                await session.send_realtime_input(text=prompt_text)
                             if image_bytes:
-                                await session.send(input=types.Blob(data=image_bytes, mime_type="image/jpeg"), end_of_turn=False)
+                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
-                            # 3. ПОТОКОВОЕ аудио (Десктоп Разговорный / Сайт с Авторизацией)
+                            # === ОТДЕЛЬНАЯ ЛОГИКА ДЛЯ СТРИМА И ЦЕЛЬНОГО ФАЙЛА ===
                             if audio_queue:
+                                # Режим 1: СТРИМИНГ (Браузер с аккаунтом / Десктоп разговорный)
                                 while True:
                                     chunk = await audio_queue.get()
                                     if chunk is None:
-                                        # Отправляем пустую строку и завершаем ход (end_of_turn=True)
-                                        await session.send(input="", end_of_turn=True)
+                                        await session.send_realtime_input(audio_stream_end=True)
                                         break
                                     if len(chunk) > 0:
-                                        # ОБЕРТКА BLOB ДЛЯ ПОТОКА (Фикс ошибки bytes)
-                                        await session.send(input=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"), end_of_turn=False)
+                                        # Отправка строго через Blob! Никаких deprecated media_chunks
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         
-                            # 4. ЦЕЛЬНОЕ аудио (Десктоп Имя+Команда / Гость Сайта HTTP)
                             elif audio_bytes:
+                                # Режим 2: ЦЕЛЬНЫЙ ФАЙЛ (HTTP гости / Десктоп Имя+Команда)
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                # ОБЕРТКА BLOB ДЛЯ ФАЙЛА СРАЗУ С END_OF_TURN
-                                await session.send(input=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"), end_of_turn=True)
-                            
-                            # 5. Только текст/картинка (Без аудио)
-                            else:
-                                await session.send(input="", end_of_turn=True)
+                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                                # Сразу говорим, что аудио закончилось!
+                                await session.send_realtime_input(audio_stream_end=True)
                                 
+                            else:
+                                # Если только текст или фото
+                                await session.send_realtime_input(audio_stream_end=True)
+
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
                     sender_task = asyncio.create_task(send_input_task())
 
-                    async for response in session.receive():
+                    receive_iterator = session.receive().__aiter__()
+                    while True:
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
+                        
                         sc = response.server_content
                         if sc:
-                            if sc.input_transcription: 
+                            if sc.input_transcription:
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
-                            if sc.output_transcription: 
+                            if sc.output_transcription:
                                 has_yielded_data = True
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
-                                    if part.inline_data: 
+                                    if part.inline_data:
                                         has_yielded_data = True
                                         yield {"type": "audio", "data": part.inline_data.data}
-                            if sc.turn_complete: 
+                            if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
                         
                         if response.tool_call:
@@ -222,35 +216,30 @@ class AIService:
                             function_responses = []
                             for fc in response.tool_call.function_calls:
                                 args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                                if isinstance(args_dict, dict) and "actions" in args_dict: 
+                                if isinstance(args_dict, dict) and "actions" in args_dict:
                                     extracted_commands.append(args_dict)
-                                function_responses.append(
-                                    types.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response={"result": "OK"}
-                                    )
-                                )
-                                
-                            if extracted_commands: 
+                                function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                            
+                            if extracted_commands:
                                 has_yielded_data = True
                                 yield {"type": "commands", "commands": extracted_commands}
-                                
+                            
                             await session.send_tool_response(function_responses=function_responses)
                             
-                except Exception as e:
-                    if has_yielded_data and ("1007" in str(e) or "1000" in str(e) or "Timeout" in str(e) or "1001" in str(e)):
-                        logger.info("[API] Сессия завершилась, но данные успешно получены.")
-                        return
-                    raise e
-                    
+                except (asyncio.TimeoutError, TimeoutError):
+                    if has_yielded_data:
+                        return 
+                    raise Exception("Таймаут получения данных от Gemini (receive)")
+                except StopAsyncIteration:
+                    pass
                 finally:
                     if sender_task: sender_task.cancel()
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data: logger.warning("Gemini не вернул ни звука, ни текста.")
+                if not has_yielded_data:
+                    raise Exception("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
@@ -258,8 +247,10 @@ class AIService:
                 
                 if has_yielded_data: return
                 total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
-                else: break
+                if total_keys_tried < len(self.api_keys):
+                    await asyncio.sleep(1)
+                else:
+                    break
 
         raise Exception("AI Live Service Unavailable")
 
