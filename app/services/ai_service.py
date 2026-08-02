@@ -3,7 +3,6 @@ import base64
 import asyncio
 import logging
 import traceback
-import json
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -78,10 +77,10 @@ class AIService:
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
         client = self._get_client()
-        config = types.LiveConnectConfig(
-            response_modalities=["AUDIO"], 
-            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
-        )
+        config = {
+            "response_modalities": ["AUDIO"], 
+            "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": mapped_voice}}}
+        }
         audio_data = bytearray()
         
         cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
@@ -128,7 +127,7 @@ class AIService:
                                             "type": "OBJECT",
                                             "properties": {
                                                 "action_type": {"type": "STRING", "description": f"СТРОГО ОДИН ИЗ: {allowed_actions}"},
-                                                "action_value": {"type": "STRING", "description": "Значение"}
+                                                "action_value": {"type": "STRING", "description": "Значение (полная ссылка, текст или пусто)"}
                                             },
                                             "required": ["action_type", "action_value"]
                                         }
@@ -164,21 +163,15 @@ class AIService:
                 try:
                     session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
-                    async def ws_send(payload):
-                        # Безопасная обертка для отправки raw JSON в websocket внутри SDK
-                        res = session._ws.send(json.dumps(payload))
-                        if asyncio.iscoroutine(res):
-                            await res
-
                     async def send_input_task():
                         try:
                             # 1. Текст
                             if prompt_text:
-                                await ws_send({"clientContent": {"turns": [{"role": "user", "parts": [{"text": prompt_text}]}], "turnComplete": False}})
+                                await session.send(input=prompt_text, end_of_turn=False)
                             
                             # 2. Картинка
                             if image_bytes:
-                                await ws_send({"realtimeInput": {"video": {"mimeType": "image/jpeg", "data": base64.b64encode(image_bytes).decode('utf-8')}}})
+                                await session.send(input={"mime_type": "image/jpeg", "data": image_bytes}, end_of_turn=False)
 
                             # 3. Аудио (Стриминг: Сайт с Аккаунтом / Разговорный с ПК)
                             if audio_queue:
@@ -187,24 +180,25 @@ class AIService:
                                         chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                                         if chunk is None:
                                             # Конец стрима -> говорим Gemini, что очередь пуста
-                                            await ws_send({"clientContent": {"turnComplete": True}})
+                                            await session.send(input="", end_of_turn=True)
                                             break
                                         if len(chunk) > 0:
-                                            await ws_send({"realtimeInput": {"audio": {"mimeType": "audio/pcm;rate=16000", "data": base64.b64encode(chunk).decode('utf-8')}}})
+                                            # ИСПРАВЛЕНИЕ: SDK требует сырые байты, а не Blob (дока врёт).
+                                            await session.send(input=chunk, end_of_turn=False)
                                     except asyncio.TimeoutError:
-                                        await ws_send({"clientContent": {"turnComplete": True}})
+                                        logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
+                                        await session.send(input="", end_of_turn=True)
                                         break
-                            
+                                        
                             # 4. Аудио (Цельный файл: Гость сайта HTTP / Имя+Команда на ПК)
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await ws_send({"realtimeInput": {"audio": {"mimeType": "audio/pcm;rate=16000", "data": base64.b64encode(pcm_data).decode('utf-8')}}})
-                                # Обязательно даем сигнал, что аудио кончилось, чтобы ИИ ответил сразу
-                                await ws_send({"clientContent": {"turnComplete": True}})
+                                # ИСПРАВЛЕНИЕ: Передаем сырые байты напрямую, без оберток Blob. SDK сам сделает из них pcm!
+                                await session.send(input=pcm_data, end_of_turn=True)
                             
                             # 5. Только текст/картинка (Аудио нет)
                             else:
-                                await ws_send({"clientContent": {"turnComplete": True}})
+                                await session.send(input="", end_of_turn=True)
                                 
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
