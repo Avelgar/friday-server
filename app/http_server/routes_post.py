@@ -87,7 +87,7 @@ def do_POST(self):
                 async for chunk in ai_instance.generate_audio_stream(
                     prompt_text=prompt_formatted, system_instruction=system_instruction,
                     allowed_actions=ACT_WEB, audio_bytes=audio_bytes,
-                    image_bytes=image_bytes, history_text="", 
+                    image_bytes=image_bytes,
                     voice_name=voice_type, assistant_name=bot_name
                 ):
                     if chunk["type"] == "user_text":

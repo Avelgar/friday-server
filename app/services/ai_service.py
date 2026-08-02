@@ -151,7 +151,7 @@ class AIService:
                     )
                 )
 
-                logger.info(f"[CONNECT] Подключаюсь к Live API (Classic SDK, ключ {self.current_key_index})...")
+                logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 
                 cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
                 session = None
@@ -163,16 +163,15 @@ class AIService:
                     async def send_input_task():
                         try:
                             if prompt_text:
-                                await session.send_realtime_input(text=prompt_text)
+                                await session.send(input=prompt_text, end_of_turn=False)
                             if image_bytes:
-                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
+                                await session.send(input=types.Blob(data=image_bytes, mime_type="image/jpeg"), end_of_turn=False)
 
                             if audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(audio_stream_end=True)
+                                await session.send(input=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"), end_of_turn=True)
                             else:
-                                await session.send_realtime_input(audio_stream_end=True)
+                                await session.send(input="", end_of_turn=True)
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -203,6 +202,7 @@ class AIService:
                                 if isinstance(args_dict, dict) and "actions" in args_dict:
                                     extracted_commands.append(args_dict)
                                 function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                            
                             if extracted_commands:
                                 has_yielded_data = True
                                 yield {"type": "commands", "commands": extracted_commands}
