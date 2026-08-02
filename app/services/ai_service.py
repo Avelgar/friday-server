@@ -148,6 +148,10 @@ class AIService:
                     tools=[device_control_tool],
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                    ),
+                    # ВАЖНО: ОТКЛЮЧАЕМ АВТОМАТИЧЕСКИЙ VAD! Мы сами скажем модели, где конец речи.
+                    realtime_input_config=types.RealtimeInputConfig(
+                        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
                 )
 
@@ -176,19 +180,14 @@ class AIService:
                                     if len(chunk) > 0:
                                         await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         
-                            # elif audio_bytes:
-                            #     pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                            #     await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                            #     await session.send_realtime_input(audio_stream_end=True)
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                # 1. Отправляем обрезанный файл от Vosk
+                                # Говорим Gemini: "Речь началась"
+                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                # Шлем аудио
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                # 2. ПРИНУДИТЕЛЬНО завершаем ход пользователя. ИИ перестанет ждать и сразу ответит!
-                                await session.send(input="", end_of_turn=True)
-                                
-                            else:
-                                await session.send_realtime_input(audio_stream_end=True)
+                                # Говорим Gemini: "Речь оборвалась здесь, обрабатывай немедленно!"
+                                await session.send_realtime_input(activity_end=types.ActivityEnd())
 
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
@@ -213,7 +212,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
-                                break  # <--- ВОТ ЭТОТ BREAK ЧИНИТ ТАЙМАУТ ПРИ ПУСТОМ ОТВЕТЕ!
+                                break # ВЫХОДИМ, ТАК КАК СЕАНС ЗАВЕРШЕН
                         
                         if response.tool_call:
                             extracted_commands = []
@@ -242,8 +241,8 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data:
-                    raise Exception("Gemini не вернул ни звука, ни текста.")
+                # Я убрал Exception на случай если Gemini (вдруг) проигнорирует звук 
+                # (в таком случае UI просто удалит пустое сообщение благодаря логике в handlers_cmds.py)
                 return 
 
             except Exception as e:
@@ -261,7 +260,6 @@ class AIService:
     # ==============================================================================
     # 2. НОВАЯ ФУНКЦИЯ ДЛЯ СТРИМИНГА ПО ПРИМЕРУ ПРОКСИ (ДЛЯ РАЗГОВОРНОГО И ВЕБ)
     # ==============================================================================
-    # Я ВЕРНУЛ ЭТУ ФУНКЦИЮ РОВНО В ТО СОСТОЯНИЕ, КАК ТЫ ПРИСЫЛАЛ!
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
@@ -333,8 +331,10 @@ class AIService:
                                         break
                                     if len(chunk) > 0:
                                         try:
+                                            # Как в примере proxy: сырые байты
                                             await session.send(input=chunk, end_of_turn=False)
                                         except Exception as e:
+                                            # Если вдруг SDK кинет TypeError, отправляем как Blob
                                             if "bytes" in str(e):
                                                 await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                             else:
