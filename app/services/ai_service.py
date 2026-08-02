@@ -241,8 +241,6 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                # Я убрал Exception на случай если Gemini (вдруг) проигнорирует звук 
-                # (в таком случае UI просто удалит пустое сообщение благодаря логике в handlers_cmds.py)
                 return 
 
             except Exception as e:
@@ -331,14 +329,13 @@ class AIService:
 
                             while True:
                                 try:
-                                    # Ждем следующий чанк не более 3 секунд
                                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                                     if chunk is None:
+                                        # Закрываем активность ТОЛЬКО если она была открыта
                                         if has_sent_activity_start:
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
                                     if len(chunk) > 0:
-                                        # Отправляем activity_start СТРОГО перед первым чанком звука
                                         if not has_sent_activity_start:
                                             await session.send_realtime_input(activity_start=types.ActivityStart())
                                             has_sent_activity_start = True
