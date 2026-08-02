@@ -167,27 +167,21 @@ class AIService:
                             if image_bytes:
                                 await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
-                            # === ОТДЕЛЬНАЯ ЛОГИКА ДЛЯ СТРИМА И ЦЕЛЬНОГО ФАЙЛА ===
                             if audio_queue:
-                                # Режим 1: СТРИМИНГ (Браузер с аккаунтом / Десктоп разговорный)
                                 while True:
                                     chunk = await audio_queue.get()
                                     if chunk is None:
                                         await session.send_realtime_input(audio_stream_end=True)
                                         break
                                     if len(chunk) > 0:
-                                        # Отправка строго через Blob! Никаких deprecated media_chunks
                                         await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         
                             elif audio_bytes:
-                                # Режим 2: ЦЕЛЬНЫЙ ФАЙЛ (HTTP гости / Десктоп Имя+Команда)
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                # Сразу говорим, что аудио закончилось!
                                 await session.send_realtime_input(audio_stream_end=True)
                                 
                             else:
-                                # Если только текст или фото
                                 await session.send_realtime_input(audio_stream_end=True)
 
                         except Exception as e:
@@ -213,6 +207,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
+                                break # ВАЖНО: Разрываем цикл, так как Gemini закончил ответ!
                         
                         if response.tool_call:
                             extracted_commands = []
@@ -321,27 +316,20 @@ class AIService:
                     async def send_input_task():
                         try:
                             if prompt_text:
-                                await session.send(input=prompt_text, end_of_turn=False)
+                                await session.send_realtime_input(text=prompt_text)
 
                             while True:
                                 try:
                                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                                     if chunk is None:
-                                        await session.send(input="", end_of_turn=True)
+                                        await session.send_realtime_input(audio_stream_end=True)
                                         break
                                     if len(chunk) > 0:
-                                        try:
-                                            # Как в примере proxy: сырые байты
-                                            await session.send(input=chunk, end_of_turn=False)
-                                        except Exception as e:
-                                            # Если вдруг SDK кинет TypeError, отправляем как Blob
-                                            if "bytes" in str(e):
-                                                await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
-                                            else:
-                                                raise e
+                                        # ВАЖНО: Отправляем Blob с указанием MIME, иначе Gemini не поймет, что это звук!
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                 except asyncio.TimeoutError:
                                     logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
-                                    await session.send(input="", end_of_turn=True)
+                                    await session.send_realtime_input(audio_stream_end=True)
                                     break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
@@ -366,6 +354,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
+                                break # ВАЖНО: Разрываем цикл, так как Gemini закончил ответ!
                         
                         if response.tool_call:
                             extracted_commands = []
