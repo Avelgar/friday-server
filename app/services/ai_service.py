@@ -149,9 +149,9 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
-                    realtime_input_config=types.RealtimeInputConfig(
-                        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
-                    )
+                    # Включаем транскрибацию входящей речи пользователя (STT на экран)
+                    input_audio_transcription={},
+                    output_audio_transcription={}
                 )
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
@@ -181,10 +181,20 @@ class AIService:
                                         
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(activity_start=types.ActivityStart())
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                await session.send(input="", end_of_turn=True)
+                                await session.send_realtime_input(audio_stream_end=True)
+
+                            # elif audio_bytes:
+                            #     pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                            #     # Говорим Gemini: "Речь началась"
+                            #     await session.send_realtime_input(activity_start=types.ActivityStart())
+                            #     # Шлем аудио
+                            #     await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                            #     # Говорим Gemini: "Речь оборвалась здесь, обрабатывай немедленно!"
+                            #     await session.send_realtime_input(activity_end=types.ActivityEnd())
+                            else:
+                                await session.send_realtime_input(audio_stream_end=True)
+
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -301,10 +311,8 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
-                    # ВАЖНО: ОТКЛЮЧАЕМ АВТОМАТИЧЕСКИЙ VAD. Мы управляем потоком через очередь!
-                    realtime_input_config=types.RealtimeInputConfig(
-                        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
-                    )
+                    input_audio_transcription={},
+                    output_audio_transcription={}
                 )
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, ключ {self.current_key_index})...")
@@ -321,26 +329,19 @@ class AIService:
                             if prompt_text:
                                 await session.send_realtime_input(text=prompt_text)
 
-                            # Сигнализируем, что пользователь начал говорить
-                            await session.send_realtime_input(activity_start=types.ActivityStart())
-
                             while True:
                                 try:
                                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                                     if chunk is None:
-                                        # Очередь закончилась (клиент прислал audio_stream_end)
-                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                        await session.send(input="", end_of_turn=True)
+                                        await session.send_realtime_input(audio_stream_end=True)
                                         break
                                     if len(chunk) > 0:
-                                        # ВАЖНО: Отправляем Blob с указанием MIME, чтобы Gemini понял, что это звук!
                                         await session.send_realtime_input(
                                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
                                         )
                                 except asyncio.TimeoutError:
                                     logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
-                                    await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                    await session.send(input="", end_of_turn=True)
+                                    await session.send_realtime_input(audio_stream_end=True)
                                     break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
@@ -365,7 +366,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
-                                break # ВАЖНО: Выходим из цикла, Gemini ответил
+                                break
                         
                         if response.tool_call:
                             extracted_commands = []
