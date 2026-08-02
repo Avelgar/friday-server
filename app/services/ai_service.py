@@ -100,7 +100,7 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     # ==============================================================================
-    # 1. СТАРАЯ, РАБОЧАЯ ФУНКЦИЯ (ДЛЯ HTTP И ИМЯ+КОМАНДА)
+    # 1. ФУНКЦИЯ ДЛЯ HTTP И ИМЯ+КОМАНДА (ОТПРАВКА ЦЕЛЬНОГО ФАЙЛА)
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -149,7 +149,6 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
-                    # ВАЖНО: ОТКЛЮЧАЕМ АВТОМАТИЧЕСКИЙ VAD! Мы сами скажем модели, где конец речи.
                     realtime_input_config=types.RealtimeInputConfig(
                         automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
@@ -182,13 +181,10 @@ class AIService:
                                         
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                # Говорим Gemini: "Речь началась"
                                 await session.send_realtime_input(activity_start=types.ActivityStart())
-                                # Шлем аудио
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                # Говорим Gemini: "Речь оборвалась здесь, обрабатывай немедленно!"
                                 await session.send_realtime_input(activity_end=types.ActivityEnd())
-
+                                await session.send(input="", end_of_turn=True)
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -212,7 +208,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
-                                break # ВЫХОДИМ, ТАК КАК СЕАНС ЗАВЕРШЕН
+                                break
                         
                         if response.tool_call:
                             extracted_commands = []
@@ -241,8 +237,6 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                # Я убрал Exception на случай если Gemini (вдруг) проигнорирует звук 
-                # (в таком случае UI просто удалит пустое сообщение благодаря логике в handlers_cmds.py)
                 return 
 
             except Exception as e:
@@ -258,7 +252,7 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. НОВАЯ ФУНКЦИЯ ДЛЯ СТРИМИНГА ПО ПРИМЕРУ ПРОКСИ (ДЛЯ РАЗГОВОРНОГО И ВЕБ)
+    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА (РАЗГОВОРНЫЙ РЕЖИМ)
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -301,11 +295,15 @@ class AIService:
                 )
 
                 config = types.LiveConnectConfig(
-                    response_modalities=[types.Modality.AUDIO], 
-                    system_instruction=types.Content(parts=[types.Part(text=system_instruction)]),
+                    response_modalities=["AUDIO"], 
+                    system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                     tools=[device_control_tool],
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                    ),
+                    # ВАЖНО: ОТКЛЮЧАЕМ АВТОМАТИЧЕСКИЙ VAD. Мы управляем потоком через очередь!
+                    realtime_input_config=types.RealtimeInputConfig(
+                        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
                 )
 
@@ -321,26 +319,27 @@ class AIService:
                     async def send_input_task():
                         try:
                             if prompt_text:
-                                await session.send(input=prompt_text, end_of_turn=False)
+                                await session.send_realtime_input(text=prompt_text)
+
+                            # Сигнализируем, что пользователь начал говорить
+                            await session.send_realtime_input(activity_start=types.ActivityStart())
 
                             while True:
                                 try:
                                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                                     if chunk is None:
+                                        # Очередь закончилась (клиент прислал audio_stream_end)
+                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         await session.send(input="", end_of_turn=True)
                                         break
                                     if len(chunk) > 0:
-                                        try:
-                                            # Как в примере proxy: сырые байты
-                                            await session.send(input=chunk, end_of_turn=False)
-                                        except Exception as e:
-                                            # Если вдруг SDK кинет TypeError, отправляем как Blob
-                                            if "bytes" in str(e):
-                                                await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
-                                            else:
-                                                raise e
+                                        # ВАЖНО: Отправляем Blob с указанием MIME, чтобы Gemini понял, что это звук!
+                                        await session.send_realtime_input(
+                                            audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
+                                        )
                                 except asyncio.TimeoutError:
                                     logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
+                                    await session.send_realtime_input(activity_end=types.ActivityEnd())
                                     await session.send(input="", end_of_turn=True)
                                     break
                         except Exception as e:
@@ -366,6 +365,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
+                                break # ВАЖНО: Выходим из цикла, Gemini ответил
                         
                         if response.tool_call:
                             extracted_commands = []
@@ -394,8 +394,6 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data:
-                    raise Exception("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
