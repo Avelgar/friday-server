@@ -130,7 +130,7 @@ class AIService:
                                             type=types.Type.OBJECT,
                                             properties={
                                                 "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение")
+                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение (полная ссылка, текст или пусто)")
                                             },
                                             required=["action_type", "action_value"]
                                         )
@@ -162,34 +162,43 @@ class AIService:
                     
                     async def send_input_task():
                         try:
-                            if prompt_text:
-                                await session.send_realtime_input(text=prompt_text)
-                            if image_bytes:
-                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
-
-                            # === ОТДЕЛЬНАЯ ЛОГИКА ДЛЯ СТРИМА И ЦЕЛЬНОГО ФАЙЛА ===
+                            # 1. Если это СТРИМИНГ звука
                             if audio_queue:
-                                # Режим 1: СТРИМИНГ (Браузер с аккаунтом / Десктоп разговорный)
-                                while True:
-                                    chunk = await audio_queue.get()
-                                    if chunk is None:
-                                        await session.send_realtime_input(audio_stream_end=True)
-                                        break
-                                    if len(chunk) > 0:
-                                        # Отправка строго через Blob! Никаких deprecated media_chunks
-                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
-                                        
-                            elif audio_bytes:
-                                # Режим 2: ЦЕЛЬНЫЙ ФАЙЛ (HTTP гости / Десктоп Имя+Команда)
-                                pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                # Сразу говорим, что аудио закончилось!
-                                await session.send_realtime_input(audio_stream_end=True)
-                                
-                            else:
-                                # Если только текст или фото
-                                await session.send_realtime_input(audio_stream_end=True)
+                                parts = []
+                                if prompt_text: parts.append(types.Part.from_text(text=prompt_text))
+                                if image_bytes: parts.append(types.Part.from_blob(mime_type="image/jpeg", data=image_bytes))
+                                if parts: await session.send(input=types.Content(parts=parts), end_of_turn=False)
 
+                                while True:
+                                    try:
+                                        chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
+                                        if chunk is None:
+                                            # Конец стрима
+                                            await session.send(input="", end_of_turn=True)
+                                            break
+                                        if len(chunk) > 0:
+                                            await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                    except asyncio.TimeoutError:
+                                        logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
+                                        await session.send(input="", end_of_turn=True)
+                                        break
+                                        
+                            # 2. Если это ЦЕЛЬНЫЙ ФАЙЛ звука (Имя+Команда или гость HTTP)
+                            else:
+                                parts = []
+                                if prompt_text: parts.append(types.Part.from_text(text=prompt_text))
+                                if image_bytes: parts.append(types.Part.from_blob(mime_type="image/jpeg", data=image_bytes))
+                                
+                                if audio_bytes:
+                                    pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                                    parts.append(types.Part.from_blob(mime_type="audio/pcm;rate=16000", data=pcm_data))
+                                
+                                # Отправляем всё РАЗОМ и принудительно заставляем ответить (обход VAD)
+                                if parts:
+                                    await session.send(input=types.Content(parts=parts), end_of_turn=True)
+                                else:
+                                    await session.send(input="", end_of_turn=True)
+                                
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -230,8 +239,7 @@ class AIService:
                             await session.send_tool_response(function_responses=function_responses)
                             
                 except (asyncio.TimeoutError, TimeoutError):
-                    if has_yielded_data:
-                        return 
+                    if has_yielded_data: return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
                 except StopAsyncIteration:
                     pass
@@ -241,19 +249,15 @@ class AIService:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data:
-                    raise Exception("Gemini не вернул ни звука, ни текста.")
+                if not has_yielded_data: raise Exception("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                
                 if has_yielded_data: return
                 total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys):
-                    await asyncio.sleep(1)
-                else:
-                    break
+                if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
+                else: break
 
         raise Exception("AI Live Service Unavailable")
 

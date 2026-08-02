@@ -9,7 +9,8 @@ from app.database.connection import get_db_connection
 
 from app.websocket_server.state import active_connections, mac_to_websocket, ws_to_mac, last_ping_times, PING_TIMEOUT
 from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth
-from app.websocket_server.handlers_cmds import handle_command, handle_target_command, handle_audio_chunk, handle_audio_end
+from app.websocket_server.handlers_cmds import handle_command, handle_target_command
+from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_end
 
 logger = logging.getLogger("WS_Server")
 
