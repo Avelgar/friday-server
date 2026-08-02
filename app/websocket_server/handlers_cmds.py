@@ -117,6 +117,7 @@ async def handle_command(websocket, data):
 
         # РАЗДЕЛЯЕМ ВЫЗОВЫ: ЕСЛИ СТРИМИНГ, ЗОВЕМ НОВУЮ ФУНКЦИЮ, ИНАЧЕ СТАРУЮ
         if is_streaming and audio_queue:
+            logger.info(f"СТРИМИНГ")
             generator = ai_instance.generate_audio_stream_realtime(
                 prompt_text=prompt_text_to_send, 
                 system_instruction=system_instruction,
@@ -126,6 +127,7 @@ async def handle_command(websocket, data):
                 assistant_name=name
             )
         else:
+            logger.info(f"Отправка файла")
             generator = ai_instance.generate_audio_stream(
                 prompt_text=prompt_text_to_send, 
                 system_instruction=system_instruction,
