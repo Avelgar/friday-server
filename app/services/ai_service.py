@@ -102,7 +102,7 @@ class AIService:
     # ==============================================================================
     # 1. СТАРАЯ, РАБОЧАЯ ФУНКЦИЯ (ДЛЯ HTTP И ИМЯ+КОМАНДА)
     # ==============================================================================
-    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, voice_name="Aoede", assistant_name="Пятница"):
+    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
@@ -163,15 +163,33 @@ class AIService:
                     async def send_input_task():
                         try:
                             if prompt_text:
-                                await session.send(input=prompt_text, end_of_turn=False)
+                                await session.send_realtime_input(text=prompt_text)
                             if image_bytes:
-                                await session.send(input=types.Blob(data=image_bytes, mime_type="image/jpeg"), end_of_turn=False)
+                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
-                            if audio_bytes:
+                            # === ОТДЕЛЬНАЯ ЛОГИКА ДЛЯ СТРИМА И ЦЕЛЬНОГО ФАЙЛА ===
+                            if audio_queue:
+                                # Режим 1: СТРИМИНГ (Браузер с аккаунтом / Десктоп разговорный)
+                                while True:
+                                    chunk = await audio_queue.get()
+                                    if chunk is None:
+                                        await session.send_realtime_input(audio_stream_end=True)
+                                        break
+                                    if len(chunk) > 0:
+                                        # Отправка строго через Blob! Никаких deprecated media_chunks
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                        
+                            elif audio_bytes:
+                                # Режим 2: ЦЕЛЬНЫЙ ФАЙЛ (HTTP гости / Десктоп Имя+Команда)
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send(input=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"), end_of_turn=True)
+                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                                # Сразу говорим, что аудио закончилось!
+                                await session.send_realtime_input(audio_stream_end=True)
+                                
                             else:
-                                await session.send(input="", end_of_turn=True)
+                                # Если только текст или фото
+                                await session.send_realtime_input(audio_stream_end=True)
+
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -180,6 +198,7 @@ class AIService:
                     receive_iterator = session.receive().__aiter__()
                     while True:
                         response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
+                        
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription:
@@ -196,7 +215,8 @@ class AIService:
                                 logger.info("[API] Модель завершила реплику.")
                         
                         if response.tool_call:
-                            extracted_commands = []; function_responses = []
+                            extracted_commands = []
+                            function_responses = []
                             for fc in response.tool_call.function_calls:
                                 args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                                 if isinstance(args_dict, dict) and "actions" in args_dict:
@@ -206,27 +226,34 @@ class AIService:
                             if extracted_commands:
                                 has_yielded_data = True
                                 yield {"type": "commands", "commands": extracted_commands}
+                            
                             await session.send_tool_response(function_responses=function_responses)
                             
                 except (asyncio.TimeoutError, TimeoutError):
-                    if has_yielded_data: return 
+                    if has_yielded_data:
+                        return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
-                except StopAsyncIteration: pass
+                except StopAsyncIteration:
+                    pass
                 finally:
                     if sender_task: sender_task.cancel()
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
                 
-                if not has_yielded_data: raise Exception("Gemini не вернул ни звука, ни текста.")
+                if not has_yielded_data:
+                    raise Exception("Gemini не вернул ни звука, ни текста.")
                 return 
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
+                
                 if has_yielded_data: return
                 total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
-                else: break
+                if total_keys_tried < len(self.api_keys):
+                    await asyncio.sleep(1)
+                else:
+                    break
 
         raise Exception("AI Live Service Unavailable")
 
