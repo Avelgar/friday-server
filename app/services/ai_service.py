@@ -176,10 +176,16 @@ class AIService:
                                     if len(chunk) > 0:
                                         await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         
+                            # elif audio_bytes:
+                            #     pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                            #     await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                            #     await session.send_realtime_input(audio_stream_end=True)
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                                # 1. Отправляем обрезанный файл от Vosk
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(audio_stream_end=True)
+                                # 2. ПРИНУДИТЕЛЬНО завершаем ход пользователя. ИИ перестанет ждать и сразу ответит!
+                                await session.send(input="", end_of_turn=True)
                                 
                             else:
                                 await session.send_realtime_input(audio_stream_end=True)
