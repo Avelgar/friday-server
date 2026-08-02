@@ -179,19 +179,19 @@ class AIService:
                                     if len(chunk) > 0:
                                         await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         
-                            elif audio_bytes:
-                                pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(audio_stream_end=True)
-
                             # elif audio_bytes:
                             #     pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                            #     # Говорим Gemini: "Речь началась"
-                            #     await session.send_realtime_input(activity_start=types.ActivityStart())
-                            #     # Шлем аудио
                             #     await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                            #     # Говорим Gemini: "Речь оборвалась здесь, обрабатывай немедленно!"
-                            #     await session.send_realtime_input(activity_end=types.ActivityEnd())
+                            #     await session.send_realtime_input(audio_stream_end=True)
+
+                            elif audio_bytes:
+                                pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                                # Говорим Gemini: "Речь началась"
+                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                # Шлем аудио
+                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                                # Говорим Gemini: "Речь оборвалась здесь, обрабатывай немедленно!"
+                                await session.send_realtime_input(activity_end=types.ActivityEnd())
                             else:
                                 await session.send_realtime_input(audio_stream_end=True)
 
