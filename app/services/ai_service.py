@@ -100,7 +100,7 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     # ==============================================================================
-    # 1. ТВОЯ РАБОЧАЯ ФУНКЦИЯ (НЕ ТРОГАЛАСЬ ВООБЩЕ)
+    # 1. ТВОЯ РАБОЧАЯ ФУНКЦИЯ (АБСОЛЮТНО БЕЗ ИЗМЕНЕНИЙ)
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -258,7 +258,7 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ СТРИМИНГА (РАЗГОВОРНЫЙ РЕЖИМ)
+    # 2. ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ СТРИМИНГА
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -307,7 +307,8 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
-                    # Отключаем VAD, так как клиент сам управляет началом и концом потока
+                    input_audio_transcription={},
+                    output_audio_transcription={},
                     realtime_input_config=types.RealtimeInputConfig(
                         automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
@@ -323,28 +324,32 @@ class AIService:
                     session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
                     async def send_input_task():
+                        has_sent_activity_start = False
                         try:
                             if prompt_text:
                                 await session.send_realtime_input(text=prompt_text)
 
-                            # Сообщаем Gemini, что начинается стриминг речи
-                            await session.send_realtime_input(activity_start=types.ActivityStart())
-
                             while True:
                                 try:
-                                    chunk = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
+                                    # Ждем следующий чанк не более 3 секунд
+                                    chunk = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                                     if chunk is None:
-                                        # Конец стрима от клиента
-                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                        if has_sent_activity_start:
+                                            await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
                                     if len(chunk) > 0:
-                                        # Шлем чанки через Blob, с явным указанием mime_type
+                                        # Отправляем activity_start СТРОГО перед первым чанком звука
+                                        if not has_sent_activity_start:
+                                            await session.send_realtime_input(activity_start=types.ActivityStart())
+                                            has_sent_activity_start = True
+
                                         await session.send_realtime_input(
                                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
                                         )
                                 except asyncio.TimeoutError:
                                     logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
-                                    await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                    if has_sent_activity_start:
+                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
                                     break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
