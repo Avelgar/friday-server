@@ -115,17 +115,28 @@ async def handle_command(websocket, data):
         prompt_text_to_send = f"[ЗАПРОС С КЛАВИАТУРЫ]: {command}" if command else None
         logger.info(f"[API] Отправляю в Gemini...")
 
-        async for chunk in ai_instance.generate_audio_stream(
-            prompt_text=prompt_text_to_send, 
-            system_instruction=system_instruction,
-            allowed_actions=allowed_actions,
-            audio_bytes=audio_bytes,
-            image_bytes=image_bytes, 
-            history_text="", 
-            voice_name=voice_name, 
-            assistant_name=name,
-            audio_queue=audio_queue
-        ):
+        # РАЗДЕЛЯЕМ ВЫЗОВЫ: ЕСЛИ СТРИМИНГ, ЗОВЕМ НОВУЮ ФУНКЦИЮ, ИНАЧЕ СТАРУЮ
+        if is_streaming and audio_queue:
+            generator = ai_instance.generate_audio_stream_realtime(
+                prompt_text=prompt_text_to_send, 
+                system_instruction=system_instruction,
+                allowed_actions=allowed_actions,
+                audio_queue=audio_queue,
+                voice_name=voice_name, 
+                assistant_name=name
+            )
+        else:
+            generator = ai_instance.generate_audio_stream(
+                prompt_text=prompt_text_to_send, 
+                system_instruction=system_instruction,
+                allowed_actions=allowed_actions,
+                audio_bytes=audio_bytes,
+                image_bytes=image_bytes, 
+                voice_name=voice_name, 
+                assistant_name=name
+            )
+
+        async for chunk in generator:
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
                 logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
