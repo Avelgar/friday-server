@@ -27,16 +27,28 @@ async def websocket_handler(websocket):
                 data = json.loads(decoded)
                 last_ping_times[websocket] = time.time()
                 
-                if data.get("type") == "ping": continue
-                if "DeviceName" in data: await handle_device_registration(websocket, data)
-                elif "command" in data: await handle_command(websocket, data)
-                elif "command_to_device" in data: await handle_target_command(websocket, data)
-                elif data.get("type") == "web_client_auth": await handle_web_client_auth(websocket, data)
-                elif data.get("type") == "audio_stream_chunk": await handle_audio_chunk(websocket, data)
-                elif data.get("type") == "audio_stream_end": await handle_audio_end(websocket, data)
-            except Exception: pass
-    except ConnectionClosed: pass
-    except Exception: pass
+                if data.get("type") == "ping": 
+                    continue
+                if "DeviceName" in data: 
+                    await handle_device_registration(websocket, data)
+                elif "command" in data: 
+                    # ВАЖНО: Запускаем команду как фоновую задачу, чтобы не блокировать цикл чтения чанков!
+                    asyncio.create_task(handle_command(websocket, data))
+                elif "command_to_device" in data: 
+                    # Целевые команды тоже в фоне
+                    asyncio.create_task(handle_target_command(websocket, data))
+                elif data.get("type") == "web_client_auth": 
+                    await handle_web_client_auth(websocket, data)
+                elif data.get("type") == "audio_stream_chunk": 
+                    await handle_audio_chunk(websocket, data)
+                elif data.get("type") == "audio_stream_end": 
+                    await handle_audio_end(websocket, data)
+            except Exception as e: 
+                pass
+    except ConnectionClosed: 
+        pass
+    except Exception as e: 
+        pass
     finally:
         logger.info(f"Disconnected: {client_id}")
         if websocket in active_connections: del active_connections[websocket]
@@ -50,7 +62,9 @@ async def websocket_handler(websocket):
                 conn = get_db_connection()
                 cur = conn.cursor()
                 cur.execute("UPDATE devices SET is_online = FALSE WHERE mac = %s", (mac,))
-                conn.commit(); conn.close()
+                conn.commit()
+                cur.close()
+                conn.close()
             except: pass
 
 async def check_pings():
@@ -67,7 +81,9 @@ async def check_pings():
                         conn = get_db_connection()
                         cur = conn.cursor()
                         cur.execute("UPDATE devices SET is_online = FALSE WHERE mac = %s", (mac,))
-                        conn.commit(); conn.close()
+                        conn.commit()
+                        cur.close()
+                        conn.close()
                     except: pass
                 try: await ws.close()
                 except: pass
