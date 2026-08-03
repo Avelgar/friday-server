@@ -357,6 +357,9 @@ class AIService:
                                     logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут 3с). Получено: {bytes_received}, Отправлено: {bytes_sent}. Первый байт: {first_chunk_time}, Последний: {last_chunk_time}. Завершаем стрим.")
                                     if has_sent_activity_start:
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                    else:
+                                        # СПАСЕНИЕ ОТ ТАЙМАУТОВ: Если аудио не было, принудительно закрываем ход, чтобы Gemini не ждал 35 секунд!
+                                        await session.send(input="", end_of_turn=True)
                                     break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
