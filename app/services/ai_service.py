@@ -254,7 +254,7 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С ДОБАВЛЕННЫМИ ЛОГАМИ БАЙТОВ И ВРЕМЕНИ
+    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -337,7 +337,11 @@ class AIService:
                                         logger.info(f"[STREAM DEBUG] Клиент прислал audio_stream_end (None). Получено байт: {bytes_received}, Отправлено в Gemini: {bytes_sent}. Первый байт: {first_chunk_time}, Последний байт: {last_chunk_time}")
                                         if has_sent_activity_start:
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                        
+                                        # ГАРАНТИРОВАННО завершаем ход при закрытии потока клиентом
+                                        await session.send(input="", end_of_turn=True)
                                         break
+                                        
                                     if len(chunk) > 0:
                                         bytes_received += len(chunk)
                                         current_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
@@ -353,13 +357,14 @@ class AIService:
                                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
                                         )
                                         bytes_sent += len(chunk)
+                                        
                                 except asyncio.TimeoutError:
                                     logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут 3с). Получено: {bytes_received}, Отправлено: {bytes_sent}. Первый байт: {first_chunk_time}, Последний: {last_chunk_time}. Завершаем стрим.")
                                     if has_sent_activity_start:
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                    else:
-                                        # СПАСЕНИЕ ОТ ТАЙМАУТОВ: Если аудио не было, принудительно закрываем ход, чтобы Gemini не ждал 35 секунд!
-                                        await session.send(input="", end_of_turn=True)
+                                        
+                                    # ГАРАНТИРОВАННО завершаем ход при таймауте
+                                    await session.send(input="", end_of_turn=True)
                                     break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
