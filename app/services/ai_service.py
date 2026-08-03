@@ -3,6 +3,8 @@ import base64
 import asyncio
 import logging
 import traceback
+import time
+from datetime import datetime
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -100,7 +102,7 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     # ==============================================================================
-    # 1. ТВОЯ РАБОЧАЯ ФУНКЦИЯ (АБСОЛЮТНО БЕЗ ИЗМЕНЕНИЙ)
+    # 1. ТВОЯ РАБОЧАЯ ФУНКЦИЯ (НЕ ТРОНУТА)
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -149,7 +151,6 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
-                    # ВАЖНО: ОТКЛЮЧАЕМ АВТОМАТИЧЕСКИЙ VAD! Мы сами скажем модели, где конец речи.
                     realtime_input_config=types.RealtimeInputConfig(
                         automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
@@ -182,11 +183,8 @@ class AIService:
                                         
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                # Говорим Gemini: "Речь началась"
                                 await session.send_realtime_input(activity_start=types.ActivityStart())
-                                # Шлем аудио
                                 await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                # Говорим Gemini: "Речь оборвалась здесь, обрабатывай немедленно!"
                                 await session.send_realtime_input(activity_end=types.ActivityEnd())
 
                         except Exception as e:
@@ -212,7 +210,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
-                                break # ВЫХОДИМ, ТАК КАК СЕАНС ЗАВЕРШЕН
+                                break 
                         
                         if response.tool_call:
                             extracted_commands = []
@@ -256,7 +254,7 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. ИСПРАВЛЕННАЯ ФУНКЦИЯ ДЛЯ СТРИМИНГА
+    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С ДОБАВЛЕННЫМИ ЛОГАМИ БАЙТОВ И ВРЕМЕНИ
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -323,6 +321,11 @@ class AIService:
                     
                     async def send_input_task():
                         has_sent_activity_start = False
+                        bytes_received = 0
+                        bytes_sent = 0
+                        first_chunk_time = None
+                        last_chunk_time = None
+
                         try:
                             if prompt_text:
                                 await session.send_realtime_input(text=prompt_text)
@@ -331,11 +334,17 @@ class AIService:
                                 try:
                                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                                     if chunk is None:
-                                        # Закрываем активность ТОЛЬКО если она была открыта
+                                        logger.info(f"[STREAM DEBUG] Клиент прислал audio_stream_end (None). Получено байт: {bytes_received}, Отправлено в Gemini: {bytes_sent}. Первый байт: {first_chunk_time}, Последний байт: {last_chunk_time}")
                                         if has_sent_activity_start:
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
                                     if len(chunk) > 0:
+                                        bytes_received += len(chunk)
+                                        current_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+                                        if first_chunk_time is None:
+                                            first_chunk_time = current_time
+                                        last_chunk_time = current_time
+
                                         if not has_sent_activity_start:
                                             await session.send_realtime_input(activity_start=types.ActivityStart())
                                             has_sent_activity_start = True
@@ -343,8 +352,9 @@ class AIService:
                                         await session.send_realtime_input(
                                             audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
                                         )
+                                        bytes_sent += len(chunk)
                                 except asyncio.TimeoutError:
-                                    logger.warning("[API STREAM] Очередь пуста. Завершаем стрим.")
+                                    logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут 3с). Получено: {bytes_received}, Отправлено: {bytes_sent}. Первый байт: {first_chunk_time}, Последний: {last_chunk_time}. Завершаем стрим.")
                                     if has_sent_activity_start:
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
                                     break
