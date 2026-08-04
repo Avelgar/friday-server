@@ -27,8 +27,21 @@ function initStopWordDetection() {
     }
 }
 
-function startStopWordDetection() { if (stopWordRecognizer) { try { stopWordRecognizer.start(); } catch(e){} } }
-function stopStopWordDetection() { if (stopWordRecognizer) { try { stopWordRecognizer.stop(); } catch(e){} } }
+function startStopWordDetection() { 
+    // ОТКЛЮЧАЕМ НА МОБИЛЬНЫХ УСТРОЙСТВАХ, ЧТОБЫ ANDROID НЕ ПИЛИКАЛ
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    if (isMobile) return;
+
+    if (stopWordRecognizer) { 
+        try { stopWordRecognizer.start(); } catch(e){} 
+    } 
+}
+
+function stopStopWordDetection() { 
+    if (stopWordRecognizer) { 
+        try { stopWordRecognizer.stop(); } catch(e){} 
+    } 
+}
 
 function stopPlayback() {
     if (streamAudioContext) { streamAudioContext.close(); streamAudioContext = null; nextPlayTime = 0; }
