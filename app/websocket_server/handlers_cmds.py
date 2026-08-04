@@ -26,18 +26,18 @@ ACTION_DESCRIPTIONS = {
     "очистка истории": "любой текст",
     "изменение громкости": "целое число от 0 до 100",
     "изменение яркости": "целое число от 0 до 100",
-    "check_network_devices": "любой текст (запуск поиска других устройств в сети)",
-    "get_running_processes": "любой текст (используй, чтобы получить список процессов для их последующего закрытия)",
-    "get_installed_programs": "любой текст (используй, чтобы получить список программ для их последующего открытия)",
+    "check_network_devices": "любой текст (используй, чтобы получить список доступных других устройств пользователя)",
+    "get_running_processes": "любой текст (используй, чтобы получить список запущенных процессов устройства для их закрытия)",
+    "get_installed_programs": "любой текст (используй, чтобы получить список программ устройства для их запуска)",
     "request_retry": "вопрос пользователю для уточнения задачи",
     "открытие файла": "строго точный абсолютный путь к программе/файлу из предоставленного списка",
     "завершение процесса": "имя процесса (без .exe) или ID из предоставленного списка",
     "режим камеры": "любой текст",
     "выключить режим камеры": "любой текст",
-    "выключить микрофон": "любой текст"
+    "выключить микрофон": "любой текст (доступно только на веб-сайте)"
 }
 
-# === 2. БАЗОВЫЕ СПИСКИ КОМАНД ДЛЯ УСТРОЙСТВ ===
+# === 2. БАЗОВЫЕ СПИСКИ КОМАНД ===
 BASE_PC = [
     "открытие ссылки", "напечатать текст", "нажать кнопку мыши", "переместить мышь", 
     "уведомление", "музыка", "смена имени", "смена голоса", "очистка истории", 
@@ -56,11 +56,7 @@ BASE_WEB = [
 ]
 
 def get_action_strings(action_keys):
-    """
-    Генерирует два значения:
-    1. caps_text: Читаемый текст для промпта с описаниями параметров (для ИИ).
-    2. allowed_actions: Строка через запятую для JSON-схемы Gemini.
-    """
+    """Генерирует текст для промпта (с описаниями) и строку для JSON-схемы Gemini"""
     caps = []
     for k in action_keys:
         desc = ACTION_DESCRIPTIONS.get(k, "любой текст")
@@ -79,7 +75,6 @@ async def handle_audio_end(websocket, data):
     if ui_msg_id in active_audio_queues:
         active_audio_queues[ui_msg_id].put_nowait(None)
         active_audio_queues.pop(ui_msg_id, None)
-
 
 async def handle_command(websocket, data):
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None
@@ -139,7 +134,6 @@ async def handle_command(websocket, data):
         raw_history = cursor.fetchall()
         history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in (raw_history[-HISTORY_LIMIT:] if raw_history else [])])
 
-        # === ДИНАМИЧЕСКАЯ ГЕНЕРАЦИЯ ВОЗМОЖНОСТЕЙ ===
         if device_type == 'компьютер': 
             base_acts = BASE_PC
         elif device_type == 'телефон': 
@@ -151,7 +145,7 @@ async def handle_command(websocket, data):
 
         local_rules = ""
         if device_type in ['компьютер', 'телефон']:
-            local_rules = f"\n4. Ты не можешь открывать или закрывать программы напрямую! Сначала вызови get_installed_programs или get_running_processes, чтобы получить данные.\n5. Ты не знаешь процессов/путей до тех пор, пока не запросишь их."
+            local_rules = f"\n4. Ты не можешь открывать/закрывать программы напрямую! У тебя пока нет к ним доступа. Сначала вызови get_installed_programs или get_running_processes."
 
         system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник за устройством: {sender_name} (Тип: {device_type}).
 ПРАВИЛА ОБЩЕНИЯ:
@@ -161,7 +155,7 @@ async def handle_command(websocket, data):
 ПРАВИЛА УПРАВЛЕНИЯ:
 1. Локальные возможности и форматы параметров (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}
-2. Для ДРУГОГО устройства используй action_type="check_network_devices".
+2. Для взаимодействия с ДРУГИМ устройством используй action_type="check_network_devices".
 3. Используй action_type="request_retry" для уточнения.{local_rules}
 ИСТОРИЯ:
 {history_for_prompt}
@@ -170,7 +164,6 @@ async def handle_command(websocket, data):
         logger.info(f"[API] Отправляю в Gemini...")
 
         if is_streaming and audio_queue:
-            logger.info(f"СТРИМИНГ")
             generator = ai_instance.generate_audio_stream_realtime(
                 prompt_text=prompt_text_to_send, 
                 system_instruction=system_instruction,
@@ -180,7 +173,6 @@ async def handle_command(websocket, data):
                 assistant_name=name
             )
         else:
-            logger.info(f"Отправка файла")
             generator = ai_instance.generate_audio_stream(
                 prompt_text=prompt_text_to_send, 
                 system_instruction=system_instruction,
@@ -232,16 +224,19 @@ async def handle_command(websocket, data):
 
                     target_id = target_device_info['id']; target_mac = target_device_info['mac']
                     is_sender = (target_id == sender_id)
-                    device_spoken_text = " ".join([a.get('action_value', '') for a in actions if a.get('action_type') in ["голосовой ответ", "текстовой ответ"]])
-                    target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if (not is_sender and device_spoken_text.strip()) else None
                     target_ws = mac_to_websocket.get(target_mac)
                     
                     if target_ws:
-                        msg_id = bot_message_id if is_sender else None
-                        if not is_sender and device_spoken_text:
-                            cursor.execute("INSERT INTO messages (send_type, text, time, recipient_device_id) VALUES (%s, %s, %s, %s)", (str(sender_id), device_spoken_text.strip(), mysql_time, target_id))
-                            msg_id = cursor.lastrowid; conn.commit()
-                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "ui_msg_id": ui_msg_id, "sender": "Бот" if is_sender else sender_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": sender_name, "original_command": final_user_text_full.strip() or command})
+                        await async_send(target_ws, {
+                            "type": "new_message", 
+                            "message_id": bot_message_id if is_sender else None, 
+                            "ui_msg_id": ui_msg_id, 
+                            "sender": "Бот" if is_sender else sender_name, 
+                            "text": "", 
+                            "actions": actions, 
+                            "source_device": sender_name, 
+                            "original_command": final_user_text_full.strip() or command
+                        })
 
             elif chunk["type"] == "audio":
                 audio_chunks_count += 1
@@ -303,33 +298,30 @@ async def handle_target_command(websocket, data):
             
             cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = cursor.fetchone()
-            sender_device = source_device_info 
             
             accessible_devices_list = get_accessible_devices(cursor, mac, user_id)
-            accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет устройств в сети"
+            accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет других устройств в сети"
             
             logger.info("\n" + "="*50)
             logger.info(f"[ROUTE] ВТОРИЧНЫЙ АГЕНТ-МАРШРУТИЗАТОР. Инициатор: {source_name}")
             
-            allowed_acts = list(BASE_PC) if 'компьютер' in accessible_devices else list(BASE_PHONE)
-            if not accessible_devices_list: allowed_acts = list(BASE_WEB)
-
+            allowed_acts = list(set(BASE_PC + BASE_PHONE))
             caps_text, allowed_actions = get_action_strings(allowed_acts)
 
             system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Сетевой Маршрутизатор.
-Пользователь с устройства {source_name} попросил: "{original_command}".
-Доступные устройства в сети: {accessible_devices}.
+Твой собеседник находится за устройством: {source_name}.
+Он попросил: "{original_command}".
+Доступные ДРУГИЕ устройства в сети: {accessible_devices}.
 
 ПРАВИЛА:
-1. Ответь пользователю на {source_name} живо и естественно.
-2. Если нужного устройства НЕТ в сети — просто скажи об этом.
-3. Твои возможности управления удаленным устройством (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
+1. Если нужного устройства НЕТ в сети — просто скажи об этом пользователю (голосом).
+2. Если устройство есть, отправь на него нужную команду, используя target_device="Имя целевого устройства". Обязательно скажи пользователю на {source_name}, что ты отправляешь запрос (например: "Ищу программы на телефоне...").
+3. Доступные команды для удаленных устройств (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}
-4. Ты не знаешь точных путей к программам. Сначала вызови action_type="get_installed_programs".
-5. Ты не знаешь точных процессов. Сначала вызови action_type="get_running_processes".
-6. Если команду невозможно выполнить без уточнения (кроме программ/процессов), вызови action_type="request_retry".
+4. Ты не знаешь путей или процессов удаленного устройства. Сначала отправь на него action_type="get_installed_programs" или action_type="get_running_processes".
+5. Если нужно уточнение от пользователя, используй action_type="request_retry".
 """
-            prompt_context = "[СИСТЕМНОЕ ЗАДАНИЕ] Проверь наличие устройства в сети и маршрутизируй запрос, обязательно ответив пользователю."
+            prompt_context = f"[СИСТЕМНОЕ ЗАДАНИЕ] Маршрутизация запроса: {original_command}"
 
         else:
             command = data.get('command_to_device')
@@ -341,19 +333,23 @@ async def handle_target_command(websocket, data):
             
             mac = ws_to_mac.get(websocket)
             cursor.execute("SELECT id, device_name, mac FROM devices WHERE mac = %s", (mac,))
-            sender_device = cursor.fetchone()
-            if not sender_device: raise Exception("Устройство не найдено")
+            executor_device = cursor.fetchone()
+            if not executor_device: raise Exception("Устройство-исполнитель не найдено")
             
             cursor.execute("SELECT id, mac, device_name FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = cursor.fetchone()
             
             logger.info("\n" + "="*50)
-            logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ-ИСПОЛНИТЕЛЬ. Данные от: {sender_device['device_name']}")
+            logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ-ИСПОЛНИТЕЛЬ. Данные получены от: {executor_device['device_name']}")
 
-            target_device_type = get_device_type(sender_device.get('mac'))
+            is_local = (executor_device['id'] == source_device_info['id'])
+            target_device_type = get_device_type(executor_device['mac'])
+            
             allowed_acts = list(BASE_PC) if target_device_type == 'компьютер' else list(BASE_PHONE)
             
-            # === РАСШИРЕНИЕ ДЕЙСТВИЙ (ОТКРЫТИЕ/ЗАКРЫТИЕ ПО) ===
+            if is_local and "check_network_devices" in allowed_acts:
+                allowed_acts.remove("check_network_devices") 
+                
             if processes:
                 allowed_acts.append("завершение процесса")
             if programs:
@@ -361,18 +357,33 @@ async def handle_target_command(websocket, data):
                 
             caps_text, allowed_actions = get_action_strings(allowed_acts)
 
-            system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Исполнитель-Аналитик.
-Пользователь с устройства {source_name} изначально просил: "{original_command}".
-Устройство {sender_device['device_name']} прислало системные данные (ПРОГРАММЫ И/ИЛИ ПРОЦЕССЫ).
+            if is_local:
+                system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Исполнитель.
+Твой собеседник находится за устройством: {source_name}.
+Его изначальный запрос: "{original_command}".
+Система собрала для тебя данные (программы/процессы) с этого устройства.
 
 ПРАВИЛА:
-1. Скажи пользователю на {source_name}, что задача выполнена или данные найдены.
-2. Твои расширенные возможности как исполнителя (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
+1. Выполни задачу пользователя, отправив финальную команду на {source_name}.
+2. Ответь пользователю голосом, что задача выполнена или данные найдены (например: "Открыла куки кликер").
+3. ВНИМАНИЕ: НЕ ЧИТАЙ ВЕСЬ СПИСОК ВСЛУХ! Найди нужное в списке и сразу используй action_type.
+4. Твои возможности (ОБЯЗАТЕЛЬНО соблюдай action_value):
 {caps_text}
-3. ВНИМАНИЕ: НЕ ЧИТАЙ ВЕСЬ СПИСОК ВСЛУХ! Найди нужный путь или процесс и СРАЗУ отправь финальную команду на {sender_device['device_name']} (например action_type="открытие файла" передав точный путь в action_value).
-ОТВЕЧАЙ МАКСИМАЛЬНО КОРОТКО.
 """
-            prompt_context = f"[ДАННЫЕ]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни задачу пользователя."
+            else:
+                system_instruction = f"""Ты — ИИ-помощник {name}. РОЛЬ: Удаленный Исполнитель.
+Инициатор запроса находится за устройством: {source_name}.
+Удаленное устройство {executor_device['device_name']} прислало тебе системные данные (программы/процессы).
+Изначальный запрос был: "{original_command}".
+
+ПРАВИЛА:
+1. Ответь пользователю на {source_name} голосом о результате (например: "Открыла куки кликер на телефоне").
+2. Чтобы выполнить действие, отправь команду, указав target_device="{executor_device['device_name']}".
+3. ВНИМАНИЕ: НЕ ЧИТАЙ ВЕСЬ СПИСОК ВСЛУХ! Найди нужное в списке и сразу отправляй action_type.
+4. Возможности удаленного устройства (ОБЯЗАТЕЛЬНО соблюдай action_value):
+{caps_text}
+"""
+            prompt_context = f"[ДАННЫЕ ОТ {executor_device['device_name']}]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни изначальную задачу пользователя."
 
         source_id = source_device_info['id']
 
@@ -423,25 +434,16 @@ async def handle_target_command(websocket, data):
                     target_id = target_device_info['id']
                     target_mac = target_device_info['mac']
                     is_source = (target_id == source_id)
-                    device_spoken_text = " ".join([a.get('action_value', '') for a in actions if a.get('action_type') in ["голосовой ответ", "текстовой ответ"]])
-
-                    target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if (not is_source and device_spoken_text.strip()) else None
 
                     target_ws = mac_to_websocket.get(target_mac)
                     if target_ws:
-                        msg_id = bot_message_id if is_source else None
-                        if not is_source and device_spoken_text:
-                            cursor.execute("INSERT INTO messages (send_type, text, time, recipient_device_id) VALUES (%s, %s, %s, %s)", (str(source_id), device_spoken_text.strip(), mysql_time, target_id))
-                            msg_id = cursor.lastrowid; conn.commit()
-                        
                         await async_send(target_ws, {
                             "type": "new_message",
-                            "message_id": msg_id,
+                            "message_id": bot_message_id if is_source else None,
                             "user_msg_id": user_msg_id if is_source else None,
                             "sender": "Бот" if is_source else source_name,
-                            "text": device_spoken_text.strip(), 
+                            "text": "", 
                             "actions": actions,
-                            "audio_base64": target_audio_base64,
                             "source_device": source_name,
                             "original_command": original_command
                         })
