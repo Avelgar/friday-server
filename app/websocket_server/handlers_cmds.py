@@ -53,7 +53,7 @@ BASE_PHONE = [
 ]
 
 BASE_WEB = [
-    "смена голоса", "выключить микрофон", "очистка истории", "check_network_devices"
+    "смена голоса", "выключить микрофон", "очистка истории", "check_network_devices", "голосовой ответ"
 ]
 
 def get_action_strings(action_keys):
@@ -156,8 +156,9 @@ async def handle_command(websocket, data):
 ПРАВИЛА УПРАВЛЕНИЯ:
 1. Локальные возможности и форматы параметров (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}
-2. Для взаимодействия с ДРУГИМ устройством используй action_type="check_network_devices".
-3. Используй action_type="request_retry" для уточнения.{local_rules}
+2. Сейчас существует 4 типа устройств: компьютер, телефон, веб-браузер и распбери. Не факт что они в сети, но если пользователь сделать что-то в браузере, то это не обязательно локальная команда.
+3. Для взаимодействия с ДРУГИМ устройством используй action_type="check_network_devices".
+4. Используй action_type="request_retry" для уточнения.{local_rules}
 ИСТОРИЯ:
 {history_for_prompt}
 """
