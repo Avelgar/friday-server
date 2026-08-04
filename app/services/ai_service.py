@@ -102,7 +102,7 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     # ==============================================================================
-    # 1. ТВОЯ РАБОЧАЯ ФУНКЦИЯ (НЕ ТРОНУТА)
+    # 1. ФУНКЦИЯ ДЛЯ ИМЯ+КОМАНДА / HTTP
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -151,6 +151,8 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
+                    input_audio_transcription={},
+                    output_audio_transcription={},
                     realtime_input_config=types.RealtimeInputConfig(
                         automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
@@ -210,7 +212,7 @@ class AIService:
                                         yield {"type": "audio", "data": part.inline_data.data}
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
-                                break 
+                                break
                         
                         if response.tool_call:
                             extracted_commands = []
@@ -254,7 +256,7 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА
+    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА (ТЕПЕРЬ С ПРАВИЛЬНЫМ КОНТЕКСТОМ)
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -334,12 +336,10 @@ class AIService:
                                 try:
                                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
                                     if chunk is None:
-                                        logger.info(f"[STREAM DEBUG] Клиент прислал audio_stream_end (None). Получено байт: {bytes_received}, Отправлено в Gemini: {bytes_sent}. Первый байт: {first_chunk_time}, Последний байт: {last_chunk_time}")
+                                        logger.info(f"[STREAM DEBUG] Клиент прислал audio_stream_end (None). Получено: {bytes_received}, Отправлено: {bytes_sent}")
                                         if has_sent_activity_start:
+                                            # ОТПРАВЛЯЕМ ТОЛЬКО ACTIVITY END! Без обнуления контекста!
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                        
-                                        # ГАРАНТИРОВАННО завершаем ход при закрытии потока клиентом
-                                        await session.send(input="", end_of_turn=True)
                                         break
                                         
                                     if len(chunk) > 0:
@@ -359,12 +359,10 @@ class AIService:
                                         bytes_sent += len(chunk)
                                         
                                 except asyncio.TimeoutError:
-                                    logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут 3с). Получено: {bytes_received}, Отправлено: {bytes_sent}. Первый байт: {first_chunk_time}, Последний: {last_chunk_time}. Завершаем стрим.")
+                                    logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут). Получено: {bytes_received}, Отправлено: {bytes_sent}")
                                     if has_sent_activity_start:
+                                        # ОТПРАВЛЯЕМ ТОЛЬКО ACTIVITY END!
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                        
-                                    # ГАРАНТИРОВАННО завершаем ход при таймауте
-                                    await session.send(input="", end_of_turn=True)
                                     break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
