@@ -4,6 +4,9 @@ let isPlaying = false;
 let vadState = 'idle'; 
 let isMicrophoneActive = false; 
 
+// Глобальная переменная для защиты от эха
+let lastAudioStopTime = 0; 
+
 let stopWordRecognizer = null;
 const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
 let ignoredMessageId = null; 
@@ -28,7 +31,7 @@ function initStopWordDetection() {
 }
 
 function startStopWordDetection() { 
-    // ОТКЛЮЧАЕМ НА МОБИЛЬНЫХ УСТРОЙСТВАХ, ЧТОБЫ ANDROID НЕ ПИЛИКАЛ
+    // Отключаем на мобилках, чтобы Android/iOS не пиликал при включении бота
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     if (isMobile) return;
 
@@ -47,6 +50,7 @@ function stopPlayback() {
     if (streamAudioContext) { streamAudioContext.close(); streamAudioContext = null; nextPlayTime = 0; }
     stopStopWordDetection();
     isPlaying = false;
+    lastAudioStopTime = Date.now();
 }
 
 async function playPCM24kHz(base64Data) {
@@ -73,7 +77,12 @@ async function playPCM24kHz(base64Data) {
 
         source.onended = () => {
             if (streamAudioContext && streamAudioContext.currentTime >= nextPlayTime - 0.1) {
-                if (isPlaying) { isPlaying = false; stopStopWordDetection(); }
+                if (isPlaying) { 
+                    isPlaying = false; 
+                    // ФИКС ЭХА: Запоминаем время, когда бот физически закончил говорить
+                    lastAudioStopTime = Date.now(); 
+                    stopStopWordDetection(); 
+                }
             }
         };
 
@@ -307,12 +316,24 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     async function startMicStream() {
+        // Фоллбэк для старых Safari
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            const oldGetUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+            if (oldGetUserMedia) {
+                navigator.mediaDevices = navigator.mediaDevices || {};
+                navigator.mediaDevices.getUserMedia = function(c) {
+                    return new Promise((res, rej) => oldGetUserMedia.call(navigator, c, res, rej));
+                };
+            }
+        }
+
         try {
             micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
         } catch (e) {
-            // Если строгие параметры не подошли (привет, iOS), просим просто ЛЮБОЙ микрофон
+            console.warn("Строгие параметры аудио отклонены, используем базовые", e);
             micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         }
+
         micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
         await micAudioContext.audioWorklet.addModule(URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' })));
         const source = micAudioContext.createMediaStreamSource(micStream);
@@ -322,6 +343,10 @@ document.addEventListener('DOMContentLoaded', async function() {
 
         audioWorkletNode.port.onmessage = (e) => {
             if (!isMicrophoneActive || isPlaying || vadState === 'processing') return; 
+            
+            // ФИКС ЭХА НА ТЕЛЕФОНЕ: Ждем 600мс после завершения речи ИИ, чтобы акустическое эхо рассеялось
+            if (Date.now() - lastAudioStopTime < 600) return;
+
             const { pcm, volume } = e.data;
             const useRealtime = (websocketConnection && websocketConnection.readyState === WebSocket.OPEN);
 
@@ -395,10 +420,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             showNotification('Ошибка: ' + errMsg, 'error'); 
             vadState = 'idle';
             isMicrophoneActive = false;
-            if (this) {
-                this.classList.remove('active'); 
-                this.querySelector('span').textContent = 'Включить микрофон';
-            }
+            this.classList.remove('active'); 
+            this.querySelector('span').textContent = 'Включить микрофон';
         } 
         finally { setTimeout(() => isMicToggling = false, 300); }
     });
