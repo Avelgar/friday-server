@@ -307,7 +307,12 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     async function startMicStream() {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        try {
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        } catch (e) {
+            // Если строгие параметры не подошли (привет, iOS), просим просто ЛЮБОЙ микрофон
+            micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        }
         micAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
         await micAudioContext.audioWorklet.addModule(URL.createObjectURL(new Blob([workletCode], { type: 'application/javascript' })));
         const source = micAudioContext.createMediaStreamSource(micStream);
