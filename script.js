@@ -389,7 +389,17 @@ document.addEventListener('DOMContentLoaded', async function() {
                 } else if (vadState === 'idle') { removePendingBubble(); }
                 pcmBuffer = []; preBuffer = []; activeStreamMsgId = null; stopMicStream();
             }
-        } catch (err) { showNotification('Ошибка микрофона', 'error'); } 
+        } catch (err) { 
+            console.error("Mic error:", err);
+            let errMsg = err.message || err.name || String(err);
+            showNotification('Ошибка: ' + errMsg, 'error'); 
+            vadState = 'idle';
+            isMicrophoneActive = false;
+            if (this) {
+                this.classList.remove('active'); 
+                this.querySelector('span').textContent = 'Включить микрофон';
+            }
+        } 
         finally { setTimeout(() => isMicToggling = false, 300); }
     });
 
