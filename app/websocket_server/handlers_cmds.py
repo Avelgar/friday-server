@@ -144,7 +144,7 @@ async def handle_command(websocket, data):
 
         caps_text, allowed_actions = get_action_strings(base_acts)
 
-        local_rules = ""
+        local_rules = "" #!123
         if device_type in ['компьютер', 'телефон']:
             local_rules = f"\n4. Ты не можешь открывать/закрывать программы напрямую! У тебя пока нет к ним доступа. Сначала вызови get_installed_programs или get_running_processes."
 
