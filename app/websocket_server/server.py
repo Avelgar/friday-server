@@ -5,7 +5,7 @@ import asyncio
 import logging
 import websockets
 from websockets.exceptions import ConnectionClosed
-from app.database.connection import get_db_connection
+from app.database.connection import get_async_db_connection
 
 from app.websocket_server.state import active_connections, mac_to_websocket, ws_to_mac, last_ping_times, PING_TIMEOUT
 from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth
@@ -14,30 +14,26 @@ from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_
 
 logger = logging.getLogger("WS_Server")
 
-def cleanup_disconnected_device(mac):
-    """Вспомогательная функция для обновления статуса или удаления WEB-устройств"""
-    if not mac:
-        return
+async def cleanup_disconnected_device(mac):
+    if not mac: return
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
-        dev = cur.fetchone()
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor()
+        await cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+        dev = await cursor.fetchone()
         if dev:
             dev_id = dev[0]
             if str(mac).startswith("WEB"):
-                # Удаляем мусорные веб-сессии и их сообщения
-                cur.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev_id,))
-                cur.execute("DELETE FROM devices WHERE id = %s", (dev_id,))
+                # Авто-удаление WEB мусора!
+                await cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev_id,))
+                await cursor.execute("DELETE FROM devices WHERE id = %s", (dev_id,))
             else:
-                # Нормальные устройства просто помечаем как оффлайн
-                cur.execute("UPDATE devices SET is_online = FALSE WHERE id = %s", (dev_id,))
-        conn.commit()
-        cur.close()
+                await cursor.execute("UPDATE devices SET is_online = FALSE WHERE id = %s", (dev_id,))
+        await conn.commit()
+        await cursor.close()
         conn.close()
     except Exception as e:
         logger.error(f"Ошибка при очистке устройства {mac}: {e}")
-
 
 async def websocket_handler(websocket):
     client_id = id(websocket)
@@ -66,11 +62,11 @@ async def websocket_handler(websocket):
                     await handle_audio_chunk(websocket, data)
                 elif data.get("type") == "audio_stream_end": 
                     await handle_audio_end(websocket, data)
-            except Exception as e: 
+            except Exception: 
                 pass
     except ConnectionClosed: 
         pass
-    except Exception as e: 
+    except Exception: 
         pass
     finally:
         logger.info(f"Disconnected: {client_id}")
@@ -81,7 +77,7 @@ async def websocket_handler(websocket):
         if mac:
             mac_to_websocket.pop(mac, None)
             ws_to_mac.pop(websocket, None)
-            cleanup_disconnected_device(mac)
+            await cleanup_disconnected_device(mac)
 
 async def check_pings():
     while True:
@@ -93,7 +89,7 @@ async def check_pings():
                 mac = ws_to_mac.get(ws)
                 if mac:
                     mac_to_websocket.pop(mac, None); ws_to_mac.pop(ws, None)
-                    cleanup_disconnected_device(mac)
+                    await cleanup_disconnected_device(mac)
                 try: await ws.close()
                 except: pass
         except: pass
