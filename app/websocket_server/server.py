@@ -11,6 +11,7 @@ from app.websocket_server.state import active_connections, mac_to_websocket, ws_
 from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth
 from app.websocket_server.handlers_cmds import handle_command, handle_target_command
 from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_end
+from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth, handle_desktop_auth
 
 logger = logging.getLogger("WS_Server")
 
@@ -58,6 +59,8 @@ async def websocket_handler(websocket):
                     asyncio.create_task(handle_target_command(websocket, data))
                 elif data.get("type") == "web_client_auth": 
                     await handle_web_client_auth(websocket, data)
+                elif data.get("type") == "desktop_auth": 
+                    asyncio.create_task(handle_desktop_auth(websocket, data))
                 elif data.get("type") == "audio_stream_chunk": 
                     await handle_audio_chunk(websocket, data)
                 elif data.get("type") == "audio_stream_end": 

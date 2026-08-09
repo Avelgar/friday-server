@@ -111,3 +111,68 @@ async def handle_device_registration(websocket, data):
     finally:
         if cursor: await cursor.close()
         if conn: conn.close()
+
+async def handle_desktop_auth(websocket, data):
+    conn = None; cursor = None
+    try:
+        token = data.get('token'); mac = data.get('mac'); device_name = data.get('device_name')
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+            user_id = payload['user_id']
+        except:
+            await async_send(websocket, {"status": "error", "message": "Недействительный токен, выполните вход заново."})
+            return
+
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        
+        # 1. Проверяем или создаем единый диалог для аккаунта
+        await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (user_id,))
+        dialog = await cursor.fetchone()
+        if not dialog:
+            await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES ('Основной диалог', %s)", (user_id,))
+            dialog_id = cursor.lastrowid
+        else:
+            dialog_id = dialog['id']
+
+        # 2. Обновляем/Создаем устройство
+        await cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+        device = await cursor.fetchone()
+        if device:
+            await cursor.execute("UPDATE devices SET device_name = %s, is_online = TRUE, user_id = %s WHERE mac = %s", (device_name, user_id, mac))
+            device_id = device['id']
+        else:
+            await cursor.execute("INSERT INTO devices (mac, device_name, is_online, user_id) VALUES (%s, %s, TRUE, %s)", (mac, device_name, user_id))
+            device_id = cursor.lastrowid
+            
+        mac_to_websocket[mac] = websocket; ws_to_mac[websocket] = mac
+        
+        # 3. Загружаем ЕДИНУЮ историю аккаунта (по dialog_id)
+        history = []
+        await cursor.execute("""
+            SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
+            FROM messages m 
+            LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci
+            WHERE m.dialog_id = %s ORDER BY m.created_at ASC
+        """, (dialog_id,))
+        
+        for msg in await cursor.fetchall():
+            msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
+            history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
+        
+        await cursor.execute("SELECT login FROM users WHERE id = %s", (user_id,))
+        user_rec = await cursor.fetchone()
+
+        await conn.commit()
+        await async_send(websocket, {
+            "status": "success", 
+            "message": "Данные успешно обработаны!", 
+            "history": history,
+            "user_login": user_rec['login'] if user_rec else "User"
+        })
+    except Exception as e:
+        logger.error(f"[AUTH ERROR] Ошибка десктопной авторизации: {e}", exc_info=True)
+        await async_send(websocket, {"status": "error", "message": str(e)})
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()

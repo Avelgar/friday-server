@@ -158,18 +158,18 @@ def do_POST(self):
             else: self.send_json(500, {"status": "error", "message": "Ошибка отправки письма"})
 
         elif self.path == '/login':
-            login = data.get('login'); password = data.get('password'); mac = data.get('mac')
+            login = data.get('login'); password = data.get('password')
             cursor.execute("SELECT * FROM users WHERE email = %s OR login = %s", (login, login))
             user = cursor.fetchone()
             if not user or not bcrypt.checkpw(password.encode('utf-8'), user['password'].encode('utf-8')):
                 return self.send_json(401, {"status": "error", "message": "Неверный логин или пароль"})
             if user['SingUpToken']: return self.send_json(403, {"status": "error", "message": "Аккаунт не подтвержден"})
-            device_info = {'user_login': user['login']}
-            if mac:
-                cursor.execute("UPDATE devices SET user_id = %s WHERE mac = %s", (user['id'], mac)); conn.commit()
-                cursor.execute("SELECT d.*, u.login as user_login FROM devices d LEFT JOIN users u ON d.user_id = u.id WHERE d.mac = %s", (mac,))
-                device_info = cursor.fetchone() or device_info
-            self.send_json(200, {"status": "success", "message": "Вход выполнен", "user_login": device_info.get('user_login')})
+            
+            # Генерируем долгоживущий токен для десктопа
+            token = jwt.encode({'user_id': user['id'], 'exp': datetime.utcnow() + timedelta(days=365)}, JWT_SECRET, algorithm='HS256')
+            if isinstance(token, bytes): token = token.decode('utf-8')
+            
+            self.send_json(200, {"status": "success", "message": "Вход выполнен", "user_login": user['login'], "token": token})
 
         elif self.path == '/login_web':
             login = data.get('login'); password = data.get('password')
