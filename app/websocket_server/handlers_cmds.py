@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 import aiomysql
+import hashlib
 from datetime import datetime
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
@@ -96,7 +97,11 @@ async def handle_command(websocket, data):
             if audio_base64:
                 audio_queue.put_nowait(base64.b64decode(audio_base64))
         
+        # СТРАХОВКА MAC АДРЕСА: Берем из сокета, данных ИЛИ напрямую из токена WEB клиента
         mac = ws_to_mac.get(websocket) or data.get('mac')
+        if not mac and data.get('token'):
+            mac = f"WEB{hashlib.md5(str(data.get('token')).encode()).hexdigest()[:13]}"
+            
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
 
@@ -105,7 +110,7 @@ async def handle_command(websocket, data):
         
         await cursor.execute("SELECT id, device_name, user_id FROM devices WHERE mac = %s", (mac,))
         sender_device = await cursor.fetchone()
-        if not sender_device: raise Exception("Устройство отправителя не найдено")
+        if not sender_device: raise Exception(f"Устройство отправителя не найдено (MAC: {mac})")
         
         sender_id = sender_device['id']; sender_name = sender_device['device_name']; device_type = get_device_type(mac)
         db_user_text = command if command else ("[Аудиосообщение]" if (audio_bytes or is_streaming) else "🖼️ [Фото]")

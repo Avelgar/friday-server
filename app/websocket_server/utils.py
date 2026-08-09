@@ -9,29 +9,29 @@ def get_device_type(mac):
     if mac == "b8:27:eb:00:51:06": return "распберри"
     return "телефон"
 
-def get_accessible_devices(cursor, current_mac, user_id):
+async def get_accessible_devices(cursor, current_mac, user_id):
     devices = {}
     if user_id:
-        cursor.execute("SELECT mac, device_name FROM devices WHERE user_id = %s AND mac != %s AND is_online = TRUE", (user_id, current_mac))
-        for row in cursor.fetchall():
+        await cursor.execute("SELECT mac, device_name FROM devices WHERE user_id = %s AND mac != %s AND is_online = TRUE", (user_id, current_mac))
+        for row in await cursor.fetchall():
             devices[row['mac']] = f"{row['device_name']} ({get_device_type(row['mac'])})"
             
-    cursor.execute("SELECT id FROM devices WHERE mac = %s", (current_mac,))
-    dev = cursor.fetchone()
+    await cursor.execute("SELECT id FROM devices WHERE mac = %s", (current_mac,))
+    dev = await cursor.fetchone()
     if dev:
         dev_id = dev['id']
-        cursor.execute("""
+        await cursor.execute("""
             SELECT d.mac, d.device_name FROM device_access da
             JOIN devices d ON da.owner_id = d.id WHERE da.guest_id = %s AND d.is_online = TRUE
         """, (dev_id,))
-        for row in cursor.fetchall():
+        for row in await cursor.fetchall():
             devices[row['mac']] = f"{row['device_name']} ({get_device_type(row['mac'])})"
                 
-        cursor.execute("""
+        await cursor.execute("""
             SELECT d.mac, d.device_name FROM device_access da
             JOIN devices d ON da.guest_id = d.id WHERE da.owner_id = %s AND d.is_online = TRUE
         """, (dev_id,))
-        for row in cursor.fetchall():
+        for row in await cursor.fetchall():
             devices[row['mac']] = f"{row['device_name']} ({get_device_type(row['mac'])})"
 
     return list(devices.values())

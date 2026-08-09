@@ -52,6 +52,7 @@ async def handle_web_client_auth(websocket, data):
         await conn.commit()
         await async_send(websocket, {"status": "success", "message": "Данные успешно обработаны!", "history": history})
     except Exception as e:
+        logger.error(f"[AUTH ERROR] Ошибка WEB авторизации: {e}", exc_info=True)
         await async_send(websocket, {"status": "error", "message": str(e)})
     finally:
         if cursor: await cursor.close()
@@ -103,7 +104,7 @@ async def handle_device_registration(websocket, data):
         await conn.commit()
         await async_send(websocket, response)
     except Exception as e:
-        logger.error(f"Ошибка регистрации устройства: {e}")
+        logger.error(f"[AUTH ERROR] Ошибка регистрации устройства: {e}", exc_info=True)
         await async_send(websocket, {"status": "error", "message": str(e)})
     finally:
         if cursor: await cursor.close()
