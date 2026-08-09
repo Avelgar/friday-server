@@ -14,6 +14,31 @@ from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_
 
 logger = logging.getLogger("WS_Server")
 
+def cleanup_disconnected_device(mac):
+    """Вспомогательная функция для обновления статуса или удаления WEB-устройств"""
+    if not mac:
+        return
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+        dev = cur.fetchone()
+        if dev:
+            dev_id = dev[0]
+            if str(mac).startswith("WEB"):
+                # Удаляем мусорные веб-сессии и их сообщения
+                cur.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev_id,))
+                cur.execute("DELETE FROM devices WHERE id = %s", (dev_id,))
+            else:
+                # Нормальные устройства просто помечаем как оффлайн
+                cur.execute("UPDATE devices SET is_online = FALSE WHERE id = %s", (dev_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка при очистке устройства {mac}: {e}")
+
+
 async def websocket_handler(websocket):
     client_id = id(websocket)
     active_connections[websocket] = client_id
@@ -32,10 +57,8 @@ async def websocket_handler(websocket):
                 if "DeviceName" in data: 
                     await handle_device_registration(websocket, data)
                 elif "command" in data: 
-                    # ВАЖНО: Запускаем команду как фоновую задачу, чтобы не блокировать цикл чтения чанков!
                     asyncio.create_task(handle_command(websocket, data))
                 elif "command_to_device" in data: 
-                    # Целевые команды тоже в фоне
                     asyncio.create_task(handle_target_command(websocket, data))
                 elif data.get("type") == "web_client_auth": 
                     await handle_web_client_auth(websocket, data)
@@ -58,14 +81,7 @@ async def websocket_handler(websocket):
         if mac:
             mac_to_websocket.pop(mac, None)
             ws_to_mac.pop(websocket, None)
-            try:
-                conn = get_db_connection()
-                cur = conn.cursor()
-                cur.execute("UPDATE devices SET is_online = FALSE WHERE mac = %s", (mac,))
-                conn.commit()
-                cur.close()
-                conn.close()
-            except: pass
+            cleanup_disconnected_device(mac)
 
 async def check_pings():
     while True:
@@ -77,14 +93,7 @@ async def check_pings():
                 mac = ws_to_mac.get(ws)
                 if mac:
                     mac_to_websocket.pop(mac, None); ws_to_mac.pop(ws, None)
-                    try:
-                        conn = get_db_connection()
-                        cur = conn.cursor()
-                        cur.execute("UPDATE devices SET is_online = FALSE WHERE mac = %s", (mac,))
-                        conn.commit()
-                        cur.close()
-                        conn.close()
-                    except: pass
+                    cleanup_disconnected_device(mac)
                 try: await ws.close()
                 except: pass
         except: pass
