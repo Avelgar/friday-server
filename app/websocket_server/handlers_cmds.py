@@ -97,7 +97,6 @@ async def handle_command(websocket, data):
             if audio_base64:
                 audio_queue.put_nowait(base64.b64decode(audio_base64))
         
-        # СТРАХОВКА MAC АДРЕСА: Берем из сокета, данных ИЛИ напрямую из токена WEB клиента
         mac = ws_to_mac.get(websocket) or data.get('mac')
         if not mac and data.get('token'):
             mac = f"WEB{hashlib.md5(str(data.get('token')).encode()).hexdigest()[:13]}"
@@ -128,9 +127,10 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
+        # ФИКС КОДИРОВКИ
         await cursor.execute("""
             SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
-            FROM messages m LEFT JOIN devices d ON m.send_type = CAST(d.id AS CHAR) AND m.send_type NOT IN ('Вы', 'Бот')
+            FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
             WHERE m.recipient_device_id = %s AND m.id < %s ORDER BY m.created_at ASC
         """, (sender_id, user_msg_id))
         
@@ -298,7 +298,6 @@ async def handle_target_command(websocket, data):
             await cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = await cursor.fetchone()
             
-            # Асинхронный вызов get_accessible_devices!
             accessible_devices_list = await get_accessible_devices(cursor, mac, user_id)
             accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет других устройств в сети"
             
@@ -386,9 +385,10 @@ async def handle_target_command(websocket, data):
 
         source_id = source_device_info['id']
 
+        # ФИКС КОДИРОВКИ
         await cursor.execute("""
             SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
-            FROM messages m LEFT JOIN devices d ON m.send_type = CAST(d.id AS CHAR) AND m.send_type NOT IN ('Вы', 'Бот')
+            FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
             WHERE m.recipient_device_id = %s ORDER BY m.created_at ASC
         """, (source_id,))
         

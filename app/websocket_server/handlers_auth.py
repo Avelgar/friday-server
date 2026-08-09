@@ -40,9 +40,10 @@ async def handle_web_client_auth(websocket, data):
         device_id = device_record['id']
         
         history =[]
+        # ФИКС КОДИРОВКИ: COLLATE utf8mb4_general_ci
         await cursor.execute("""
             SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
-            FROM messages m LEFT JOIN devices d ON m.send_type = CAST(d.id AS CHAR) AND m.send_type != 'Вы' AND m.send_type != 'Бот'
+            FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
             WHERE m.recipient_device_id = %s ORDER BY m.created_at ASC
         """, (device_id,))
         for msg in await cursor.fetchall():
@@ -91,9 +92,10 @@ async def handle_device_registration(websocket, data):
         mac_to_websocket[mac] = websocket; ws_to_mac[websocket] = mac
         
         history = []
+        # ФИКС КОДИРОВКИ: COLLATE utf8mb4_general_ci
         await cursor.execute("""
             SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
-            FROM messages m LEFT JOIN devices d ON m.send_type = CAST(d.id AS CHAR) AND m.send_type != 'Вы' AND m.send_type != 'Бот'
+            FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
             WHERE m.recipient_device_id = %s ORDER BY m.created_at ASC
         """, (device_id,))
         for msg in await cursor.fetchall():
