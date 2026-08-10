@@ -19,15 +19,19 @@ async def cleanup_disconnected_device(mac):
     try:
         conn = await get_async_db_connection()
         cursor = await conn.cursor()
-        await cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+        await cursor.execute("SELECT id, user_id FROM devices WHERE mac = %s", (mac,))
         dev = await cursor.fetchone()
         if dev:
             dev_id = dev[0]
-            if str(mac).startswith("WEB"):
+            user_id = dev[1]
+            
+            # УДАЛЯЕМ ТОЛЬКО ГОСТЕЙ! Авторизованные WEB-устройства оставляем для сохранения истории.
+            if str(mac).startswith("WEB") and not user_id:
                 await cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev_id,))
                 await cursor.execute("DELETE FROM devices WHERE id = %s", (dev_id,))
             else:
                 await cursor.execute("UPDATE devices SET is_online = FALSE WHERE id = %s", (dev_id,))
+                
         await conn.commit()
         await cursor.close()
         conn.close()

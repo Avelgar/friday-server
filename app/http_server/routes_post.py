@@ -128,7 +128,7 @@ def do_POST(self):
                 except Exception: pass
             return 
 
-        # === НОВЫЕ REST API МЕТОДЫ ДЛЯ ДИАЛОГОВ ===
+        # === REST API МЕТОДЫ ДЛЯ ДИАЛОГОВ ===
         elif self.path == '/api/get_dialogs':
             token = data.get('token')
             if not token: return self.send_json(400, {"status": "error", "message": "Токен обязателен"})
@@ -180,6 +180,19 @@ def do_POST(self):
                 cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (name, user_id))
                 conn.commit()
                 self.send_json(200, {"status": "success", "dialog_id": cursor.lastrowid, "name": name})
+            except Exception as e:
+                self.send_json(401, {"status": "error", "message": "Недействительный токен"})
+
+        elif self.path == '/api/delete_dialog':
+            token = data.get('token'); dialog_id = data.get('dialog_id')
+            if not token or not dialog_id: return self.send_json(400, {"status": "error", "message": "Токен и dialog_id обязательны"})
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+                # CASCADE УДАЛИТ И ВСЕ СООБЩЕНИЯ ЭТОГО ДИАЛОГА!
+                cursor.execute("DELETE FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
+                conn.commit()
+                self.send_json(200, {"status": "success", "message": "Диалог удален"})
             except Exception as e:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
         # ==========================================
@@ -244,8 +257,8 @@ def do_POST(self):
                 cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
                 dev = cursor.fetchone()
                 if dev:
-                    cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev['id'],))
-                    cursor.execute("DELETE FROM devices WHERE id = %s", (dev['id'],))
+                    # МЫ БОЛЬШЕ НЕ УДАЛЯЕМ WEB-УСТРОЙСТВО! Иначе удалится вся глобальная история.
+                    cursor.execute("UPDATE devices SET is_online = FALSE WHERE id = %s", (dev['id'],))
                     conn.commit()
                     return self.send_json(200, {"status": "success", "message": "Выход выполнен"})
             self.send_json(404, {"status": "error", "message": "Устройство не найдено"})

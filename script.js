@@ -3,6 +3,8 @@ let nextPlayTime = 0;
 let isPlaying = false; 
 let vadState = 'idle'; 
 let isMicrophoneActive = false; 
+
+// Глобальная переменная для защиты от эха
 let lastAudioStopTime = 0; 
 
 let stopWordRecognizer = null;
@@ -113,7 +115,7 @@ async function loadDialogs() {
         if (data.status === 'success') {
             renderDialogs(data.dialogs);
             if (data.dialogs.length > 0) {
-                selectDialog(data.dialogs[0].id); // Автоматически открываем первый чат
+                selectDialog(data.dialogs[0].id);
             } else {
                 createNewDialog("Основной диалог");
             }
@@ -127,9 +129,38 @@ function renderDialogs(dialogs) {
     dialogs.forEach(d => {
         const div = document.createElement('div');
         div.className = `dialog-item ${d.id === currentDialogId ? 'active' : ''}`;
-        div.textContent = d.name;
         div.dataset.id = d.id;
-        div.onclick = () => selectDialog(d.id);
+        div.style.display = 'flex';
+        div.style.justifyContent = 'space-between';
+        div.style.alignItems = 'center';
+        
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = d.name;
+        nameSpan.style.flex = '1';
+        nameSpan.style.overflow = 'hidden';
+        nameSpan.style.textOverflow = 'ellipsis';
+        nameSpan.onclick = () => selectDialog(d.id);
+        
+        const delBtn = document.createElement('i');
+        delBtn.className = 'fas fa-trash';
+        delBtn.style.color = '#aaa';
+        delBtn.style.cursor = 'pointer';
+        delBtn.style.marginLeft = '10px';
+        delBtn.title = "Удалить чат";
+        
+        // Смена цвета при наведении
+        delBtn.onmouseover = () => delBtn.style.color = '#e74c3c';
+        delBtn.onmouseout = () => delBtn.style.color = '#aaa';
+        
+        delBtn.onclick = (e) => {
+            e.stopPropagation();
+            if(confirm('Вы уверены, что хотите удалить этот диалог и все его сообщения?')) {
+                deleteDialog(d.id);
+            }
+        };
+        
+        div.appendChild(nameSpan);
+        div.appendChild(delBtn);
         list.appendChild(div);
     });
 }
@@ -137,12 +168,10 @@ function renderDialogs(dialogs) {
 async function selectDialog(dialogId) {
     currentDialogId = dialogId;
     
-    // Обновляем активный класс в меню
     document.querySelectorAll('.dialog-item').forEach(el => el.classList.remove('active'));
     const activeEl = document.querySelector(`.dialog-item[data-id="${dialogId}"]`);
     if (activeEl) activeEl.classList.add('active');
 
-    // На мобилках: прячем меню после выбора
     document.getElementById('sidebar').classList.remove('open');
 
     const token = localStorage.getItem('token');
@@ -174,7 +203,10 @@ async function selectDialog(dialogId) {
 
 async function createNewDialog(name = "Новый чат") {
     const token = localStorage.getItem('token');
-    if (!token) return;
+    if (!token) {
+        openLoginModal();
+        return;
+    }
     try {
         const response = await fetch('/api/create_dialog', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -186,6 +218,27 @@ async function createNewDialog(name = "Новый чат") {
             selectDialog(data.dialog_id);
         }
     } catch (e) { console.error("Ошибка создания диалога:", e); }
+}
+
+async function deleteDialog(dialogId) {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+        const response = await fetch('/api/delete_dialog', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: token, dialog_id: dialogId })
+        });
+        const data = await response.json();
+        if (data.status === 'success') {
+            if (currentDialogId === dialogId) {
+                currentDialogId = null;
+                document.getElementById('chatMessages').innerHTML = '';
+            }
+            await loadDialogs();
+        } else {
+            showNotification(data.message, 'error');
+        }
+    } catch (e) { console.error("Ошибка удаления диалога:", e); }
 }
 // ==========================================
 
@@ -319,7 +372,6 @@ async function clearHistory(){
     const token = localStorage.getItem('token');
     if (token) {
         try { 
-            // Отправляем очистку с привязкой к текущему диалогу
             const r = await fetch('/clear_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token, dialog_id: currentDialogId }) }); 
             const d = await r.json(); showNotification(d.message, d.status); 
         } catch (e) { showNotification('Ошибка', 'error'); }
@@ -340,7 +392,6 @@ function connectWebSocket() {
     websocketConnection.onmessage = function(event) {
         try {
             const data = JSON.parse(decodeURIComponent(escape(atob(event.data))));
-            // Игнорируем первоначальную глобальную выгрузку из WS, так как мы теперь грузим историю через REST API
             if (data.status === 'success' && data.message === "Данные успешно обработаны!") {
                 console.log("WebSocket Auth OK");
             } else { 
@@ -559,7 +610,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     type: 'web_command', command: prompt, audio_base64: audio_base64, 
                     token: token, timestamp: new Date().toISOString(), name: "Пятница", 
                     voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId, 
-                    stream_audio: stream_audio, dialog_id: currentDialogId // Добавляем dialog_id
+                    stream_audio: stream_audio, dialog_id: currentDialogId
                 };
                 if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData))))); currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = ''; }; r.readAsDataURL(currentFile); } 
                 else websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
@@ -629,7 +680,6 @@ document.addEventListener('DOMContentLoaded', async function() {
                 updateAuthUI(); 
                 connectWebSocket(); 
                 
-                // ЗАГРУЖАЕМ ДИАЛОГИ ПОСЛЕ УСПЕШНОГО ВХОДА!
                 await loadDialogs();
 
                 setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); 
