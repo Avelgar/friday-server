@@ -8,10 +8,9 @@ from websockets.exceptions import ConnectionClosed
 from app.database.connection import get_async_db_connection
 
 from app.websocket_server.state import active_connections, mac_to_websocket, ws_to_mac, last_ping_times, PING_TIMEOUT
-from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth
+from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth, handle_account_sync
 from app.websocket_server.handlers_cmds import handle_command, handle_target_command
 from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_end
-from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth, handle_desktop_auth
 
 logger = logging.getLogger("WS_Server")
 
@@ -25,7 +24,6 @@ async def cleanup_disconnected_device(mac):
         if dev:
             dev_id = dev[0]
             if str(mac).startswith("WEB"):
-                # Авто-удаление WEB мусора!
                 await cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev_id,))
                 await cursor.execute("DELETE FROM devices WHERE id = %s", (dev_id,))
             else:
@@ -59,8 +57,8 @@ async def websocket_handler(websocket):
                     asyncio.create_task(handle_target_command(websocket, data))
                 elif data.get("type") == "web_client_auth": 
                     await handle_web_client_auth(websocket, data)
-                elif data.get("type") == "desktop_auth": 
-                    asyncio.create_task(handle_desktop_auth(websocket, data))
+                elif data.get("type") == "account_sync": 
+                    asyncio.create_task(handle_account_sync(websocket, data))
                 elif data.get("type") == "audio_stream_chunk": 
                     await handle_audio_chunk(websocket, data)
                 elif data.get("type") == "audio_stream_end": 

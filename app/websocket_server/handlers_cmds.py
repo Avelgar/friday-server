@@ -114,14 +114,19 @@ async def handle_command(websocket, data):
         sender_id = sender_device['id']; sender_name = sender_device['device_name']; device_type = get_device_type(mac)
         db_user_text = command if command else ("[Аудиосообщение]" if (audio_bytes or is_streaming) else "🖼️ [Фото]")
         
-        logger.info("\n" + "="*50)
-        logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name} | Стрим: {is_streaming}")
+        # --- ФИКС ДЛЯ ДИАЛОГОВ ---
+        dialog_id = None
+        if sender_device.get('user_id'):
+            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (sender_device['user_id'],))
+            dlg = await cursor.fetchone()
+            if dlg: dialog_id = dlg['id']
 
-        await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id) VALUES ('Вы', %s, %s)", (db_user_text, sender_id))
+        await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Вы', %s, %s, %s)", (db_user_text, sender_id, dialog_id))
         user_msg_id = cursor.lastrowid
-        await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id) VALUES ('Бот', '', %s)", (sender_id,))
+        await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (sender_id, dialog_id))
         bot_message_id = cursor.lastrowid
         await conn.commit()
+        # ------------------------
 
         sender_ws = mac_to_websocket.get(mac)
         if sender_ws and ui_msg_id:
