@@ -118,11 +118,22 @@ async def handle_command(websocket, data):
         logger.info("\n" + "="*50)
         logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name} | Стрим: {is_streaming}")
 
-        # Проверяем, есть ли аккаунт у устройства, чтобы получить глобальный dialog_id
+        # === ФИКС: ПРАВИЛЬНО ИЩЕМ DIALOG_ID ===
+        client_dialog_id = data.get('dialog_id')
         if sender_device.get('user_id'):
-            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (sender_device['user_id'],))
-            dlg = await cursor.fetchone()
-            if dlg: dialog_id = dlg['id']
+            if client_dialog_id:
+                # Проверяем, принадлежит ли присланный диалог этому юзеру
+                await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (client_dialog_id, sender_device['user_id']))
+                dlg = await cursor.fetchone()
+                if dlg:
+                    dialog_id = dlg['id']
+            
+            if not dialog_id:
+                # Если с клиента не пришел dialog_id (например, C#), берем "Основной диалог"
+                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (sender_device['user_id'],))
+                dlg = await cursor.fetchone()
+                if dlg: 
+                    dialog_id = dlg['id']
 
         history_for_prompt = ""
 
@@ -222,7 +233,8 @@ async def handle_command(websocket, data):
                     filtered_actions = []
                     for act in cmd.get('actions', []):
                         if act.get('action_type') == "check_network_devices":
-                            pseudo_data = {"internal_routing": "check_network_devices", "original_command": final_user_text_full.strip() or command, "source_name": sender_name, "mac": mac, "user_id": sender_device.get('user_id'), "user_msg_id": user_msg_id, "voice_type": voice_name, "message_history": message_history}
+                            # Передаем dialog_id во вторичный запрос!
+                            pseudo_data = {"internal_routing": "check_network_devices", "original_command": final_user_text_full.strip() or command, "source_name": sender_name, "mac": mac, "user_id": sender_device.get('user_id'), "user_msg_id": user_msg_id, "voice_type": voice_name, "message_history": message_history, "dialog_id": dialog_id}
                             pending_routes.append(pseudo_data)
                         else: filtered_actions.append(act)
                     if filtered_actions: cmd['actions'] = filtered_actions; filtered_commands.append(cmd)
@@ -232,10 +244,10 @@ async def handle_command(websocket, data):
                     actions = cmd.get('actions', [])
                     if not target_device_name or not actions: continue
                     
-                    await cursor.execute("SELECT id, mac, user_id FROM devices WHERE device_name = %s", (target_device_name,))
+                    await cursor.execute("SELECT id, mac FROM devices WHERE device_name = %s", (target_device_name,))
                     target_device_info = await cursor.fetchone()
                     if not target_device_info:
-                        await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE is_online = TRUE")
+                        await cursor.execute("SELECT id, mac, device_name FROM devices WHERE is_online = TRUE")
                         for d in await cursor.fetchall():
                             if d['device_name'].lower() in target_device_name.lower() or target_device_name.lower() in d['device_name'].lower():
                                 target_device_info = d; break
@@ -253,7 +265,7 @@ async def handle_command(websocket, data):
                         # Кросс-девайс вставка: Ищем dialog_id целевого устройства
                         target_dialog_id = None
                         if target_device_info.get('user_id'):
-                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (target_device_info['user_id'],))
+                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (target_device_info['user_id'],))
                             dlg = await cursor.fetchone()
                             if dlg: target_dialog_id = dlg['id']
                             
@@ -325,6 +337,7 @@ async def handle_target_command(websocket, data):
             mac = data.get("mac")
             user_id = data.get("user_id")
             user_msg_id = data.get("user_msg_id")
+            dialog_id = data.get("dialog_id")
             
             await cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = await cursor.fetchone()
@@ -414,27 +427,28 @@ async def handle_target_command(websocket, data):
 """
             prompt_context = f"[ДАННЫЕ ОТ {executor_device['device_name']}]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни изначальную задачу пользователя."
 
+            # Ищем диалог для Третичного агента
+            dialog_id = None
+            if source_device_info.get('user_id'):
+                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (source_device_info['user_id'],))
+                dlg = await cursor.fetchone()
+                if dlg: dialog_id = dlg['id']
+
         source_id = source_device_info['id']
-        source_dialog_id = None
-        
-        if source_device_info.get('user_id'):
-            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (source_device_info['user_id'],))
-            dlg = await cursor.fetchone()
-            if dlg: source_dialog_id = dlg['id']
 
         history_text = ""
         
-        if source_dialog_id:
+        if dialog_id:
             await cursor.execute("""
                 SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
                 FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
                 WHERE m.dialog_id = %s ORDER BY m.created_at ASC
-            """, (source_dialog_id,))
+            """, (dialog_id,))
             raw_history = await cursor.fetchall()
             raw_history = raw_history[-HISTORY_LIMIT:] if raw_history else []
             history_text = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in raw_history])
             
-            await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (source_id, source_dialog_id))
+            await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (source_id, dialog_id))
             bot_message_id = cursor.lastrowid
             await conn.commit()
         else:
@@ -485,7 +499,7 @@ async def handle_target_command(websocket, data):
                         
                         target_dialog_id = None
                         if target_device_info.get('user_id'):
-                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (target_device_info['user_id'],))
+                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (target_device_info['user_id'],))
                             dlg = await cursor.fetchone()
                             if dlg: target_dialog_id = dlg['id']
 
@@ -509,7 +523,7 @@ async def handle_target_command(websocket, data):
                 final_text += chunk["text"] + " "
                 logger.info(f"[TTS] Бот: {chunk['text'].strip()}")
                 
-                if source_dialog_id and bot_message_id:
+                if dialog_id and bot_message_id:
                     await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
                     await conn.commit()
                     
@@ -527,7 +541,7 @@ async def handle_target_command(websocket, data):
                 audio_chunks_count += 1
                 if source_ws: await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
 
-        if source_dialog_id and bot_message_id:
+        if dialog_id and bot_message_id:
             if not final_text.strip() and audio_chunks_count == 0 and not has_commands:
                 logger.info(f"[DONE] Пустой ответ/Таймаут. Удаляю мусор.")
                 await cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
