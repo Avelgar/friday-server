@@ -4,33 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     
-    <!-- Основные SEO теги -->
     <title>Friday Assistant - Ваш персональный ИИ-помощник</title>
-    <meta name="description" content="Friday Assistant — персональный AI-помощник на базе Gemini для управления компьютером и телефоном с помощью голосовых команд. Кроссплатформенная синхронизация и умные ответы.">
-    <meta name="keywords" content="ИИ помощник, голосовой ассистент, управление ПК голосом, управление компьютером с телефона, Gemini AI, умный дом, Jarvis, Джарвис, Пятница, нейросеть для ПК, голосовые команды Windows">
-    <meta name="robots" content="index, follow">
-    <meta name="author" content="Avelgar">
-    <link rel="canonical" href="https://friday-assistant.ru/">
-    
-    <!-- Theme Color для мобильных браузеров (цвет верхней панели) -->
+    <meta name="description" content="Friday Assistant — персональный AI-помощник на базе Gemini для управления компьютером и телефоном с помощью голосовых команд.">
+    <meta name="keywords" content="ИИ помощник, голосовой ассистент, управление ПК голосом, Gemini AI, Jarvis, Джарвис, Пятница">
     <meta name="theme-color" content="#6A3D8B">
     
-    <!-- Open Graph (Для красивых превью в Telegram, VK, WhatsApp, Discord) -->
-    <meta property="og:type" content="website">
-    <meta property="og:title" content="Friday Assistant - Ваш персональный ИИ-помощник">
-    <meta property="og:description" content="Управляйте своим компьютером и телефоном с помощью голоса. Интеграция с Gemini AI, единая история и мгновенный отклик.">
-    <meta property="og:url" content="https://friday-assistant.ru/">
-    <meta property="og:image" content="https://friday-assistant.ru/images/f.png"> <!-- Желательно позже сделать картинку 1200x630px для превью -->
-    <meta property="og:site_name" content="Friday Assistant">
-    <meta property="og:locale" content="ru_RU">
-
-    <!-- Twitter Cards (Для превью в X/Twitter) -->
-    <meta name="twitter:card" content="summary">
-    <meta name="twitter:title" content="Friday Assistant - ИИ для управления устройствами">
-    <meta name="twitter:description" content="Кроссплатформенный голосовой ассистент на базе Gemini AI для Windows и Android.">
-    <meta name="twitter:image" content="https://friday-assistant.ru/images/f.png">
-
-    <!-- Иконки и стили -->
     <link rel="icon" type="image/x-icon" href="images/f.png">
     <link rel="apple-touch-icon" href="images/f.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -39,82 +17,86 @@
 <body>
     <div class="container">
         <header>
-            <div class="auth-buttons">
-                <button class="auth-btn register-btn">Регистрация</button>
-                <button class="auth-btn login-btn">Вход</button>
+            <div class="header-left">
+                <button class="menu-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')">
+                    <i class="fas fa-bars"></i>
+                </button>
+                <div class="logo">
+                    <h1>Friday Assistant</h1>
+                    <p class="tagline">Ваш AI-помощник</p>
+                </div>
             </div>
-            <h1>Friday Assistant</h1>
-            <p class="tagline">Ваш персональный AI-помощник для управления устройствами</p>
+            <div class="header-right">
+                <div class="header-downloads">
+                    <a href="/download-windows" class="dl-icon" title="Скачать для Windows"><i class="fab fa-windows"></i></a>
+                    <a href="/download-android" class="dl-icon" title="Скачать для Android"><i class="fab fa-android"></i></a>
+                </div>
+                <div class="auth-buttons">
+                    <button class="auth-btn register-btn">Регистрация</button>
+                    <button class="auth-btn login-btn">Вход</button>
+                </div>
+            </div>
         </header>
-        
-        <div class="card download-section">
-            <h2 class="section-title"><i class="fas fa-download"></i> Скачать приложение</h2>
-            <div class="download-buttons">
-                <a href="/download-windows" class="download-btn windows-btn">
-                    <i class="fab fa-windows fa-2x"></i>
-                    <span>Скачать для Windows</span>
-                </a>
-                <a href="/download-android" class="download-btn android-btn">
-                    <i class="fab fa-android fa-2x"></i>
-                    <span>Скачать для Android</span>
-                </a>
-            </div>
-            <div class="description">
-                <h3>О проекте</h3>
-                <p>Friday Assistant позволяет управлять всеми вашими устройствами через единый интерфейс с помощью голосовых команд и AI-ассистента.</p>
-                <ul>
-                    <li>Управление компьютером и телефоном при помощи голоса</li>
-                    <li>Интеграция с Gemini AI для умных ответов</li>
-                    <li>Кроссплатформенная синхронизация</li>
-                    <li>Безопасное соединение</li>
-                </ul>
-            </div>
-        </div>
 
-        <div class="card chat-section">
-            <div class="chat-header">
-                <i class="fas fa-robot"></i>
-                <h2>Чат с ассистентом</h2>
-            </div>
-            
-            <div class="chat-controls">
-                <div class="control-group">
-                    <label for="voice-type">Голос:</label>
-                    <select id="voice-type">
-                        <option value="Aoede" selected>Aoede (Женский)</option>
-                        <option value="Puck">Puck (Мужской)</option>
-                        <option value="Kore">Kore (Строгий)</option>
-                        <option value="Charon">Charon (Эксперт)</option>
-                    </select>
+        <div class="app-layout">
+            <!-- Боковая панель с диалогами -->
+            <aside class="sidebar card" id="sidebar">
+                <button class="new-chat-btn" id="newChatBtn">
+                    <i class="fas fa-plus"></i> Новый чат
+                </button>
+                <div class="dialog-list" id="dialogList">
+                    <!-- Заглушка, позже скрипт будет грузить сюда чаты из БД -->
+                    <div class="dialog-item active" data-id="local">Гостевой диалог</div>
                 </div>
-                <button id="microphone-btn" class="microphone-btn">
-                    <i class="fas fa-microphone"></i>
-                    <span>Включить микрофон</span>
-                </button>
-                <button id="clear-history" class="microphone-btn" style="background: var(--warning);">
-                    <i class="fas fa-trash"></i>
-                    <span>Очистить историю</span>
-                </button>
-            </div>
-            
-            <div class="chat-messages" id="chatMessages">
-            </div>
-            <div class="chat-input">
-                <div class="chat-input-wrapper">
-                    <div class="file-input-wrapper">
-                        <input type="file" id="file-upload" accept=".png,.jpg,.jpeg">
-                        <button class="attach-btn" title="Прикрепить файл">
-                            <i class="fas fa-paperclip"></i>
-                        </button>
+            </aside>
+
+            <!-- Основная область чата -->
+            <main class="card chat-section">
+                <div class="chat-header">
+                    <i class="fas fa-robot"></i>
+                    <h2>Чат с ассистентом</h2>
+                </div>
+                
+                <div class="chat-controls">
+                    <div class="control-group">
+                        <label for="voice-type">Голос:</label>
+                        <select id="voice-type">
+                            <option value="Aoede" selected>Aoede (Женский)</option>
+                            <option value="Puck">Puck (Мужской)</option>
+                            <option value="Kore">Kore (Строгий)</option>
+                            <option value="Charon">Charon (Эксперт)</option>
+                        </select>
                     </div>
-                    <textarea id="messageInput" placeholder="Введите ваше сообщение..." rows="1"></textarea>
-                    <span class="hint">Shift+Enter для переноса строки</span>
+                    <button id="microphone-btn" class="microphone-btn">
+                        <i class="fas fa-microphone"></i>
+                        <span>Включить микрофон</span>
+                    </button>
+                    <button id="clear-history" class="microphone-btn" style="background: var(--warning);">
+                        <i class="fas fa-trash"></i>
+                        <span>Очистить историю</span>
+                    </button>
                 </div>
-                <div class="image-preview-container" id="imagePreviewContainer" style="display: none;"></div>
-                <button id="sendMessage">
-                    <i class="fas fa-paper-plane"></i>
-                </button>
-            </div>
+                
+                <div class="chat-messages" id="chatMessages">
+                </div>
+                
+                <div class="chat-input">
+                    <div class="chat-input-wrapper">
+                        <div class="file-input-wrapper">
+                            <input type="file" id="file-upload" accept=".png,.jpg,.jpeg">
+                            <button class="attach-btn" title="Прикрепить файл">
+                                <i class="fas fa-paperclip"></i>
+                            </button>
+                        </div>
+                        <textarea id="messageInput" placeholder="Введите ваше сообщение..." rows="1"></textarea>
+                        <span class="hint">Shift+Enter для переноса строки</span>
+                    </div>
+                    <div class="image-preview-container" id="imagePreviewContainer" style="display: none;"></div>
+                    <button id="sendMessage">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </main>
         </div>
 
         <footer>
@@ -127,44 +109,44 @@
         <span id="notification-text"></span>
     </div>
     
-<!-- Модальные окна -->
-<div id="registerModal" class="modal">
-  <div class="modal-content">
-    <div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div>
-    <form id="registerForm">
-      <div class="form-group"><label for="regEmail">Email:</label><input type="email" id="regEmail" required></div>
-      <div class="form-group"><label for="regLogin">Логин:</label><input type="text" id="regLogin" required></div>
-      <div class="form-group"><label for="regPassword">Пароль:</label><input type="password" id="regPassword" required></div>
-      <div class="form-group"><label for="regPasswordConfirm">Подтвердите пароль:</label><input type="password" id="regPasswordConfirm" required></div>
-      <button type="submit" class="modal-btn">Зарегистрироваться</button>
-      <div id="registerResponse" class="response-message"></div>
-    </form>
-  </div>
-</div>
+    <!-- Модальные окна -->
+    <div id="registerModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div>
+        <form id="registerForm">
+          <div class="form-group"><label for="regEmail">Email:</label><input type="email" id="regEmail" required></div>
+          <div class="form-group"><label for="regLogin">Логин:</label><input type="text" id="regLogin" required></div>
+          <div class="form-group"><label for="regPassword">Пароль:</label><input type="password" id="regPassword" required></div>
+          <div class="form-group"><label for="regPasswordConfirm">Подтвердите пароль:</label><input type="password" id="regPasswordConfirm" required></div>
+          <button type="submit" class="modal-btn">Зарегистрироваться</button>
+          <div id="registerResponse" class="response-message"></div>
+        </form>
+      </div>
+    </div>
 
-<div id="loginModal" class="modal">
-  <div class="modal-content">
-    <div class="modal-header"><h2>Вход</h2><span class="modal-close">&times;</span></div>
-    <form id="loginForm">
-      <div class="form-group"><label for="loginEmail">Email или логин:</label><input type="text" id="loginEmail" required></div>
-      <div class="form-group"><label for="loginPassword">Пароль:</label><input type="password" id="loginPassword" required></div>
-      <button type="submit" class="modal-btn">Войти</button>
-      <div class="recovery-link"><a href="#" id="forgotPassword">Забыли пароль?</a></div>
-      <div id="loginResponse" class="response-message"></div>
-    </form>
-  </div>
-</div>
-    
-<div id="recoveryModal" class="modal">
-  <div class="modal-content">
-    <div class="modal-header"><h2>Восстановление пароля</h2><span class="recovery-close">&times;</span></div>
-    <form id="recoveryForm">
-      <div class="form-group"><label for="recoveryEmail">Email:</label><input type="email" id="recoveryEmail" required></div>
-      <button type="submit" class="modal-btn">Восстановить пароль</button>
-      <div id="recoveryResponse" class="response-message"></div>
-    </form>
-  </div>
-</div>
+    <div id="loginModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header"><h2>Вход</h2><span class="modal-close">&times;</span></div>
+        <form id="loginForm">
+          <div class="form-group"><label for="loginEmail">Email или логин:</label><input type="text" id="loginEmail" required></div>
+          <div class="form-group"><label for="loginPassword">Пароль:</label><input type="password" id="loginPassword" required></div>
+          <button type="submit" class="modal-btn">Войти</button>
+          <div class="recovery-link"><a href="#" id="forgotPassword">Забыли пароль?</a></div>
+          <div id="loginResponse" class="response-message"></div>
+        </form>
+      </div>
+    </div>
+        
+    <div id="recoveryModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header"><h2>Восстановление пароля</h2><span class="recovery-close">&times;</span></div>
+        <form id="recoveryForm">
+          <div class="form-group"><label for="recoveryEmail">Email:</label><input type="email" id="recoveryEmail" required></div>
+          <button type="submit" class="modal-btn">Восстановить пароль</button>
+          <div id="recoveryResponse" class="response-message"></div>
+        </form>
+      </div>
+    </div>
 
     <script src="script.js"></script>
 </body>
