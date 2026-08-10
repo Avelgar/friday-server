@@ -128,6 +128,62 @@ def do_POST(self):
                 except Exception: pass
             return 
 
+        # === НОВЫЕ REST API МЕТОДЫ ДЛЯ ДИАЛОГОВ ===
+        elif self.path == '/api/get_dialogs':
+            token = data.get('token')
+            if not token: return self.send_json(400, {"status": "error", "message": "Токен обязателен"})
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+                cursor.execute("SELECT id, name, created_at FROM dialogs WHERE user_id = %s ORDER BY created_at DESC", (user_id,))
+                dialogs = []
+                for d in cursor.fetchall():
+                    dt = d['created_at'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(d['created_at'], 'strftime') else d['created_at']
+                    dialogs.append({"id": d['id'], "name": d['name'], "created_at": dt})
+                self.send_json(200, {"status": "success", "dialogs": dialogs})
+            except Exception as e:
+                self.send_json(401, {"status": "error", "message": "Недействительный токен"})
+
+        elif self.path == '/api/get_history':
+            token = data.get('token'); dialog_id = data.get('dialog_id')
+            if not token or not dialog_id: return self.send_json(400, {"status": "error", "message": "Токен и dialog_id обязательны"})
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+                
+                cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
+                if not cursor.fetchone():
+                    return self.send_json(403, {"status": "error", "message": "Нет доступа к этому диалогу"})
+                
+                cursor.execute("""
+                    SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
+                    FROM messages m 
+                    LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
+                    WHERE m.dialog_id = %s ORDER BY m.created_at ASC
+                """, (dialog_id,))
+                
+                history = []
+                for msg in cursor.fetchall():
+                    msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
+                    history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
+                
+                self.send_json(200, {"status": "success", "history": history})
+            except Exception as e:
+                self.send_json(401, {"status": "error", "message": "Недействительный токен"})
+
+        elif self.path == '/api/create_dialog':
+            token = data.get('token'); name = data.get('name', 'Новый чат')
+            if not token: return self.send_json(400, {"status": "error", "message": "Токен обязателен"})
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+                cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (name, user_id))
+                conn.commit()
+                self.send_json(200, {"status": "success", "dialog_id": cursor.lastrowid, "name": name})
+            except Exception as e:
+                self.send_json(401, {"status": "error", "message": "Недействительный токен"})
+        # ==========================================
+
         elif self.path == '/api/generate_image':
             prompt = data.get('prompt')
             model_type = data.get('model_type', 'generate')
@@ -165,7 +221,6 @@ def do_POST(self):
                 return self.send_json(401, {"status": "error", "message": "Неверный логин или пароль"})
             if user['SingUpToken']: return self.send_json(403, {"status": "error", "message": "Аккаунт не подтвержден"})
             
-            # Генерируем долгоживущий токен для десктопа
             token = jwt.encode({'user_id': user['id'], 'exp': datetime.utcnow() + timedelta(days=365)}, JWT_SECRET, algorithm='HS256')
             if isinstance(token, bytes): token = token.decode('utf-8')
             
@@ -288,15 +343,35 @@ def do_POST(self):
             self.send_json(200, {"status": "success", "message": "Отключено"})
 
         elif self.path == '/clear_history':
-            token = data.get('token'); mac = data.get('mac')
-            if token: mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
-            cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
-            dev = cursor.fetchone()
-            if dev:
-                cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev['id'],))
-                conn.commit()
-                self.send_json(200, {"status": "success", "message": "История очищена"})
-            else: self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
+            token = data.get('token')
+            dialog_id = data.get('dialog_id')
+            
+            if dialog_id and token:
+                try:
+                    payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                    user_id = payload['user_id']
+                except:
+                    return self.send_json(401, {"status": "error", "message": "Invalid token"})
+                cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
+                if cursor.fetchone():
+                    cursor.execute("DELETE FROM messages WHERE dialog_id = %s", (dialog_id,))
+                    conn.commit()
+                    return self.send_json(200, {"status": "success", "message": "История диалога очищена"})
+                else:
+                    return self.send_json(403, {"status": "error", "message": "Нет доступа"})
+            else:
+                if token: 
+                    mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
+                else:
+                    mac = data.get('mac')
+                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
+                dev = cursor.fetchone()
+                if dev:
+                    cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev['id'],))
+                    conn.commit()
+                    self.send_json(200, {"status": "success", "message": "История очищена"})
+                else: 
+                    self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
             
         elif self.path == '/delete_message':
             msg_id = data.get('msg_id'); token = data.get('token'); mac = data.get('mac')

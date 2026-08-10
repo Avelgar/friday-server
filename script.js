@@ -3,13 +3,14 @@ let nextPlayTime = 0;
 let isPlaying = false; 
 let vadState = 'idle'; 
 let isMicrophoneActive = false; 
-
-// Глобальная переменная для защиты от эха
 let lastAudioStopTime = 0; 
 
 let stopWordRecognizer = null;
 const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
 let ignoredMessageId = null; 
+
+// --- ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ДЛЯ ДИАЛОГОВ ---
+let currentDialogId = null;
 
 function initStopWordDetection() {
     if (!stopWordRecognizer && ('webkitSpeechRecognition' in window)) {
@@ -31,19 +32,13 @@ function initStopWordDetection() {
 }
 
 function startStopWordDetection() { 
-    // Отключаем на мобилках, чтобы Android/iOS не пиликал при включении бота
     const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
     if (isMobile) return;
-
-    if (stopWordRecognizer) { 
-        try { stopWordRecognizer.start(); } catch(e){} 
-    } 
+    if (stopWordRecognizer) { try { stopWordRecognizer.start(); } catch(e){} } 
 }
 
 function stopStopWordDetection() { 
-    if (stopWordRecognizer) { 
-        try { stopWordRecognizer.stop(); } catch(e){} 
-    } 
+    if (stopWordRecognizer) { try { stopWordRecognizer.stop(); } catch(e){} } 
 }
 
 function stopPlayback() {
@@ -79,7 +74,6 @@ async function playPCM24kHz(base64Data) {
             if (streamAudioContext && streamAudioContext.currentTime >= nextPlayTime - 0.1) {
                 if (isPlaying) { 
                     isPlaying = false; 
-                    // ФИКС ЭХА: Запоминаем время, когда бот физически закончил говорить
                     lastAudioStopTime = Date.now(); 
                     stopStopWordDetection(); 
                 }
@@ -99,6 +93,101 @@ let messageHistory = [];
 let pendingBubbleId = null;
 let activeStreamMsgId = null;
 let chunkInterval = null;
+
+// ==========================================
+// REST API ЛОГИКА ДЛЯ ДИАЛОГОВ
+// ==========================================
+async function loadDialogs() {
+    const token = localStorage.getItem('token');
+    if (!token) {
+        document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local">Гостевой диалог</div>';
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/get_dialogs', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: token })
+        });
+        const data = await response.json();
+        if (data.status === 'success') {
+            renderDialogs(data.dialogs);
+            if (data.dialogs.length > 0) {
+                selectDialog(data.dialogs[0].id); // Автоматически открываем первый чат
+            } else {
+                createNewDialog("Основной диалог");
+            }
+        }
+    } catch (e) { console.error("Ошибка загрузки диалогов:", e); }
+}
+
+function renderDialogs(dialogs) {
+    const list = document.getElementById('dialogList');
+    list.innerHTML = '';
+    dialogs.forEach(d => {
+        const div = document.createElement('div');
+        div.className = `dialog-item ${d.id === currentDialogId ? 'active' : ''}`;
+        div.textContent = d.name;
+        div.dataset.id = d.id;
+        div.onclick = () => selectDialog(d.id);
+        list.appendChild(div);
+    });
+}
+
+async function selectDialog(dialogId) {
+    currentDialogId = dialogId;
+    
+    // Обновляем активный класс в меню
+    document.querySelectorAll('.dialog-item').forEach(el => el.classList.remove('active'));
+    const activeEl = document.querySelector(`.dialog-item[data-id="${dialogId}"]`);
+    if (activeEl) activeEl.classList.add('active');
+
+    // На мобилках: прячем меню после выбора
+    document.getElementById('sidebar').classList.remove('open');
+
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    
+    document.getElementById('chatMessages').innerHTML = ''; 
+    
+    try {
+        const response = await fetch('/api/get_history', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: token, dialog_id: dialogId })
+        });
+        const data = await response.json();
+        if (data.status === 'success' && data.history) {
+            data.history.forEach(msg => {
+                if (msg.sender === 'Вы') addMessage('user', msg.text, true, msg.id);
+                else {
+                    let displayText = ""; 
+                    msg.text.split('⸵').forEach(action => { 
+                        const sep = action.indexOf('|'); 
+                        displayText += (sep !== -1 ? action.substring(sep + 1).trim() : action) + '\n\n'; 
+                    });
+                    if (displayText.trim()) addMessage('assistant', displayText.trim(), true, msg.id);
+                }
+            });
+        }
+    } catch (e) { console.error("Ошибка загрузки истории:", e); }
+}
+
+async function createNewDialog(name = "Новый чат") {
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    try {
+        const response = await fetch('/api/create_dialog', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: token, name: name })
+        });
+        const data = await response.json();
+        if (data.status === 'success') {
+            await loadDialogs();
+            selectDialog(data.dialog_id);
+        }
+    } catch (e) { console.error("Ошибка создания диалога:", e); }
+}
+// ==========================================
 
 window.editMessage = async function(msgId) {
     const bubble = document.getElementById('msg_' + msgId);
@@ -229,8 +318,14 @@ async function clearHistory(){
     document.getElementById('chatMessages').innerHTML = '';
     const token = localStorage.getItem('token');
     if (token) {
-        try { const r = await fetch('/clear_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) }); const d = await r.json(); showNotification(d.message, d.status); } catch (e) { showNotification('Ошибка', 'error'); }
-    } else { messageHistory = []; localStorage.removeItem('guestMessageHistory'); showNotification('История очищена', 'info'); }
+        try { 
+            // Отправляем очистку с привязкой к текущему диалогу
+            const r = await fetch('/clear_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token, dialog_id: currentDialogId }) }); 
+            const d = await r.json(); showNotification(d.message, d.status); 
+        } catch (e) { showNotification('Ошибка', 'error'); }
+    } else { 
+        messageHistory = []; localStorage.removeItem('guestMessageHistory'); showNotification('История очищена', 'info'); 
+    }
 }
 
 function connectWebSocket() {
@@ -245,16 +340,12 @@ function connectWebSocket() {
     websocketConnection.onmessage = function(event) {
         try {
             const data = JSON.parse(decodeURIComponent(escape(atob(event.data))));
-            if (data.status === 'success' && data.history && Array.isArray(data.history)) {
-                const chatMessages = document.getElementById('chatMessages'); chatMessages.innerHTML = '';
-                data.history.forEach(msg => {
-                    if (msg.sender === 'Вы') addMessage('user', msg.text, true, msg.id);
-                    else {
-                        let displayText = ""; msg.text.split('⸵').forEach(action => { const sep = action.indexOf('|'); displayText += (sep !== -1 ? action.substring(sep + 1).trim() : action) + '\n\n'; });
-                        if (displayText.trim()) addMessage('assistant', displayText.trim(), true, msg.id);
-                    }
-                });
-            } else handleIncomingStreamData(data);
+            // Игнорируем первоначальную глобальную выгрузку из WS, так как мы теперь грузим историю через REST API
+            if (data.status === 'success' && data.message === "Данные успешно обработаны!") {
+                console.log("WebSocket Auth OK");
+            } else { 
+                handleIncomingStreamData(data);
+            }
         } catch (error) { }
     };
     websocketConnection.onclose = function() { if (pingInterval) { clearInterval(pingInterval); pingInterval = null; } setTimeout(() => { if (localStorage.getItem('token')) connectWebSocket(); }, 5000); };
@@ -267,8 +358,15 @@ function closeModals() { document.getElementById('registerModal').style.display 
 
 function updateAuthUI() {
     const ab = document.querySelector('.auth-buttons'); if (!ab) return;
-    if (userLogin) { ab.innerHTML = `<div class="user-info"><span class="user-login">${userLogin}</span><button class="auth-btn logout-btn">Выйти</button></div>`; document.querySelector('.logout-btn').addEventListener('click', logout); } 
-    else { ab.innerHTML = `<button class="auth-btn register-btn">Регистрация</button><button class="auth-btn login-btn">Вход</button>`; document.querySelector('.register-btn').addEventListener('click', openRegisterModal); document.querySelector('.login-btn').addEventListener('click', openLoginModal); }
+    if (userLogin) { 
+        ab.innerHTML = `<div class="user-info"><span class="user-login">${userLogin}</span><button class="auth-btn logout-btn">Выйти</button></div>`; 
+        document.querySelector('.logout-btn').addEventListener('click', logout); 
+    } 
+    else { 
+        ab.innerHTML = `<button class="auth-btn register-btn">Регистрация</button><button class="auth-btn login-btn">Вход</button>`; 
+        document.querySelector('.register-btn').addEventListener('click', openRegisterModal); 
+        document.querySelector('.login-btn').addEventListener('click', openLoginModal); 
+    }
 }
 
 async function verifyToken() {
@@ -282,8 +380,16 @@ async function logout() {
         if (websocketConnection) { websocketConnection.close(); websocketConnection = null; }
         if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
         if (token) { try { await fetch('/logout_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) }); } catch (e) {} }
+        
         localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null;
-        updateAuthUI(); messageHistory = []; localStorage.removeItem('guestMessageHistory'); document.getElementById('chatMessages').innerHTML = ''; showNotification('Вы вышли из системы', 'success');
+        currentDialogId = null;
+        
+        updateAuthUI(); 
+        messageHistory = []; localStorage.removeItem('guestMessageHistory'); 
+        document.getElementById('chatMessages').innerHTML = ''; 
+        document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local">Гостевой диалог</div>';
+        
+        showNotification('Вы вышли из системы', 'success');
     } catch (e) { showNotification('Ошибка выхода', 'error'); }
 }
 
@@ -292,11 +398,29 @@ function loadSettingsFromLocalStorage() { const savedVoiceType = localStorage.ge
 
 document.addEventListener('DOMContentLoaded', async function() {
     loadSettingsFromLocalStorage();
+    document.getElementById('newChatBtn').addEventListener('click', () => createNewDialog());
+
     const sh = localStorage.getItem('guestMessageHistory');
-    if (sh && !localStorage.getItem('token')) { try { messageHistory = JSON.parse(sh); if (messageHistory.length > 0) { document.getElementById('chatMessages').innerHTML = ''; messageHistory.forEach((msg, idx) => addMessage(msg.role, msg.content, true, 'guest_' + idx)); } } catch (e) { messageHistory = []; } }
+    if (sh && !localStorage.getItem('token')) { 
+        try { 
+            messageHistory = JSON.parse(sh); 
+            if (messageHistory.length > 0) { 
+                document.getElementById('chatMessages').innerHTML = ''; 
+                messageHistory.forEach((msg, idx) => addMessage(msg.role, msg.content, true, 'guest_' + idx)); 
+            } 
+        } catch (e) { messageHistory = []; } 
+    }
+    
     initStopWordDetection();
 
-    if (await verifyToken()) { updateAuthUI(); connectWebSocket(); } else updateAuthUI();
+    if (await verifyToken()) { 
+        updateAuthUI(); 
+        connectWebSocket(); 
+        loadDialogs(); 
+    } else { 
+        updateAuthUI(); 
+        document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local">Гостевой диалог</div>';
+    }
 
     document.getElementById('voice-type').addEventListener('change', saveSettingsToLocalStorage);
     document.getElementById('messageInput').addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; });
@@ -316,7 +440,6 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     async function startMicStream() {
-        // Фоллбэк для старых Safari
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             const oldGetUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
             if (oldGetUserMedia) {
@@ -344,7 +467,6 @@ document.addEventListener('DOMContentLoaded', async function() {
         audioWorkletNode.port.onmessage = (e) => {
             if (!isMicrophoneActive || isPlaying || vadState === 'processing') return; 
             
-            // ФИКС ЭХА НА ТЕЛЕФОНЕ: Ждем 600мс после завершения речи ИИ, чтобы акустическое эхо рассеялось
             if (Date.now() - lastAudioStopTime < 600) return;
 
             const { pcm, volume } = e.data;
@@ -428,15 +550,25 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id = null, stream_audio = false) {
         try {
-            const token = localStorage.getItem('token'); const selectedVoice = document.getElementById('voice-type').value;
+            const token = localStorage.getItem('token'); 
+            const selectedVoice = document.getElementById('voice-type').value;
             const finalUiMsgId = ui_msg_id || Date.now().toString();
             
             if (token && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
-                const requestData = { type: 'web_command', command: prompt, audio_base64: audio_base64, token: token, timestamp: new Date().toISOString(), name: "Пятница", voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId, stream_audio: stream_audio };
+                const requestData = { 
+                    type: 'web_command', command: prompt, audio_base64: audio_base64, 
+                    token: token, timestamp: new Date().toISOString(), name: "Пятница", 
+                    voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId, 
+                    stream_audio: stream_audio, dialog_id: currentDialogId // Добавляем dialog_id
+                };
                 if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData))))); currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = ''; }; r.readAsDataURL(currentFile); } 
                 else websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
             } else {
-                const requestData = { prompt: prompt, audio_base64: audio_base64, bot_name: "Пятница", voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId };
+                const requestData = { 
+                    prompt: prompt, audio_base64: audio_base64, bot_name: "Пятница", 
+                    voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId,
+                    dialog_id: currentDialogId, token: token 
+                };
                 if (!token) requestData.message_history = messageHistory;
                 if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; sendFetchRequest(requestData); }; r.readAsDataURL(currentFile); } else sendFetchRequest(requestData);
             }
@@ -486,7 +618,23 @@ document.addEventListener('DOMContentLoaded', async function() {
 
     document.getElementById('loginForm').addEventListener('submit', async function(e) {
         e.preventDefault(); const lo = document.getElementById('loginEmail').value; const pw = document.getElementById('loginPassword').value; const re = document.getElementById('loginResponse'); const sb = this.querySelector('button[type="submit"]');
-        try { sb.disabled = true; sb.textContent = 'Вход...'; const r = await fetch('/login_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: lo, password: pw }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; userLogin = d.user_login; localStorage.setItem('token', d.token); localStorage.setItem('userLogin', d.user_login); messageHistory = []; localStorage.removeItem('guestMessageHistory'); updateAuthUI(); connectWebSocket(); setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Войти'; }
+        try { 
+            sb.disabled = true; sb.textContent = 'Вход...'; 
+            const r = await fetch('/login_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: lo, password: pw }) }); 
+            const d = await r.json(); 
+            if (r.ok) { 
+                re.textContent = d.message; re.className = 'response-message success'; 
+                userLogin = d.user_login; localStorage.setItem('token', d.token); localStorage.setItem('userLogin', d.user_login); 
+                messageHistory = []; localStorage.removeItem('guestMessageHistory'); 
+                updateAuthUI(); 
+                connectWebSocket(); 
+                
+                // ЗАГРУЖАЕМ ДИАЛОГИ ПОСЛЕ УСПЕШНОГО ВХОДА!
+                await loadDialogs();
+
+                setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); 
+            } else { re.textContent = d.message; re.className = 'response-message error'; } 
+        } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Войти'; }
     });
             
     document.getElementById('forgotPassword').addEventListener('click', function(e) { e.preventDefault(); closeModals(); document.getElementById('recoveryModal').style.display = 'flex'; });
