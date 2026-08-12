@@ -39,7 +39,7 @@ class AIService:
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
 
-    def generate_image_pollinations(prompt):
+    def generate_image_pollinations(self, prompt):
         encoded_prompt = urllib.parse.quote(prompt)
         url = f"https://pollinations.ai{encoded_prompt}?width=1024&height=1024&enhance=true"
         response = requests.get(url)
