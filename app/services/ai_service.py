@@ -41,35 +41,38 @@ class AIService:
 
     def generate_image_pollinations(self, prompt):
         import requests
-        import base64  # Добавлен недостающий импорт
+        import base64
+        import urllib.parse
+        import random
         
         try:
-            # Исправленный URL: запросы нужно отправлять на API-поддомен
-            url = "https://image.pollinations.ai/"
+            # 1. Безопасно кодируем текст для вставки в URL (пробелы станут %20 и т.д.)
+            safe_prompt = urllib.parse.quote(prompt)
             
-            payload = {
-                "prompt": prompt,
+            # 2. Промпт ОБЯЗАТЕЛЬНО должен быть частью URL
+            url = f"https://image.pollinations.ai/prompt/{safe_prompt}"
+            
+            # 3. Настройки передаются как query-параметры (после знака вопроса в URL)
+            params = {
                 "width": 1024,
                 "height": 1024,
-                "enhance": True,
-                "model": "flux"  # Опционально: явно указываем современную модель
+                "model": "flux",       # Современная качественная модель
+                "nologo": "true",      # Убираем водяной знак сервиса
+                "enhance": "true",     # Улучшение промпта под капотом
+                "seed": random.randint(1, 999999) # Случайный сид, чтобы картинки не повторялись
             }
             
-            # Убедитесь, что logger инициализирован в вашем классе/файле.
-            # Если нет, добавьте: import logging; logger = logging.getLogger(__name__)
-            logger.info(f"Отправка POST-запроса к Pollinations AI для промпта длиной {len(prompt)} симв.")
+            logger.info(f"Отправка GET-запроса к Pollinations AI для промпта: '{prompt}'")
             
-            # Отправляем POST-запрос с JSON. Таймаут лучше увеличить до 60,
-            # так как генерация с enhance=True иногда может занимать больше 30 секунд.
-            response = requests.post(url, json=payload, timeout=60)
+            # Отправляем GET-запрос. Библиотека requests сама склеит url и params
+            response = requests.get(url, params=params, timeout=60)
             
             if response.status_code == 200:
-                # В ответ приходит сама картинка в виде байт, кодируем её в base64
+                # Кодируем успешный ответ в base64
                 return base64.b64encode(response.content).decode('utf-8')
                 
-            # Если пришел не 200 статус, выводим текст ошибки от сервера для отладки
             error_msg = response.text[:200] if response.text else "Нет описания ошибки"
-            raise Exception(f"Pollinations API вернул статус-код: {response.status_code}. Ответ: {error_msg}")
+            raise Exception(f"Pollinations API вернул код {response.status_code}. Ответ: {error_msg}")
             
         except requests.exceptions.Timeout:
             raise Exception("Ошибка: Время ожидания ответа от Pollinations AI истекло (более 60 секунд).")

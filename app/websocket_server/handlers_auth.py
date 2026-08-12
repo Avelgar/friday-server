@@ -25,30 +25,23 @@ async def handle_account_sync(websocket, data):
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
         
-        # 1. Проверяем или создаем единый диалог для аккаунта
-        await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (user_id,))
-        dialog = await cursor.fetchone()
-        if not dialog:
-            await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES ('Основной диалог', %s)", (user_id,))
-            dialog_id = cursor.lastrowid
-        else:
-            dialog_id = dialog['id']
-
-        # 2. Привязываем устройство к пользователю
         await cursor.execute("UPDATE devices SET user_id = %s WHERE mac = %s", (user_id, mac))
         
-        # 3. Выгружаем единую историю диалога
-        history = []
-        await cursor.execute("""
-            SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
-            FROM messages m 
-            LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
-            WHERE m.dialog_id = %s ORDER BY m.created_at ASC
-        """, (dialog_id,))
+        # Получаем ПОСЛЕДНИЙ диалог
+        await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
+        dialog = await cursor.fetchone()
         
-        for msg in await cursor.fetchall():
-            msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
-            history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
+        history = []
+        if dialog:
+            await cursor.execute("""
+                SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
+                FROM messages m 
+                LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
+                WHERE m.dialog_id = %s ORDER BY m.created_at ASC
+            """, (dialog['id'],))
+            for msg in await cursor.fetchall():
+                msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
+                history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
         
         await cursor.execute("SELECT login FROM users WHERE id = %s", (user_id,))
         user_rec = await cursor.fetchone()
@@ -91,27 +84,10 @@ async def handle_web_client_auth(websocket, data):
             await cursor.execute("INSERT INTO devices (mac, device_name, password, is_online, user_id) VALUES (%s, %s, '123', TRUE, %s)", (mac, device_name, user_id))
         
         mac_to_websocket[mac] = websocket; ws_to_mac[websocket] = mac
-        
-        # Для WEB сразу выдаем глобальный диалог
-        await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (user_id,))
-        dialog = await cursor.fetchone()
-        if not dialog:
-            await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES ('Основной диалог', %s)", (user_id,))
-            dialog_id = cursor.lastrowid
-        else: dialog_id = dialog['id']
-        
-        history =[]
-        await cursor.execute("""
-            SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
-            FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
-            WHERE m.dialog_id = %s ORDER BY m.created_at ASC
-        """, (dialog_id,))
-        for msg in await cursor.fetchall():
-            msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
-            history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
-        
         await conn.commit()
-        await async_send(websocket, {"status": "success", "message": "Данные успешно обработаны!", "history": history})
+        
+        # Для WEB мы возвращаем пустую историю при WS коннекте (Сайт сам грузит историю через REST API)
+        await async_send(websocket, {"status": "success", "message": "Данные успешно обработаны!", "history": []})
     except Exception as e:
         logger.error(f"[AUTH ERROR] Ошибка WEB авторизации: {e}", exc_info=True)
         await async_send(websocket, {"status": "error", "message": str(e)})
@@ -151,12 +127,11 @@ async def handle_device_registration(websocket, data):
             
         mac_to_websocket[mac] = websocket; ws_to_mac[websocket] = mac
         
-        # Если это Глобальный юзер - отдаем глобальную историю, иначе локальную
         history = []
         user_id = device.get('user_id') if device else None
         
         if user_id:
-            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s", (user_id,))
+            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
             dialog = await cursor.fetchone()
             if dialog:
                 await cursor.execute("""

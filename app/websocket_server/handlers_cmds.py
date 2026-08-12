@@ -118,22 +118,52 @@ async def handle_command(websocket, data):
         logger.info("\n" + "="*50)
         logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name} | Стрим: {is_streaming}")
 
-        # === ФИКС: ПРАВИЛЬНО ИЩЕМ DIALOG_ID ===
+        # === АВТО-ГЕНЕРАЦИЯ ДИАЛОГА ===
         client_dialog_id = data.get('dialog_id')
-        if sender_device.get('user_id'):
-            if client_dialog_id:
-                # Проверяем, принадлежит ли присланный диалог этому юзеру
-                await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (client_dialog_id, sender_device['user_id']))
+        user_id = sender_device.get('user_id')
+        sender_ws = mac_to_websocket.get(mac)
+        
+        if user_id:
+            create_new = False
+            if 'dialog_id' in data and client_dialog_id is None:
+                # WEB клиент нажал "Новый чат" и прислал диалог=null
+                create_new = True
+            elif client_dialog_id:
+                # WEB прислал конкретный диалог, проверяем владельца
+                await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (client_dialog_id, user_id))
+                if not await cursor.fetchone():
+                    create_new = True
+                else:
+                    dialog_id = client_dialog_id
+            else:
+                # C# Клиент (не шлет dialog_id), берем последний
+                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
                 dlg = await cursor.fetchone()
                 if dlg:
                     dialog_id = dlg['id']
-            
-            if not dialog_id:
-                # Если с клиента не пришел dialog_id (например, C#), берем "Основной диалог"
-                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (sender_device['user_id'],))
-                dlg = await cursor.fetchone()
-                if dlg: 
-                    dialog_id = dlg['id']
+                else:
+                    create_new = True
+                    
+            if create_new:
+                try:
+                    # Просим Gemini придумать название чата
+                    client = ai_instance._get_client()
+                    resp = await client.aio.models.generate_content(
+                        model='gemini-3.1-flash',
+                        contents=f"Придумай очень короткое название (1-3 слова) для диалога, который начинается с этого сообщения пользователя: '{db_user_text}'. В ответе напиши только название, без кавычек и точек."
+                    )
+                    dialog_name = resp.text.strip().replace('"', '').replace('.', '')
+                except Exception as e:
+                    logger.error(f"Name gen err: {e}")
+                    dialog_name = "Новый диалог"
+                    
+                await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (dialog_name, user_id))
+                dialog_id = cursor.lastrowid
+                await conn.commit()
+                
+                # Сообщаем клиенту, что диалог создан
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
         history_for_prompt = ""
 
@@ -159,9 +189,7 @@ async def handle_command(websocket, data):
             if message_history:
                 history_for_prompt = "\n".join([f"{'Пользователь' if m.get('role')=='user' else 'Бот'}: {m.get('content')}" for m in message_history[-HISTORY_LIMIT:]])
 
-        sender_ws = mac_to_websocket.get(mac)
         if sender_ws and ui_msg_id and dialog_id:
-            # Для гостей user_msg_id и bot_msg_id будут None, клиент останется на ui_msg_id
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
         if device_type == 'компьютер': 
@@ -233,7 +261,6 @@ async def handle_command(websocket, data):
                     filtered_actions = []
                     for act in cmd.get('actions', []):
                         if act.get('action_type') == "check_network_devices":
-                            # Передаем dialog_id во вторичный запрос!
                             pseudo_data = {"internal_routing": "check_network_devices", "original_command": final_user_text_full.strip() or command, "source_name": sender_name, "mac": mac, "user_id": sender_device.get('user_id'), "user_msg_id": user_msg_id, "voice_type": voice_name, "message_history": message_history, "dialog_id": dialog_id}
                             pending_routes.append(pseudo_data)
                         else: filtered_actions.append(act)
@@ -262,10 +289,9 @@ async def handle_command(websocket, data):
                     if target_ws:
                         msg_id = bot_message_id if is_sender else None
                         
-                        # Кросс-девайс вставка: Ищем dialog_id целевого устройства
                         target_dialog_id = None
                         if target_device_info.get('user_id'):
-                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (target_device_info['user_id'],))
+                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (target_device_info['user_id'],))
                             dlg = await cursor.fetchone()
                             if dlg: target_dialog_id = dlg['id']
                             
@@ -430,7 +456,7 @@ async def handle_target_command(websocket, data):
             # Ищем диалог для Третичного агента
             dialog_id = None
             if source_device_info.get('user_id'):
-                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (source_device_info['user_id'],))
+                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (source_device_info['user_id'],))
                 dlg = await cursor.fetchone()
                 if dlg: dialog_id = dlg['id']
 
@@ -499,7 +525,7 @@ async def handle_target_command(websocket, data):
                         
                         target_dialog_id = None
                         if target_device_info.get('user_id'):
-                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY id ASC LIMIT 1", (target_device_info['user_id'],))
+                            await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (target_device_info['user_id'],))
                             dlg = await cursor.fetchone()
                             if dlg: target_dialog_id = dlg['id']
 

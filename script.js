@@ -3,15 +3,12 @@ let nextPlayTime = 0;
 let isPlaying = false; 
 let vadState = 'idle'; 
 let isMicrophoneActive = false; 
-
-// Глобальная переменная для защиты от эха
 let lastAudioStopTime = 0; 
 
 let stopWordRecognizer = null;
 const stopWords = ['стоп', 'хватит', 'остановись', 'перестань', 'замолчи'];
 let ignoredMessageId = null; 
 
-// --- ГЛОБАЛЬНАЯ ПЕРЕМЕННАЯ ДЛЯ ДИАЛОГОВ ---
 let currentDialogId = null;
 
 function initStopWordDetection() {
@@ -96,9 +93,6 @@ let pendingBubbleId = null;
 let activeStreamMsgId = null;
 let chunkInterval = null;
 
-// ==========================================
-// REST API ЛОГИКА ДЛЯ ДИАЛОГОВ
-// ==========================================
 async function loadDialogs() {
     const token = localStorage.getItem('token');
     if (!token) {
@@ -114,10 +108,8 @@ async function loadDialogs() {
         const data = await response.json();
         if (data.status === 'success') {
             renderDialogs(data.dialogs);
-            if (data.dialogs.length > 0) {
+            if (data.dialogs.length > 0 && currentDialogId === null) {
                 selectDialog(data.dialogs[0].id);
-            } else {
-                createNewDialog("Основной диалог");
             }
         }
     } catch (e) { console.error("Ошибка загрузки диалогов:", e); }
@@ -148,13 +140,12 @@ function renderDialogs(dialogs) {
         delBtn.style.marginLeft = '10px';
         delBtn.title = "Удалить чат";
         
-        // Смена цвета при наведении
         delBtn.onmouseover = () => delBtn.style.color = '#e74c3c';
         delBtn.onmouseout = () => delBtn.style.color = '#aaa';
         
         delBtn.onclick = (e) => {
             e.stopPropagation();
-            if(confirm('Вы уверены, что хотите удалить этот диалог и все его сообщения?')) {
+            if(confirm('Удалить диалог?')) {
                 deleteDialog(d.id);
             }
         };
@@ -201,23 +192,16 @@ async function selectDialog(dialogId) {
     } catch (e) { console.error("Ошибка загрузки истории:", e); }
 }
 
-async function createNewDialog(name = "Новый чат") {
+function createNewDialog() {
     const token = localStorage.getItem('token');
     if (!token) {
         openLoginModal();
         return;
     }
-    try {
-        const response = await fetch('/api/create_dialog', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: token, name: name })
-        });
-        const data = await response.json();
-        if (data.status === 'success') {
-            await loadDialogs();
-            selectDialog(data.dialog_id);
-        }
-    } catch (e) { console.error("Ошибка создания диалога:", e); }
+    // Просто обнуляем интерфейс! В БД диалог создастся при первом сообщении.
+    currentDialogId = null;
+    document.getElementById('chatMessages').innerHTML = '';
+    document.querySelectorAll('.dialog-item').forEach(el => el.classList.remove('active'));
 }
 
 async function deleteDialog(dialogId) {
@@ -240,7 +224,6 @@ async function deleteDialog(dialogId) {
         }
     } catch (e) { console.error("Ошибка удаления диалога:", e); }
 }
-// ==========================================
 
 window.editMessage = async function(msgId) {
     const bubble = document.getElementById('msg_' + msgId);
@@ -313,6 +296,12 @@ function updatePendingBubble(text) {
 function removePendingBubble() { if (pendingBubbleId) { const b = document.getElementById(pendingBubbleId); if (b) b.remove(); pendingBubbleId = null; } }
 
 function handleIncomingStreamData(data) {
+    // ЕСЛИ СЕРВЕР СОЗДАЛ НОВЫЙ ДИАЛОГ - сохраняем его ID и обновляем меню
+    if (data.type === 'dialog_created') {
+        currentDialogId = data.dialog_id;
+        loadDialogs();
+    }
+
     if (data.type === 'msg_id_map') {
         const userBubble = document.getElementById('msg_' + data.ui_msg_id);
         if (userBubble) {
@@ -366,18 +355,13 @@ function handleIncomingStreamData(data) {
     if (data.type === 'notification') showNotification(data.message, data.level || 'info');
 }
 
+// У ГОСТЕЙ ПРОСТО ЧИСТИТСЯ ЭКРАН (Базу больше не дергаем)
 document.getElementById('clear-history').addEventListener('click', async function() { clearHistory(); });
 async function clearHistory(){
     document.getElementById('chatMessages').innerHTML = '';
-    const token = localStorage.getItem('token');
-    if (token) {
-        try { 
-            const r = await fetch('/clear_history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token, dialog_id: currentDialogId }) }); 
-            const d = await r.json(); showNotification(d.message, d.status); 
-        } catch (e) { showNotification('Ошибка', 'error'); }
-    } else { 
-        messageHistory = []; localStorage.removeItem('guestMessageHistory'); showNotification('История очищена', 'info'); 
-    }
+    messageHistory = []; 
+    localStorage.removeItem('guestMessageHistory'); 
+    showNotification('История очищена', 'info');
 }
 
 function connectWebSocket() {
@@ -412,11 +396,13 @@ function updateAuthUI() {
     if (userLogin) { 
         ab.innerHTML = `<div class="user-info"><span class="user-login">${userLogin}</span><button class="auth-btn logout-btn">Выйти</button></div>`; 
         document.querySelector('.logout-btn').addEventListener('click', logout); 
+        document.getElementById('clear-history').style.display = 'none'; // ПРЯЧЕМ КНОПКУ ОЧИСТКИ ДЛЯ АККАУНТОВ
     } 
     else { 
         ab.innerHTML = `<button class="auth-btn register-btn">Регистрация</button><button class="auth-btn login-btn">Вход</button>`; 
         document.querySelector('.register-btn').addEventListener('click', openRegisterModal); 
         document.querySelector('.login-btn').addEventListener('click', openLoginModal); 
+        document.getElementById('clear-history').style.display = 'flex'; // ПОКАЗЫВАЕМ ГОСТЯМ
     }
 }
 
@@ -610,7 +596,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     type: 'web_command', command: prompt, audio_base64: audio_base64, 
                     token: token, timestamp: new Date().toISOString(), name: "Пятница", 
                     voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId, 
-                    stream_audio: stream_audio, dialog_id: currentDialogId
+                    stream_audio: stream_audio, dialog_id: currentDialogId // Если null - создастся новый
                 };
                 if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData))))); currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = ''; }; r.readAsDataURL(currentFile); } 
                 else websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
@@ -620,7 +606,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId,
                     dialog_id: currentDialogId, token: token 
                 };
-                if (!token) requestData.message_history = messageHistory;
+                if (!token) requestData.message_history = messageHistory; // ГОСТИ ШЛЮТ ЛОКАЛЬНУЮ ИСТОРИЮ
                 if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; sendFetchRequest(requestData); }; r.readAsDataURL(currentFile); } else sendFetchRequest(requestData);
             }
         } catch (error) { showNotification('Ошибка', 'error'); vadState = 'idle'; removePendingBubble(); }

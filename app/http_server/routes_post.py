@@ -360,18 +360,8 @@ def do_POST(self):
             dialog_id = data.get('dialog_id')
             
             if dialog_id and token:
-                try:
-                    payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-                    user_id = payload['user_id']
-                except:
-                    return self.send_json(401, {"status": "error", "message": "Invalid token"})
-                cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
-                if cursor.fetchone():
-                    cursor.execute("DELETE FROM messages WHERE dialog_id = %s", (dialog_id,))
-                    conn.commit()
-                    return self.send_json(200, {"status": "success", "message": "История диалога очищена"})
-                else:
-                    return self.send_json(403, {"status": "error", "message": "Нет доступа"})
+                # МЫ БОЛЬШЕ НЕ ЧИСТИМ ИСТОРИЮ ДЛЯ АВТОРИЗОВАННЫХ ПОЛЬЗОВАТЕЛЕЙ (у них есть удаление диалогов)
+                return self.send_json(403, {"status": "error", "message": "Очистка истории для аккаунта отключена."})
             else:
                 if token: 
                     mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
