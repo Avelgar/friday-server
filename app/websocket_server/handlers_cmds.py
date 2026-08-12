@@ -119,7 +119,6 @@ async def handle_command(websocket, data):
         logger.info("\n" + "="*50)
         logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name} | Стрим: {is_streaming}")
 
-        # === АВТО-ГЕНЕРАЦИЯ ДИАЛОГА ===
         client_dialog_id = data.get('dialog_id')
         user_id = sender_device.get('user_id')
         sender_ws = mac_to_websocket.get(mac)
@@ -155,7 +154,6 @@ async def handle_command(websocket, data):
 
         history_for_prompt = ""
 
-        # Если это аккаунт - пишем в базу и берем историю из базы
         if dialog_id:
             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Вы', %s, %s, %s)", (db_user_text, sender_id, dialog_id))
             user_msg_id = cursor.lastrowid
@@ -171,8 +169,6 @@ async def handle_command(websocket, data):
             
             raw_history = await cursor.fetchall()
             history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in (raw_history[-HISTORY_LIMIT:] if raw_history else [])])
-        
-        # Если это гость - базу не трогаем, берем историю из присланного JSON
         else:
             if message_history:
                 history_for_prompt = "\n".join([f"{'Пользователь' if m.get('role')=='user' else 'Бот'}: {m.get('content')}" for m in message_history[-HISTORY_LIMIT:]])
@@ -180,7 +176,6 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
-        # ВАЖНО: копируем базовый список, чтобы не изменить его глобально для всех
         if device_type == 'компьютер': 
             base_acts = list(BASE_PC)
         elif device_type == 'телефон': 
@@ -192,7 +187,6 @@ async def handle_command(websocket, data):
         if device_type in ['компьютер', 'телефон']:
             local_rules = f"\n4. Ты не можешь открывать/закрывать программы напрямую! У тебя пока нет к ним доступа. Сначала вызови get_installed_programs или get_running_processes."
 
-        # ДИНАМИЧЕСКИ ДОБАВЛЯЕМ ПРАВИЛО ДЛЯ НАИМЕНОВАНИЯ ЧАТА
         if is_new_dialog:
             base_acts.append("название диалога")
             local_rules += "\n5. ЭТО НОВЫЙ ДИАЛОГ! Твоя первая задача — обязательно использовать action_type=\"название диалога\", чтобы дать ему короткое и понятное имя (1-3 слова), опираясь на запрос пользователя."
@@ -251,6 +245,13 @@ async def handle_command(websocket, data):
                 extracted_commands = chunk["commands"]
                 filtered_commands = []
                 
+                # --- ДОБАВЛЕНО ЛОГИРОВАНИЕ ДЕЙСТВИЙ ---
+                for c in extracted_commands:
+                    t_dev = c.get('target_device', 'unknown')
+                    acts = ", ".join([f"[{a.get('action_type')} -> {a.get('action_value')}]" for a in c.get('actions', [])])
+                    logger.warning(f"🤖 [ДЕЙСТВИЕ ИИ] Цель: {t_dev} | Команды: {acts}")
+                # ----------------------------------------
+
                 for cmd in extracted_commands:
                     filtered_actions = []
                     for act in cmd.get('actions', []):
@@ -262,7 +263,6 @@ async def handle_command(websocket, data):
                             pending_routes.append(pseudo_data)
                         
                         elif act_type == "название диалога" and dialog_id:
-                            # ПЕРЕИМЕНОВЫВАЕМ ДИАЛОГ В БД
                             new_name = str(act_val).strip()
                             await cursor.execute("UPDATE dialogs SET name = %s WHERE id = %s", (new_name, dialog_id))
                             await conn.commit()
@@ -315,7 +315,6 @@ async def handle_command(websocket, data):
                 audio_chunks_count += 1
                 if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
-        # Окончание обработки. Сохраняем/Удаляем в БД ТОЛЬКО если это аккаунт (dialog_id есть)
         if dialog_id and user_msg_id and bot_message_id:
             if (audio_bytes or is_streaming):
                 if final_user_text_full.strip():
@@ -328,7 +327,6 @@ async def handle_command(websocket, data):
                 await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             await conn.commit()
             
-        # Для гостей мы просто шлем сигнал удаления, если ответ был пуст
         if not dialog_id:
             if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
                 if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
@@ -505,7 +503,13 @@ async def handle_target_command(websocket, data):
             if chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
-                logger.info(f"[JSON] Команды ИИ (Вторичный/Третичный): {json.dumps(extracted_commands, ensure_ascii=False)}")
+                
+                # --- ЛОГИРОВАНИЕ ДЕЙСТВИЙ ---
+                for c in extracted_commands:
+                    t_dev = c.get('target_device', 'unknown')
+                    acts = ", ".join([f"[{a.get('action_type')} -> {a.get('action_value')}]" for a in c.get('actions', [])])
+                    logger.warning(f"🤖 [ДЕЙСТВИЕ ИИ] Цель: {t_dev} | Команды: {acts}")
+                # ----------------------------
                 
                 for cmd in extracted_commands:
                     target_device_name = cmd.get('target_device', '').strip()
