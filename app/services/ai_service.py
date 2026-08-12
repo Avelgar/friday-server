@@ -37,11 +37,16 @@ class AIService:
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
 
-    def generate_image(self, prompt, model_type="generate"):
+        def generate_image(self, prompt, model_type="generate"):
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
         model_id = models_map.get(model_type, models_map["generate"])
+        
+        # Защитная микро-пауза между любыми последовательными вызовами метода
+        time.sleep(1.0) 
+        
         total_keys_tried = 0
         last_error_msg = ""
+        backoff_delay = 2.0  # Начальная пауза в секундах при ошибке 429
         
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
@@ -67,10 +72,21 @@ class AIService:
                 if not image_bytes: raise Exception(f"Модель {model_id} не вернула байты изображения.")
 
                 return base64.b64encode(image_bytes).decode('utf-8')
+                
             except Exception as e:
                 last_error_msg = str(e)
+                logger.warning(f"[Key {self.current_key_index}] Ошибка генерации: {last_error_msg}")
+                
+                # Если сработал лимит 429, делаем паузу, которая увеличивается с каждым разом
+                if "429" in last_error_msg or "Too Many Requests" in last_error_msg:
+                    logger.info(f"Сработал лимит запросов. Засыпаю на {backoff_delay} сек перед сменой ключа...")
+                    time.sleep(backoff_delay)
+                    backoff_delay *= 2.0  # Удваиваем паузу для следующего шага
+                
                 total_keys_tried += 1
-        raise Exception(f"AI Image Service недоступен: {last_error_msg}")
+                
+        raise Exception(f"AI Image Service недоступен после перебора всех ключей. Последняя ошибка: {last_error_msg}")
+
 
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         self._rotate_key()
