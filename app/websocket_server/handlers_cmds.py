@@ -149,7 +149,7 @@ async def handle_command(websocket, data):
                     # Просим Gemini придумать название чата
                     client = ai_instance._get_client()
                     resp = await client.aio.models.generate_content(
-                        model='gemini-3.1-flash',
+                        model='models/gemini-2.5-flash-lite',
                         contents=f"Придумай очень короткое название (1-3 слова) для диалога, который начинается с этого сообщения пользователя: '{db_user_text}'. В ответе напиши только название, без кавычек и точек."
                     )
                     dialog_name = resp.text.strip().replace('"', '').replace('.', '')
