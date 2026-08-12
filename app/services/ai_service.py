@@ -41,12 +41,11 @@ class AIService:
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
         model_id = models_map.get(model_type, models_map["generate"])
         
-        # Защитная микро-пауза между любыми последовательными вызовами метода
+        # Микро-пауза против спама запросами
         time.sleep(1.0) 
         
         total_keys_tried = 0
         last_error_msg = ""
-        backoff_delay = 2.0  # Начальная пауза в секундах при ошибке 429
         
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
@@ -77,11 +76,22 @@ class AIService:
                 last_error_msg = str(e)
                 logger.warning(f"[Key {self.current_key_index}] Ошибка генерации: {last_error_msg}")
                 
-                # Если сработал лимит 429, делаем паузу, которая увеличивается с каждым разом
-                if "429" in last_error_msg or "Too Many Requests" in last_error_msg:
-                    logger.info(f"Сработал лимит запросов. Засыпаю на {backoff_delay} сек перед сменой ключа...")
-                    time.sleep(backoff_delay)
-                    backoff_delay *= 2.0  # Удваиваем паузу для следующего шага
+                if "429" in last_error_msg or "RESOURCE_EXHAUSTED" in last_error_msg:
+                    # По умолчанию спим 5 секунд, если не найдем точное время в тексте ошибки
+                    sleep_time = 5.0 
+                    
+                    # Пытаемся вытащить точное время ожидания (например, "Please retry in 26.749295397s.")
+                    import re
+                    match = re.search(r"retry in ([\d\.]+)s", last_error_msg)
+                    if match:
+                        try:
+                            sleep_time = float(match.group(1)) + 0.5  # Добавляем 0.5с для надежности
+                            logger.info(f"API требует паузу. Найдено точное время ожидания: {sleep_time} сек.")
+                        except ValueError:
+                            pass
+                    
+                    logger.info(f"Сработал лимит. Засыпаю на {sleep_time} сек. перед сменой ключа...")
+                    time.sleep(sleep_time)
                 
                 total_keys_tried += 1
                 
