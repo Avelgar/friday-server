@@ -40,12 +40,42 @@ class AIService:
         return True
 
     def generate_image_pollinations(self, prompt):
-        encoded_prompt = urllib.parse.quote(prompt)
-        url = f"https://pollinations.ai{encoded_prompt}?width=1024&height=1024&enhance=true"
-        response = requests.get(url)
-        if response.status_code == 200:
-            return base64.b64encode(response.content).decode('utf-8')
-        raise Exception("Не удалось сгенерировать изображение")
+        import requests
+        import base64  # Добавлен недостающий импорт
+        
+        try:
+            # Исправленный URL: запросы нужно отправлять на API-поддомен
+            url = "https://image.pollinations.ai/"
+            
+            payload = {
+                "prompt": prompt,
+                "width": 1024,
+                "height": 1024,
+                "enhance": True,
+                "model": "flux"  # Опционально: явно указываем современную модель
+            }
+            
+            # Убедитесь, что logger инициализирован в вашем классе/файле.
+            # Если нет, добавьте: import logging; logger = logging.getLogger(__name__)
+            logger.info(f"Отправка POST-запроса к Pollinations AI для промпта длиной {len(prompt)} симв.")
+            
+            # Отправляем POST-запрос с JSON. Таймаут лучше увеличить до 60,
+            # так как генерация с enhance=True иногда может занимать больше 30 секунд.
+            response = requests.post(url, json=payload, timeout=60)
+            
+            if response.status_code == 200:
+                # В ответ приходит сама картинка в виде байт, кодируем её в base64
+                return base64.b64encode(response.content).decode('utf-8')
+                
+            # Если пришел не 200 статус, выводим текст ошибки от сервера для отладки
+            error_msg = response.text[:200] if response.text else "Нет описания ошибки"
+            raise Exception(f"Pollinations API вернул статус-код: {response.status_code}. Ответ: {error_msg}")
+            
+        except requests.exceptions.Timeout:
+            raise Exception("Ошибка: Время ожидания ответа от Pollinations AI истекло (более 60 секунд).")
+        except Exception as e:
+            raise Exception(f"Ошибка при работе с Pollinations AI: {str(e)}")
+
 
     def generate_image(self, prompt, model_type="generate"):
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
