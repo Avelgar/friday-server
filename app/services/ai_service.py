@@ -37,7 +37,7 @@ class AIService:
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
 
-        def generate_image(self, prompt, model_type="generate"):
+    def generate_image(self, prompt, model_type="generate"):
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
         model_id = models_map.get(model_type, models_map["generate"])
         
