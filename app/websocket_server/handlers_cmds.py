@@ -183,6 +183,10 @@ async def handle_command(websocket, data):
         else: 
             base_acts = list(BASE_WEB)
 
+        # Удаляем "очистка истории" для авторизованных пользователей
+        if dialog_id and "очистка истории" in base_acts:
+            base_acts.remove("очистка истории")
+
         local_rules = ""
         if device_type in ['компьютер', 'телефон']:
             local_rules = f"\n4. Ты не можешь открывать/закрывать программы напрямую! У тебя пока нет к ним доступа. Сначала вызови get_installed_programs или get_running_processes."
@@ -243,15 +247,12 @@ async def handle_command(websocket, data):
             elif chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
-                filtered_commands = []
                 
-                # --- ДОБАВЛЕНО ЛОГИРОВАНИЕ ДЕЙСТВИЙ ---
                 for c in extracted_commands:
                     t_dev = c.get('target_device', 'unknown')
                     acts = ", ".join([f"[{a.get('action_type')} -> {a.get('action_value')}]" for a in c.get('actions', [])])
                     logger.warning(f"🤖 [ДЕЙСТВИЕ ИИ] Цель: {t_dev} | Команды: {acts}")
-                # ----------------------------------------
-
+                
                 for cmd in extracted_commands:
                     filtered_actions = []
                     for act in cmd.get('actions', []):
@@ -290,7 +291,8 @@ async def handle_command(websocket, data):
                                 target_device_info = d; break
                     if not target_device_info: continue
 
-                    target_id = target_device_info['id']; target_mac = target_device_info['mac']
+                    target_id = target_device_info['id']
+                    target_mac = target_device_info['mac']
                     is_sender = (target_id == sender_id)
                     device_spoken_text = " ".join([a.get('action_value', '') for a in actions if a.get('action_type') in ["голосовой ответ", "текстовой ответ"]])
                     target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if (not is_sender and device_spoken_text.strip()) else None
@@ -308,8 +310,8 @@ async def handle_command(websocket, data):
                         if not is_sender and device_spoken_text and target_dialog_id:
                             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES (%s, %s, %s, %s)", (str(sender_id), device_spoken_text.strip(), target_id, target_dialog_id))
                             msg_id = cursor.lastrowid; await conn.commit()
-                            
-                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "ui_msg_id": ui_msg_id, "sender": "Бот" if is_sender else sender_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": sender_name, "original_command": final_user_text_full.strip() or command})
+                        
+                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "user_msg_id": user_msg_id if is_source else None, "sender": "Бот" if is_source else source_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": source_name, "original_command": original_command})
 
             elif chunk["type"] == "audio":
                 audio_chunks_count += 1
@@ -383,6 +385,8 @@ async def handle_target_command(websocket, data):
             logger.info(f"[ROUTE] ВТОРИЧНЫЙ АГЕНТ. Инициатор: {source_name}")
             
             allowed_acts = list(set(BASE_PC + BASE_PHONE))
+            if dialog_id and "очистка истории" in allowed_acts:
+                allowed_acts.remove("очистка истории")
             caps_text, allowed_actions = get_action_strings(allowed_acts)
 
             system_instruction = f"""Ты — ИИ-помощник {name}.
@@ -416,6 +420,12 @@ async def handle_target_command(websocket, data):
             await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE device_name = %s", (source_name,))
             source_device_info = await cursor.fetchone()
             
+            dialog_id = None
+            if source_device_info.get('user_id'):
+                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (source_device_info['user_id'],))
+                dlg = await cursor.fetchone()
+                if dlg: dialog_id = dlg['id']
+
             logger.info("\n" + "="*50)
             logger.info(f"[EXEC] ТРЕТИЧНЫЙ АГЕНТ. Данные получены от: {executor_device['device_name']}")
 
@@ -426,6 +436,8 @@ async def handle_target_command(websocket, data):
             
             if is_local and "check_network_devices" in allowed_acts:
                 allowed_acts.remove("check_network_devices") 
+            if dialog_id and "очистка истории" in allowed_acts:
+                allowed_acts.remove("очистка истории")
                 
             if processes:
                 allowed_acts.append("завершение процесса")
@@ -460,12 +472,6 @@ async def handle_target_command(websocket, data):
 {caps_text}
 """
             prompt_context = f"[ДАННЫЕ ОТ {executor_device['device_name']}]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни изначальную задачу пользователя."
-
-            dialog_id = None
-            if source_device_info.get('user_id'):
-                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (source_device_info['user_id'],))
-                dlg = await cursor.fetchone()
-                if dlg: dialog_id = dlg['id']
 
         source_id = source_device_info['id']
 
@@ -504,12 +510,10 @@ async def handle_target_command(websocket, data):
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
                 
-                # --- ЛОГИРОВАНИЕ ДЕЙСТВИЙ ---
                 for c in extracted_commands:
                     t_dev = c.get('target_device', 'unknown')
                     acts = ", ".join([f"[{a.get('action_type')} -> {a.get('action_value')}]" for a in c.get('actions', [])])
                     logger.warning(f"🤖 [ДЕЙСТВИЕ ИИ] Цель: {t_dev} | Команды: {acts}")
-                # ----------------------------
                 
                 for cmd in extracted_commands:
                     target_device_name = cmd.get('target_device', '').strip()
@@ -546,17 +550,7 @@ async def handle_target_command(websocket, data):
                             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES (%s, %s, %s, %s)", (str(source_id), device_spoken_text.strip(), target_id, target_dialog_id))
                             msg_id = cursor.lastrowid; await conn.commit()
                         
-                        await async_send(target_ws, {
-                            "type": "new_message",
-                            "message_id": msg_id,
-                            "user_msg_id": user_msg_id if is_source else None,
-                            "sender": "Бот" if is_source else source_name,
-                            "text": device_spoken_text.strip(), 
-                            "actions": actions,
-                            "audio_base64": target_audio_base64,
-                            "source_device": source_name,
-                            "original_command": original_command
-                        })
+                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "user_msg_id": user_msg_id if is_source else None, "sender": "Бот" if is_source else source_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": source_name, "original_command": original_command})
 
             elif chunk["type"] == "bot_text":
                 final_text += chunk["text"] + " "

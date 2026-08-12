@@ -351,27 +351,6 @@ def do_POST(self):
             conn.commit()
             self.send_json(200, {"status": "success", "message": "Отключено"})
 
-        elif self.path == '/clear_history':
-            token = data.get('token')
-            dialog_id = data.get('dialog_id')
-            
-            if dialog_id and token:
-                return self.send_json(403, {"status": "error", "message": "Очистка истории для аккаунта отключена."})
-            else:
-                if token: 
-                    mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
-                else:
-                    mac = data.get('mac')
-                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
-                dev = cursor.fetchone()
-                if dev:
-                    cursor.execute("DELETE FROM messages WHERE recipient_device_id = %s", (dev['id'],))
-                    conn.commit()
-                    self.send_json(200, {"status": "success", "message": "История очищена"})
-                else: 
-                    self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-            
-        # === ФИКС 404 ДЛЯ УДАЛЕНИЯ И РЕДАКТИРОВАНИЯ ===
         elif self.path == '/delete_message':
             msg_id = data.get('msg_id')
             token = data.get('token')
@@ -387,7 +366,6 @@ def do_POST(self):
                 except:
                     return self.send_json(401, {"status": "error", "message": "Invalid token"})
                 
-                # Ищем сообщение по ВЛАДЕЛЬЦУ диалога, а не по устройству
                 cursor.execute("""
                     SELECT m.id FROM messages m 
                     JOIN dialogs d ON m.dialog_id = d.id 
@@ -398,7 +376,6 @@ def do_POST(self):
                     
                 cursor.execute("DELETE FROM messages WHERE id = %s", (msg_id,))
             else:
-                # Гостевой режим (осталось как было, по MAC-адресу)
                 if not mac: return self.send_json(400, {"status": "error", "message": "mac обязателен для гостей"})
                 cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
                 dev = cursor.fetchone()
@@ -425,7 +402,6 @@ def do_POST(self):
                 except:
                     return self.send_json(401, {"status": "error", "message": "Invalid token"})
                     
-                # Ищем сообщение по ВЛАДЕЛЬЦУ диалога
                 cursor.execute("""
                     SELECT m.id FROM messages m 
                     JOIN dialogs d ON m.dialog_id = d.id 
@@ -436,7 +412,6 @@ def do_POST(self):
                     
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (new_text, msg_id))
             else:
-                # Гостевой режим
                 if not mac: return self.send_json(400, {"status": "error", "message": "mac обязателен для гостей"})
                 cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
                 dev = cursor.fetchone()
