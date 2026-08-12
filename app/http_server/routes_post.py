@@ -202,7 +202,7 @@ def do_POST(self):
             model_type = data.get('model_type', 'generate')
             if not prompt: return self.send_json(400, {"status": "error", "message": "Промпт не может быть пустым"})
             try:
-                image_base64 = ai_instance.generate_image(prompt, model_type)
+                image_base64 = ai_instance.generate_image_pollinations(prompt)
                 self.send_json(200, {"status": "success", "image_base64": image_base64, "message": "Изображение успешно сгенерировано"})
             except Exception as ex:
                 self.send_json(500, {"status": "error", "message": str(ex)})

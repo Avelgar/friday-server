@@ -8,6 +8,8 @@ from datetime import datetime
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
+import requests
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AI_Service")
@@ -36,6 +38,14 @@ class AIService:
         if len(self.api_keys) <= 1: return False
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
+
+    def generate_image_pollinations(prompt):
+        encoded_prompt = urllib.parse.quote(prompt)
+        url = f"https://pollinations.ai{encoded_prompt}?width=1024&height=1024&enhance=true"
+        response = requests.get(url)
+        if response.status_code == 200:
+            return base64.b64encode(response.content).decode('utf-8')
+        raise Exception("Не удалось сгенерировать изображение")
 
     def generate_image(self, prompt, model_type="generate"):
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
