@@ -36,7 +36,8 @@ ACTION_DESCRIPTIONS = {
     "режим камеры": "любой текст",
     "выключить режим камеры": "любой текст",
     "выключить микрофон": "любой текст (доступно только на веб-сайте)",
-    "голосовой ответ": "текст для озвучивания (используй ТОЛЬКО для отправки фразы на УДАЛЕННОЕ устройство, с локальным говори просто так)"
+    "голосовой ответ": "текст для озвучивания (используй ТОЛЬКО для отправки фразы на УДАЛЕННОЕ устройство, с локальным говори просто так)",
+    "название диалога": "краткое название для текущего диалога (1-3 слова). Обязательно вызови это при старте нового чата."
 }
 
 BASE_PC = [
@@ -123,20 +124,19 @@ async def handle_command(websocket, data):
         user_id = sender_device.get('user_id')
         sender_ws = mac_to_websocket.get(mac)
         
+        is_new_dialog = False
+
         if user_id:
             create_new = False
             if 'dialog_id' in data and client_dialog_id is None:
-                # WEB клиент нажал "Новый чат" и прислал диалог=null
                 create_new = True
             elif client_dialog_id:
-                # WEB прислал конкретный диалог, проверяем владельца
                 await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (client_dialog_id, user_id))
                 if not await cursor.fetchone():
                     create_new = True
                 else:
                     dialog_id = client_dialog_id
             else:
-                # C# Клиент (не шлет dialog_id), берем последний
                 await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
                 dlg = await cursor.fetchone()
                 if dlg:
@@ -145,23 +145,11 @@ async def handle_command(websocket, data):
                     create_new = True
                     
             if create_new:
-                try:
-                    # Просим Gemini придумать название чата
-                    client = ai_instance._get_client()
-                    resp = await client.aio.models.generate_content(
-                        model='models/gemini-2.5-flash-lite',
-                        contents=f"Придумай очень короткое название (1-3 слова) для диалога, который начинается с этого сообщения пользователя: '{db_user_text}'. В ответе напиши только название, без кавычек и точек."
-                    )
-                    dialog_name = resp.text.strip().replace('"', '').replace('.', '')
-                except Exception as e:
-                    logger.error(f"Name gen err: {e}")
-                    dialog_name = "Новый диалог"
-                    
+                is_new_dialog = True
+                dialog_name = "Новый диалог"
                 await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (dialog_name, user_id))
                 dialog_id = cursor.lastrowid
                 await conn.commit()
-                
-                # Сообщаем клиенту, что диалог создан
                 if sender_ws:
                     await async_send(sender_ws, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
@@ -192,18 +180,24 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
+        # ВАЖНО: копируем базовый список, чтобы не изменить его глобально для всех
         if device_type == 'компьютер': 
-            base_acts = BASE_PC
+            base_acts = list(BASE_PC)
         elif device_type == 'телефон': 
-            base_acts = BASE_PHONE
+            base_acts = list(BASE_PHONE)
         else: 
-            base_acts = BASE_WEB
-
-        caps_text, allowed_actions = get_action_strings(base_acts)
+            base_acts = list(BASE_WEB)
 
         local_rules = ""
         if device_type in ['компьютер', 'телефон']:
             local_rules = f"\n4. Ты не можешь открывать/закрывать программы напрямую! У тебя пока нет к ним доступа. Сначала вызови get_installed_programs или get_running_processes."
+
+        # ДИНАМИЧЕСКИ ДОБАВЛЯЕМ ПРАВИЛО ДЛЯ НАИМЕНОВАНИЯ ЧАТА
+        if is_new_dialog:
+            base_acts.append("название диалога")
+            local_rules += "\n5. ЭТО НОВЫЙ ДИАЛОГ! Твоя первая задача — обязательно использовать action_type=\"название диалога\", чтобы дать ему короткое и понятное имя (1-3 слова), опираясь на запрос пользователя."
+
+        caps_text, allowed_actions = get_action_strings(base_acts)
 
         system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник за устройством: {sender_name} (Тип: {device_type}).
 ПРАВИЛА ОБЩЕНИЯ:
@@ -260,11 +254,27 @@ async def handle_command(websocket, data):
                 for cmd in extracted_commands:
                     filtered_actions = []
                     for act in cmd.get('actions', []):
-                        if act.get('action_type') == "check_network_devices":
+                        act_type = act.get('action_type')
+                        act_val = act.get('action_value')
+                        
+                        if act_type == "check_network_devices":
                             pseudo_data = {"internal_routing": "check_network_devices", "original_command": final_user_text_full.strip() or command, "source_name": sender_name, "mac": mac, "user_id": sender_device.get('user_id'), "user_msg_id": user_msg_id, "voice_type": voice_name, "message_history": message_history, "dialog_id": dialog_id}
                             pending_routes.append(pseudo_data)
-                        else: filtered_actions.append(act)
-                    if filtered_actions: cmd['actions'] = filtered_actions; filtered_commands.append(cmd)
+                        
+                        elif act_type == "название диалога" and dialog_id:
+                            # ПЕРЕИМЕНОВЫВАЕМ ДИАЛОГ В БД
+                            new_name = str(act_val).strip()
+                            await cursor.execute("UPDATE dialogs SET name = %s WHERE id = %s", (new_name, dialog_id))
+                            await conn.commit()
+                            if sender_ws:
+                                await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
+                        
+                        else: 
+                            filtered_actions.append(act)
+                            
+                    if filtered_actions: 
+                        cmd['actions'] = filtered_actions
+                        filtered_commands.append(cmd)
                 
                 for cmd in filtered_commands:
                     target_device_name = cmd.get('target_device', '').strip()
@@ -453,7 +463,6 @@ async def handle_target_command(websocket, data):
 """
             prompt_context = f"[ДАННЫЕ ОТ {executor_device['device_name']}]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни изначальную задачу пользователя."
 
-            # Ищем диалог для Третичного агента
             dialog_id = None
             if source_device_info.get('user_id'):
                 await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (source_device_info['user_id'],))
@@ -528,7 +537,7 @@ async def handle_target_command(websocket, data):
                             await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (target_device_info['user_id'],))
                             dlg = await cursor.fetchone()
                             if dlg: target_dialog_id = dlg['id']
-
+                            
                         if not is_source and device_spoken_text and target_dialog_id:
                             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES (%s, %s, %s, %s)", (str(source_id), device_spoken_text.strip(), target_id, target_dialog_id))
                             msg_id = cursor.lastrowid; await conn.commit()
