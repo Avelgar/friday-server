@@ -314,7 +314,7 @@ async def handle_command(websocket, data):
                             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES (%s, %s, %s, %s)", (str(sender_id), device_spoken_text.strip(), target_id, target_dialog_id))
                             msg_id = cursor.lastrowid; await conn.commit()
                         
-                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "user_msg_id": user_msg_id if is_source else None, "sender": "Бот" if is_source else source_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": source_name, "original_command": final_user_text_full.strip() or command})
+                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "user_msg_id": user_msg_id if is_sender else None, "sender": "Бот" if is_sender else sender_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": sender_name, "original_command": final_user_text_full.strip() or command})
 
             elif chunk["type"] == "audio":
                 audio_chunks_count += 1
@@ -577,7 +577,7 @@ async def handle_target_command(websocket, data):
                             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES (%s, %s, %s, %s)", (str(source_id), device_spoken_text.strip(), target_id, target_dialog_id))
                             msg_id = cursor.lastrowid; await conn.commit()
                         
-                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "user_msg_id": user_msg_id if is_sender else None, "sender": "Бот" if is_sender else sender_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": sender_name, "original_command": final_user_text_full.strip() or command})
+                        await async_send(target_ws, {"type": "new_message", "message_id": msg_id, "user_msg_id": user_msg_id if is_source else None, "sender": "Бот" if is_source else source_name, "text": device_spoken_text.strip(), "actions": actions, "audio_base64": target_audio_base64, "source_device": source_name, "original_command": original_command})
 
             elif chunk["type"] == "bot_text":
                 final_text += chunk["text"] + " "
