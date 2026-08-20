@@ -283,6 +283,11 @@ class AIService:
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
                                 
                             if sc.model_turn:
+                                for part in sc.model_turn.parts:
+                                    if part.inline_data:
+                                        has_yielded_data = True
+                                        yield {"type": "audio", "data": part.inline_data.data}
+                            if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
                                 break
                         
@@ -447,11 +452,19 @@ class AIService:
                         
                         sc = response.server_content
                         if sc:
+                            # -------- ТРАНСКРИПЦИЯ ЮЗЕРА --------
                             if sc.input_transcription:
+                                # ДОБАВИТЬ ПРИНТ / ЛОГ ЗДЕСЬ:
+                                logger.info(f"[USER TRANSCRIPTION]: {sc.input_transcription.text}")
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
+                            
+                            # -------- ТРАНСКРИПЦИЯ БОТА --------
                             if sc.output_transcription:
                                 has_yielded_data = True
+                                # ЕСЛИ ХОЧЕШЬ ВИДЕТЬ ЧАНКИ ОТ БОТА, МОЖЕШЬ ДОБАВИТЬ ПРИНТ И ТУТ:
+                                # logger.info(f"[BOT TRANSCRIPTION CHUNK]: {sc.output_transcription.text}")
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
+                                
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:

@@ -238,6 +238,7 @@ async def handle_command(websocket, data):
         async for chunk in generator:
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
+                # ВОТ ЗДЕСЬ НАСТРАИВАЕТСЯ ЛОГ ТРАНСКРИБАЦИИ:
                 logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
                 if sender_ws: await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
 
