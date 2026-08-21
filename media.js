@@ -14,11 +14,19 @@ const hiddenCanvas = document.getElementById('hidden-canvas');
 const ctx = hiddenCanvas.getContext('2d');
 const cameraBtn = document.getElementById('camera-btn');
 const screenBtn = document.getElementById('screen-btn');
+const closeVideoBtn = document.getElementById('close-video-btn');
 
 cameraBtn.addEventListener('click', () => toggleVideoSource('camera'));
 screenBtn.addEventListener('click', () => toggleVideoSource('screen'));
 
-document.getElementById('close-video-btn').addEventListener('click', stopVideoStream);
+if (closeVideoBtn) {
+    closeVideoBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // Скрываем только визуальный блок для пользователя.
+        // Сам видеопоток (videoStream) и отправка кадров ИИ продолжают работать!
+        videoPreviewContainer.style.display = 'none';
+    });
+}
 
 async function stopVideoStream() {
     if (videoStream) {
@@ -35,6 +43,12 @@ async function stopVideoStream() {
 
 async function toggleVideoSource(sourceType) {
     if (currentVideoSource === sourceType) {
+        // Если блок был скрыт крестиком, повторный клик по кнопке покажет его снова
+        if (videoPreviewContainer.style.display === 'none') {
+            videoPreviewContainer.style.display = 'flex';
+            return;
+        }
+        // Если уже был открыт — полностью выключаем камеру/экран
         await stopVideoStream();
         return;
     }
@@ -44,12 +58,10 @@ async function toggleVideoSource(sourceType) {
         if (sourceType === 'camera') {
             videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
             cameraBtn.classList.add('active');
-            // ОТЗЕРКАЛИВАЕМ КАМЕРУ (только визуально для пользователя)
             liveVideo.style.transform = 'scaleX(-1)';
         } else if (sourceType === 'screen') {
             videoStream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 1280, height: 720, frameRate: 15 } });
             screenBtn.classList.add('active');
-            // ЭКРАН НЕ ОТЗЕРКАЛИВАЕМ
             liveVideo.style.transform = 'none';
             videoStream.getVideoTracks()[0].addEventListener('ended', stopVideoStream);
         }
@@ -61,9 +73,6 @@ async function toggleVideoSource(sourceType) {
         await stopVideoStream();
     }
 }
-
-cameraBtn.addEventListener('click', () => toggleVideoSource('camera'));
-screenBtn.addEventListener('click', () => toggleVideoSource('screen'));
 
 function captureSingleFrame() {
     if (!currentVideoSource || !videoStream) return null;
