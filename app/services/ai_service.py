@@ -46,34 +46,22 @@ class AIService:
         import random
         
         try:
-            # 1. Безопасно кодируем текст для вставки в URL (пробелы станут %20 и т.д.)
             safe_prompt = urllib.parse.quote(prompt)
-            
-            # 2. Промпт ОБЯЗАТЕЛЬНО должен быть частью URL
             url = f"https://image.pollinations.ai/prompt/{safe_prompt}"
-            
-            # 3. Настройки передаются как query-параметры (после знака вопроса в URL)
             params = {
                 "width": 512,
                 "height": 512,
-                "model": "flux",       # Современная качественная модель
-                "nologo": "true",      # Убираем водяной знак сервиса
-                "enhance": "true",     # Улучшение промпта под капотом
-                "seed": random.randint(1, 999999) # Случайный сид, чтобы картинки не повторялись
+                "model": "flux",
+                "nologo": "true",
+                "enhance": "true",
+                "seed": random.randint(1, 999999)
             }
-            
             logger.info(f"Отправка GET-запроса к Pollinations AI для промпта: '{prompt}'")
-            
-            # Отправляем GET-запрос. Библиотека requests сама склеит url и params
             response = requests.get(url, params=params, timeout=60)
-            
             if response.status_code == 200:
-                # Кодируем успешный ответ в base64
                 return base64.b64encode(response.content).decode('utf-8')
-                
             error_msg = response.text[:200] if response.text else "Нет описания ошибки"
             raise Exception(f"Pollinations API вернул код {response.status_code}. Ответ: {error_msg}")
-            
         except requests.exceptions.Timeout:
             raise Exception("Ошибка: Время ожидания ответа от Pollinations AI истекло (более 60 секунд).")
         except Exception as e:
@@ -83,8 +71,6 @@ class AIService:
     def generate_image(self, prompt, model_type="generate"):
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
         model_id = models_map.get(model_type, models_map["generate"])
-        
-        # Микро-пауза против спама запросами
         time.sleep(1.0) 
         
         total_keys_tried = 0
@@ -118,21 +104,15 @@ class AIService:
             except Exception as e:
                 last_error_msg = str(e)
                 logger.warning(f"[Key {self.current_key_index}] Ошибка генерации: {last_error_msg}")
-                
                 if "429" in last_error_msg or "RESOURCE_EXHAUSTED" in last_error_msg:
-                    # По умолчанию спим 5 секунд, если не найдем точное время в тексте ошибки
                     sleep_time = 5.0 
-                    
-                    # Пытаемся вытащить точное время ожидания (например, "Please retry in 26.749295397s.")
                     import re
                     match = re.search(r"retry in ([\d\.]+)s", last_error_msg)
                     if match:
                         try:
-                            sleep_time = float(match.group(1)) + 0.5  # Добавляем 0.5с для надежности
+                            sleep_time = float(match.group(1)) + 0.5
                             logger.info(f"API требует паузу. Найдено точное время ожидания: {sleep_time} сек.")
-                        except ValueError:
-                            pass
-                    
+                        except ValueError: pass
                     logger.info(f"Сработал лимит. Засыпаю на {sleep_time} сек. перед сменой ключа...")
                     time.sleep(sleep_time)
                 
@@ -173,7 +153,7 @@ class AIService:
     # ==============================================================================
     # 1. ФУНКЦИЯ ДЛЯ ИМЯ+КОМАНДА / HTTP
     # ==============================================================================
-    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, history_text="", voice_name="Aoede", assistant_name="Пятница", audio_queue=None):
+    async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, formatted_history=None, voice_name="Aoede", assistant_name="Пятница", media_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
@@ -213,7 +193,7 @@ class AIService:
                     ]
                 )
 
-                config = types.LiveConnectConfig(
+                config_kwargs = dict(
                     response_modalities=["AUDIO"], 
                     system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                     tools=[device_control_tool],
@@ -226,6 +206,12 @@ class AIService:
                         automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
                 )
+                
+                # Подключение истории через Gemini 3.1 Live API
+                if formatted_history:
+                    config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
+
+                config = types.LiveConnectConfig(**config_kwargs)
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 
@@ -236,6 +222,10 @@ class AIService:
                 try:
                     session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
                     
+                    if formatted_history:
+                        logger.info(f"[HISTORY] Отправка контекста из {len(formatted_history)} сообщений.")
+                        await session.send_client_content(turns=formatted_history, turn_complete=True)
+                    
                     async def send_input_task():
                         try:
                             if prompt_text:
@@ -243,14 +233,17 @@ class AIService:
                             if image_bytes:
                                 await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
-                            if audio_queue:
+                            if media_queue:
                                 while True:
-                                    chunk = await audio_queue.get()
-                                    if chunk is None:
+                                    item = await media_queue.get()
+                                    if item is None:
                                         await session.send_realtime_input(audio_stream_end=True)
                                         break
-                                    if len(chunk) > 0:
-                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                        
+                                    if item["type"] == "audio" and len(item["data"]) > 0:
+                                        await session.send_realtime_input(audio=types.Blob(data=item["data"], mime_type="audio/pcm;rate=16000"))
+                                    elif item["type"] == "video" and len(item["data"]) > 0:
+                                        await session.send_realtime_input(video=types.Blob(data=item["data"], mime_type="image/jpeg"))
                                         
                             elif audio_bytes:
                                 pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
@@ -269,19 +262,12 @@ class AIService:
                         
                         sc = response.server_content
                         if sc:
-                            # -------- ТРАНСКРИПЦИЯ ЮЗЕРА --------
                             if sc.input_transcription:
-                                # ДОБАВИТЬ ПРИНТ / ЛОГ ЗДЕСЬ:
                                 logger.info(f"[USER TRANSCRIPTION]: {sc.input_transcription.text}")
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
-                            
-                            # -------- ТРАНСКРИПЦИЯ БОТА --------
                             if sc.output_transcription:
                                 has_yielded_data = True
-                                # ЕСЛИ ХОЧЕШЬ ВИДЕТЬ ЧАНКИ ОТ БОТА, МОЖЕШЬ ДОБАВИТЬ ПРИНТ И ТУТ:
-                                # logger.info(f"[BOT TRANSCRIPTION CHUNK]: {sc.output_transcription.text}")
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
-                                
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
@@ -307,11 +293,9 @@ class AIService:
                             await session.send_tool_response(function_responses=function_responses)
                             
                 except (asyncio.TimeoutError, TimeoutError):
-                    if has_yielded_data:
-                        return 
+                    if has_yielded_data: return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
-                except StopAsyncIteration:
-                    pass
+                except StopAsyncIteration: pass
                 finally:
                     if sender_task: sender_task.cancel()
                     if session:
@@ -325,17 +309,15 @@ class AIService:
                 
                 if has_yielded_data: return
                 total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys):
-                    await asyncio.sleep(1)
-                else:
-                    break
+                if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
+                else: break
 
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
     # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА (ТЕПЕРЬ С ПРАВИЛЬНЫМ КОНТЕКСТОМ)
     # ==============================================================================
-    async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, audio_queue, voice_name="Aoede", assistant_name="Пятница"):
+    async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, media_queue, formatted_history=None, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
@@ -375,7 +357,7 @@ class AIService:
                     ]
                 )
 
-                config = types.LiveConnectConfig(
+                config_kwargs = dict(
                     response_modalities=["AUDIO"], 
                     system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                     tools=[device_control_tool],
@@ -388,6 +370,11 @@ class AIService:
                         automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
                     )
                 )
+                
+                if formatted_history:
+                    config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
+
+                config = types.LiveConnectConfig(**config_kwargs)
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, ключ {self.current_key_index})...")
                 
@@ -397,6 +384,10 @@ class AIService:
                 
                 try:
                     session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
+                    
+                    if formatted_history:
+                        logger.info(f"[HISTORY] Отправка контекста из {len(formatted_history)} сообщений.")
+                        await session.send_client_content(turns=formatted_history, turn_complete=True)
                     
                     async def send_input_task():
                         has_sent_activity_start = False
@@ -411,34 +402,35 @@ class AIService:
 
                             while True:
                                 try:
-                                    chunk = await asyncio.wait_for(audio_queue.get(), timeout=3.0)
-                                    if chunk is None:
-                                        logger.info(f"[STREAM DEBUG] Клиент прислал audio_stream_end (None). Получено: {bytes_received}, Отправлено: {bytes_sent}")
+                                    item = await asyncio.wait_for(media_queue.get(), timeout=3.0)
+                                    if item is None:
+                                        logger.info(f"[STREAM DEBUG] Клиент прислал stream_end (None). Получено: {bytes_received}, Отправлено: {bytes_sent}")
                                         if has_sent_activity_start:
-                                            # ОТПРАВЛЯЕМ ТОЛЬКО ACTIVITY END! Без обнуления контекста!
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
                                         
-                                    if len(chunk) > 0:
+                                    if item["type"] == "audio" and len(item["data"]) > 0:
+                                        chunk = item["data"]
                                         bytes_received += len(chunk)
                                         current_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                                        if first_chunk_time is None:
-                                            first_chunk_time = current_time
+                                        if first_chunk_time is None: first_chunk_time = current_time
                                         last_chunk_time = current_time
 
                                         if not has_sent_activity_start:
                                             await session.send_realtime_input(activity_start=types.ActivityStart())
                                             has_sent_activity_start = True
 
-                                        await session.send_realtime_input(
-                                            audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000")
-                                        )
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                         bytes_sent += len(chunk)
+                                        
+                                    elif item["type"] == "video" and len(item["data"]) > 0:
+                                        frame_bytes = item["data"]
+                                        # Кадры шлем как есть, они не требуют activity_start
+                                        await session.send_realtime_input(video=types.Blob(data=frame_bytes, mime_type="image/jpeg"))
                                         
                                 except asyncio.TimeoutError:
                                     logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут). Получено: {bytes_received}, Отправлено: {bytes_sent}")
                                     if has_sent_activity_start:
-                                        # ОТПРАВЛЯЕМ ТОЛЬКО ACTIVITY END!
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
                                     break
                         except Exception as e:
@@ -452,19 +444,12 @@ class AIService:
                         
                         sc = response.server_content
                         if sc:
-                            # -------- ТРАНСКРИПЦИЯ ЮЗЕРА --------
                             if sc.input_transcription:
-                                # ДОБАВИТЬ ПРИНТ / ЛОГ ЗДЕСЬ:
                                 logger.info(f"[USER TRANSCRIPTION]: {sc.input_transcription.text}")
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
-                            
-                            # -------- ТРАНСКРИПЦИЯ БОТА --------
                             if sc.output_transcription:
                                 has_yielded_data = True
-                                # ЕСЛИ ХОЧЕШЬ ВИДЕТЬ ЧАНКИ ОТ БОТА, МОЖЕШЬ ДОБАВИТЬ ПРИНТ И ТУТ:
-                                # logger.info(f"[BOT TRANSCRIPTION CHUNK]: {sc.output_transcription.text}")
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
-                                
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
@@ -493,8 +478,7 @@ class AIService:
                     if has_yielded_data:
                         return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
-                except StopAsyncIteration:
-                    pass
+                except StopAsyncIteration: pass
                 finally:
                     if sender_task: sender_task.cancel()
                     if session:

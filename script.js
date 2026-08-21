@@ -11,6 +11,15 @@ let ignoredMessageId = null;
 
 let currentDialogId = null;
 
+// ====================== ПЕРЕМЕННЫЕ ВИДЕОСТРИМА ======================
+let videoStream = null;
+let currentVideoSource = null; // 'camera', 'screen', or null
+let videoInterval = null;
+const hiddenVideo = document.getElementById('hidden-video');
+const hiddenCanvas = document.getElementById('hidden-canvas');
+const ctx = hiddenCanvas.getContext('2d');
+// ====================================================================
+
 function initStopWordDetection() {
     if (!stopWordRecognizer && ('webkitSpeechRecognition' in window)) {
         stopWordRecognizer = new webkitSpeechRecognition();
@@ -300,7 +309,6 @@ function handleIncomingStreamData(data) {
         loadDialogs();
     }
     
-    // --- ОБРАБОТЧИК ПЕРЕИМЕНОВАНИЯ ДИАЛОГА ---
     if (data.type === 'dialog_renamed') {
         const chatSpan = document.querySelector(`.dialog-item[data-id="${data.dialog_id}"] span`);
         if (chatSpan) {
@@ -473,6 +481,78 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('voice-type').addEventListener('change', saveSettingsToLocalStorage);
     document.getElementById('messageInput').addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; });
 
+    // =========================================================================
+    // ЛОГИКА ЗАХВАТА И ОТПРАВКИ ВИДЕО (КАМЕРА / ЭКРАН)
+    // =========================================================================
+    const cameraBtn = document.getElementById('camera-btn');
+    const screenBtn = document.getElementById('screen-btn');
+
+    async function stopVideoStream() {
+        if (videoStream) {
+            videoStream.getTracks().forEach(track => track.stop());
+            videoStream = null;
+        }
+        hiddenVideo.srcObject = null;
+        currentVideoSource = null;
+        cameraBtn.classList.remove('active');
+        screenBtn.classList.remove('active');
+        if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
+    }
+
+    async function toggleVideoSource(sourceType) {
+        if (currentVideoSource === sourceType) {
+            await stopVideoStream();
+            return;
+        }
+        await stopVideoStream();
+        
+        try {
+            if (sourceType === 'camera') {
+                videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, frameRate: 15 } });
+                cameraBtn.classList.add('active');
+            } else if (sourceType === 'screen') {
+                videoStream = await navigator.mediaDevices.getDisplayMedia({ video: { width: 1280, height: 720, frameRate: 15 } });
+                screenBtn.classList.add('active');
+                
+                // Слушаем завершение шаринга экрана через UI браузера
+                videoStream.getVideoTracks()[0].addEventListener('ended', stopVideoStream);
+            }
+            currentVideoSource = sourceType;
+            hiddenVideo.srcObject = videoStream;
+            hiddenVideo.play();
+        } catch (err) {
+            console.error("Video error:", err);
+            showNotification('Ошибка доступа к ' + (sourceType==='camera' ? 'камере' : 'экрану'), 'error');
+            await stopVideoStream();
+        }
+    }
+
+    cameraBtn.addEventListener('click', () => toggleVideoSource('camera'));
+    screenBtn.addEventListener('click', () => toggleVideoSource('screen'));
+
+    function captureAndSendVideoFrame() {
+        // Отправляем кадры, ТОЛЬКО когда есть открытая сессия Gemini (микрофон ловит звук / идет стрим)
+        if (!currentVideoSource || !videoStream || !activeStreamMsgId) return;
+        if (!websocketConnection || websocketConnection.readyState !== WebSocket.OPEN) return;
+
+        const w = hiddenVideo.videoWidth;
+        const h = hiddenVideo.videoHeight;
+        if (w === 0 || h === 0) return;
+
+        hiddenCanvas.width = w;
+        hiddenCanvas.height = h;
+        ctx.drawImage(hiddenVideo, 0, 0, w, h);
+        
+        const base64Image = hiddenCanvas.toDataURL('image/jpeg', 0.5).split(',')[1];
+        
+        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ 
+            type: 'video_stream_chunk', 
+            video_base64: base64Image, 
+            ui_msg_id: activeStreamMsgId 
+        })))));
+    }
+
+
     let micAudioContext = null; let audioWorkletNode = null; let micStream = null;
     let pcmBuffer = []; let preBuffer = []; let silenceFrames = 0;
     const VAD_THRESHOLD = 0.015; const SILENCE_FRAMES = 16000 * 1.5; const PRE_BUFFER_FRAMES = 8000; 
@@ -531,6 +611,10 @@ document.addEventListener('DOMContentLoaded', async function() {
                     if (useRealtime) {
                         sendToServer("", "голосовое сообщение", null, activeStreamMsgId, true);
                         chunkInterval = setInterval(sendStreamChunk, 250);
+                        // Запускаем отправку кадров (1 раз в секунду)
+                        if (currentVideoSource && !videoInterval) {
+                            videoInterval = setInterval(captureAndSendVideoFrame, 1000);
+                        }
                     }
                 }
             } else if (vadState === 'recording') {
@@ -539,6 +623,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     silenceFrames += pcm.length;
                     if (silenceFrames > SILENCE_FRAMES) {
                         vadState = 'processing';
+                        if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
                         if (useRealtime) {
                             clearInterval(chunkInterval); sendStreamChunk(); 
                             websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'audio_stream_end', ui_msg_id: activeStreamMsgId })))));
@@ -557,6 +642,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     
     function stopMicStream() {
         if (chunkInterval) clearInterval(chunkInterval);
+        if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
         if (audioWorkletNode) { audioWorkletNode.disconnect(); audioWorkletNode = null; }
         if (micStream) { micStream.getTracks().forEach(track => track.stop()); micStream = null; }
         if (micAudioContext) { micAudioContext.close(); micAudioContext = null; }
@@ -574,6 +660,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 isMicrophoneActive = false; this.classList.remove('active'); this.querySelector('span').textContent = 'Включить микрофон';
                 if (vadState === 'recording') {
                     vadState = 'processing';
+                    if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
                     if (websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
                         clearInterval(chunkInterval); sendStreamChunk();
                         websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'audio_stream_end', ui_msg_id: activeStreamMsgId })))));

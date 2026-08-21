@@ -13,7 +13,8 @@ from app.websocket_server.utils import async_send, get_device_type, get_accessib
 logger = logging.getLogger("WS_Server")
 
 HISTORY_LIMIT = 10 
-active_audio_queues = {} 
+# Очередь переименована для поддержки и аудио, и видео
+active_media_queues = {} 
 
 ACTION_DESCRIPTIONS = {
     "открытие ссылки": "строго полный URL адрес (например https://youtube.com)",
@@ -66,15 +67,22 @@ def get_action_strings(action_keys):
 
 async def handle_audio_chunk(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
-    if ui_msg_id in active_audio_queues:
+    if ui_msg_id in active_media_queues:
         chunk = base64.b64decode(data.get("audio_base64", ""))
-        active_audio_queues[ui_msg_id].put_nowait(chunk)
+        active_media_queues[ui_msg_id].put_nowait({"type": "audio", "data": chunk})
+
+# ДОБАВЛЕН НОВЫЙ ХЕНДЛЕР: Обязательно пропиши его в роутере вебсокетов!
+async def handle_video_chunk(websocket, data):
+    ui_msg_id = data.get("ui_msg_id")
+    if ui_msg_id in active_media_queues:
+        chunk = base64.b64decode(data.get("video_base64", ""))
+        active_media_queues[ui_msg_id].put_nowait({"type": "video", "data": chunk})
 
 async def handle_audio_end(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
-    if ui_msg_id in active_audio_queues:
-        active_audio_queues[ui_msg_id].put_nowait(None)
-        active_audio_queues.pop(ui_msg_id, None)
+    if ui_msg_id in active_media_queues:
+        active_media_queues[ui_msg_id].put_nowait(None)
+        active_media_queues.pop(ui_msg_id, None)
 
 async def handle_command(websocket, data):
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None; dialog_id = None
@@ -92,11 +100,12 @@ async def handle_command(websocket, data):
         message_history = data.get('message_history', [])
         
         is_streaming = data.get('stream_audio', False)
-        audio_queue = asyncio.Queue() if is_streaming else None
+        media_queue = asyncio.Queue() if is_streaming else None
+        
         if is_streaming and ui_msg_id:
-            active_audio_queues[ui_msg_id] = audio_queue
+            active_media_queues[ui_msg_id] = media_queue
             if audio_base64:
-                audio_queue.put_nowait(base64.b64decode(audio_base64))
+                media_queue.put_nowait({"type": "audio", "data": base64.b64decode(audio_base64)})
         
         mac = ws_to_mac.get(websocket) or data.get('mac')
         if not mac and data.get('token'):
@@ -118,12 +127,12 @@ async def handle_command(websocket, data):
         logger.info("\n" + "="*50)
         logger.info(f"[REQUEST] ПЕРВИЧНЫЙ АГЕНТ. Инициатор: {sender_name} | Стрим: {is_streaming}")
 
-        # === АВТО-ГЕНЕРАЦИЯ ДИАЛОГА ===
         client_dialog_id = data.get('dialog_id')
         user_id = sender_device.get('user_id')
         sender_ws = mac_to_websocket.get(mac)
         
         is_new_dialog = False
+        formatted_history = []
 
         if user_id:
             create_new = False
@@ -152,29 +161,30 @@ async def handle_command(websocket, data):
                 if sender_ws:
                     await async_send(sender_ws, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
-        history_for_prompt = ""
+            if dialog_id:
+                await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Вы', %s, %s, %s)", (db_user_text, sender_id, dialog_id))
+                user_msg_id = cursor.lastrowid
+                await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (sender_id, dialog_id))
+                bot_message_id = cursor.lastrowid
+                await conn.commit()
 
-        # Если это аккаунт - пишем в базу и берем историю из базы
-        if dialog_id:
-            await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Вы', %s, %s, %s)", (db_user_text, sender_id, dialog_id))
-            user_msg_id = cursor.lastrowid
-            await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (sender_id, dialog_id))
-            bot_message_id = cursor.lastrowid
-            await conn.commit()
-
-            await cursor.execute("""
-                SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
-                FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
-                WHERE m.dialog_id = %s AND m.id < %s ORDER BY m.created_at ASC
-            """, (dialog_id, user_msg_id))
-            
-            raw_history = await cursor.fetchall()
-            history_for_prompt = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in (raw_history[-HISTORY_LIMIT:] if raw_history else [])])
+                await cursor.execute("""
+                    SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
+                    FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
+                    WHERE m.dialog_id = %s AND m.id < %s ORDER BY m.created_at ASC
+                """, (dialog_id, user_msg_id))
+                
+                raw_history = await cursor.fetchall()
+                if raw_history:
+                    for msg in raw_history[-HISTORY_LIMIT:]:
+                        role = "user" if msg['sender_name'] == 'Пользователь' else "model"
+                        formatted_history.append({"role": role, "parts": [{"text": msg['text']}]})
         
-        # Если это гость - базу не трогаем, берем историю из присланного JSON
         else:
             if message_history:
-                history_for_prompt = "\n".join([f"{'Пользователь' if m.get('role')=='user' else 'Бот'}: {m.get('content')}" for m in message_history[-HISTORY_LIMIT:]])
+                for m in message_history[-HISTORY_LIMIT:]:
+                    role = "user" if m.get('role') == 'user' else "model"
+                    formatted_history.append({"role": role, "parts": [{"text": m.get('content')}]})
 
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
@@ -208,19 +218,18 @@ async def handle_command(websocket, data):
 1. Локальные возможности и форматы параметров (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}
 2. Для взаимодействия с ДРУГИМ устройством используй action_type="check_network_devices".
-3. Используй action_type="request_retry" для уточнения.{local_rules}
-ИСТОРИЯ:
-{history_for_prompt}
-"""
+3. Используй action_type="request_retry" для уточнения.{local_rules}"""
+        
         prompt_text_to_send = f"[ЗАПРОС С КЛАВИАТУРЫ]: {command}" if command else None
         logger.info(f"[API] Отправляю в Gemini...")
 
-        if is_streaming and audio_queue:
+        if is_streaming and media_queue:
             generator = ai_instance.generate_audio_stream_realtime(
                 prompt_text=prompt_text_to_send, 
                 system_instruction=system_instruction,
                 allowed_actions=allowed_actions,
-                audio_queue=audio_queue,
+                media_queue=media_queue,
+                formatted_history=formatted_history,
                 voice_name=voice_name, 
                 assistant_name=name
             )
@@ -231,6 +240,7 @@ async def handle_command(websocket, data):
                 allowed_actions=allowed_actions,
                 audio_bytes=audio_bytes,
                 image_bytes=image_bytes, 
+                formatted_history=formatted_history,
                 voice_name=voice_name, 
                 assistant_name=name
             )
@@ -238,7 +248,6 @@ async def handle_command(websocket, data):
         async for chunk in generator:
             if chunk["type"] == "user_text":
                 final_user_text_full += chunk["text"] + " "
-                # ВОТ ЗДЕСЬ НАСТРАИВАЕТСЯ ЛОГ ТРАНСКРИБАЦИИ:
                 logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
                 if sender_ws: await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
 
@@ -250,7 +259,7 @@ async def handle_command(websocket, data):
             elif chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
-                filtered_commands = [] # <--- ФИКС ЗДЕСЬ!
+                filtered_commands = []
                 
                 for c in extracted_commands:
                     t_dev = c.get('target_device', 'unknown')
@@ -352,7 +361,7 @@ async def handle_command(websocket, data):
     finally:
         if cursor: await cursor.close()
         if conn: conn.close()
-        active_audio_queues.pop(data.get('ui_msg_id', ''), None)
+        active_media_queues.pop(data.get('ui_msg_id', ''), None)
 
 
 async def handle_target_command(websocket, data):
@@ -478,7 +487,7 @@ async def handle_target_command(websocket, data):
 
         source_id = source_device_info['id']
 
-        history_text = ""
+        formatted_history = []
         
         if dialog_id:
             await cursor.execute("""
@@ -487,8 +496,10 @@ async def handle_target_command(websocket, data):
                 WHERE m.dialog_id = %s ORDER BY m.created_at ASC
             """, (dialog_id,))
             raw_history = await cursor.fetchall()
-            raw_history = raw_history[-HISTORY_LIMIT:] if raw_history else []
-            history_text = "\n".join([f"{msg['sender_name']}: {msg['text']}" for msg in raw_history])
+            if raw_history:
+                for msg in raw_history[-HISTORY_LIMIT:]:
+                    role = "user" if msg['sender_name'] == 'Пользователь' else "model"
+                    formatted_history.append({"role": role, "parts": [{"text": msg['text']}]})
             
             await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (source_id, dialog_id))
             bot_message_id = cursor.lastrowid
@@ -496,7 +507,9 @@ async def handle_target_command(websocket, data):
         else:
             message_history = data.get('message_history')
             if message_history:
-                history_text = "\n".join([f"{'Пользователь' if m.get('role')=='user' else 'Бот'}: {m.get('content')}" for m in message_history[-HISTORY_LIMIT:]])
+                for m in message_history[-HISTORY_LIMIT:]:
+                    role = "user" if m.get('role') == 'user' else "model"
+                    formatted_history.append({"role": role, "parts": [{"text": m.get('content')}]})
 
         final_text = ""
         source_ws = mac_to_websocket.get(source_device_info['mac'])
@@ -505,14 +518,14 @@ async def handle_target_command(websocket, data):
             prompt_text=prompt_context, 
             system_instruction=system_instruction,
             allowed_actions=allowed_actions,
-            history_text=history_text, 
+            formatted_history=formatted_history, 
             voice_name=voice_name, 
             assistant_name=name
         ):
             if chunk["type"] == "commands":
                 if chunk["commands"]: has_commands = True
                 extracted_commands = chunk["commands"]
-                filtered_commands = [] # <--- ФИКС ЗДЕСЬ!
+                filtered_commands = []
                 
                 for c in extracted_commands:
                     t_dev = c.get('target_device', 'unknown')

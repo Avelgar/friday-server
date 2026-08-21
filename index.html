@@ -39,18 +39,15 @@
         </header>
 
         <div class="app-layout">
-            <!-- Боковая панель с диалогами -->
             <aside class="sidebar card" id="sidebar">
                 <button class="new-chat-btn" id="newChatBtn">
                     <i class="fas fa-plus"></i> Новый чат
                 </button>
                 <div class="dialog-list" id="dialogList">
-                    <!-- Заглушка, позже скрипт будет грузить сюда чаты из БД -->
                     <div class="dialog-item active" data-id="local">Гостевой диалог</div>
                 </div>
             </aside>
 
-            <!-- Основная область чата -->
             <main class="card chat-section">
                 <div class="chat-header">
                     <i class="fas fa-robot"></i>
@@ -67,6 +64,13 @@
                             <option value="Charon">Charon (Эксперт)</option>
                         </select>
                     </div>
+                    <!-- Новые кнопки для видео -->
+                    <button id="camera-btn" class="microphone-btn" title="Трансляция камеры">
+                        <i class="fas fa-video"></i>
+                    </button>
+                    <button id="screen-btn" class="microphone-btn" title="Трансляция экрана">
+                        <i class="fas fa-desktop"></i>
+                    </button>
                     <button id="microphone-btn" class="microphone-btn">
                         <i class="fas fa-microphone"></i>
                         <span>Включить микрофон</span>
@@ -104,12 +108,15 @@
         </footer>
     </div>
 
+    <!-- Скрытые элементы для захвата видео -->
+    <video id="hidden-video" style="display:none;" autoplay playsinline muted></video>
+    <canvas id="hidden-canvas" style="display:none;"></canvas>
+
     <div class="notification" id="notification">
         <i class="fas fa-check-circle"></i>
         <span id="notification-text"></span>
     </div>
     
-    <!-- Модальные окна -->
     <div id="registerModal" class="modal">
       <div class="modal-content">
         <div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div>
