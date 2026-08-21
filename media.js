@@ -15,6 +15,11 @@ const ctx = hiddenCanvas.getContext('2d');
 const cameraBtn = document.getElementById('camera-btn');
 const screenBtn = document.getElementById('screen-btn');
 
+cameraBtn.addEventListener('click', () => toggleVideoSource('camera'));
+screenBtn.addEventListener('click', () => toggleVideoSource('screen'));
+
+document.getElementById('close-video-btn').addEventListener('click', stopVideoStream);
+
 async function stopVideoStream() {
     if (videoStream) {
         videoStream.getTracks().forEach(track => track.stop());

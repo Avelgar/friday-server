@@ -77,10 +77,11 @@
                 </div>
                 
                 <div class="chat-messages" id="chatMessages"></div>
-
-                <!-- Обновленный контейнер для видео (с центрированием) -->
-                <div id="video-preview-container" style="display: none; justify-content: center; align-items: center; background: #1a1a1a; padding: 10px; border-radius: 8px 8px 0 0; margin-top: 10px; border-bottom: 1px solid #333;">
+                <div id="video-preview-container" style="display: none; position: relative; justify-content: center; align-items: center; background: #1a1a1a; padding: 10px; border-radius: 8px 8px 0 0; margin-top: 10px; border-bottom: 1px solid #333;">
                     <video id="live-video" style="max-height: 200px; max-width: 100%; border-radius: 8px; object-fit: contain; transition: transform 0.3s ease;" autoplay playsinline muted></video>
+                    
+                    <!-- Кнопка закрытия -->
+                    <button id="close-video-btn" style="position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; font-size: 18px; display: flex; justify-content: center; align-items: center;" title="Остановить трансляцию">&times;</button>
                 </div>
                 
                 <div class="chat-input" style="border-radius: 0 0 8px 8px;">
