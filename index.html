@@ -3,14 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    
     <title>Friday Assistant - Ваш персональный ИИ-помощник</title>
     <meta name="description" content="Friday Assistant — персональный AI-помощник на базе Gemini для управления компьютером и телефоном с помощью голосовых команд.">
-    <meta name="keywords" content="ИИ помощник, голосовой ассистент, управление ПК голосом, Gemini AI, Jarvis, Джарвис, Пятница">
     <meta name="theme-color" content="#6A3D8B">
-    
     <link rel="icon" type="image/x-icon" href="images/f.png">
-    <link rel="apple-touch-icon" href="images/f.png">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
 </head>
@@ -80,12 +76,11 @@
                     </button>
                 </div>
                 
-                <div class="chat-messages" id="chatMessages">
-                </div>
+                <div class="chat-messages" id="chatMessages"></div>
 
-                <!-- Блок для отображения камеры/экрана -->
-                <div id="video-preview-container" style="display: none; padding: 10px; background: #000; text-align: center; border-radius: 8px 8px 0 0; margin-top: 10px;">
-                    <video id="live-video" style="max-height: 150px; border-radius: 8px;" autoplay playsinline muted></video>
+                <!-- Обновленный контейнер для видео (с центрированием) -->
+                <div id="video-preview-container" style="display: none; justify-content: center; align-items: center; background: #1a1a1a; padding: 10px; border-radius: 8px 8px 0 0; margin-top: 10px; border-bottom: 1px solid #333;">
+                    <video id="live-video" style="max-height: 200px; max-width: 100%; border-radius: 8px; object-fit: contain; transition: transform 0.3s ease;" autoplay playsinline muted></video>
                 </div>
                 
                 <div class="chat-input" style="border-radius: 0 0 8px 8px;">
@@ -106,58 +101,22 @@
                 </div>
             </main>
         </div>
-
-        <footer>
-            <p>© 2026 Friday Assistant. Все права защищены.</p>
-        </footer>
+        <footer><p>© 2026 Friday Assistant. Все права защищены.</p></footer>
     </div>
 
     <!-- Скрытый канвас для захвата кадров -->
     <canvas id="hidden-canvas" style="display:none;"></canvas>
 
-    <div class="notification" id="notification">
-        <i class="fas fa-check-circle"></i>
-        <span id="notification-text"></span>
-    </div>
+    <div class="notification" id="notification"><i class="fas fa-check-circle"></i><span id="notification-text"></span></div>
     
-    <div id="registerModal" class="modal">
-      <div class="modal-content">
-        <div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div>
-        <form id="registerForm">
-          <div class="form-group"><label for="regEmail">Email:</label><input type="email" id="regEmail" required></div>
-          <div class="form-group"><label for="regLogin">Логин:</label><input type="text" id="regLogin" required></div>
-          <div class="form-group"><label for="regPassword">Пароль:</label><input type="password" id="regPassword" required></div>
-          <div class="form-group"><label for="regPasswordConfirm">Подтвердите пароль:</label><input type="password" id="regPasswordConfirm" required></div>
-          <button type="submit" class="modal-btn">Зарегистрироваться</button>
-          <div id="registerResponse" class="response-message"></div>
-        </form>
-      </div>
-    </div>
+    <!-- Модалки (Регистрация, Вход, Восстановление) -->
+    <div id="registerModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div><form id="registerForm"><div class="form-group"><label for="regEmail">Email:</label><input type="email" id="regEmail" required></div><div class="form-group"><label for="regLogin">Логин:</label><input type="text" id="regLogin" required></div><div class="form-group"><label for="regPassword">Пароль:</label><input type="password" id="regPassword" required></div><div class="form-group"><label for="regPasswordConfirm">Подтвердите пароль:</label><input type="password" id="regPasswordConfirm" required></div><button type="submit" class="modal-btn">Зарегистрироваться</button><div id="registerResponse" class="response-message"></div></form></div></div>
+    <div id="loginModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Вход</h2><span class="modal-close">&times;</span></div><form id="loginForm"><div class="form-group"><label for="loginEmail">Email или логин:</label><input type="text" id="loginEmail" required></div><div class="form-group"><label for="loginPassword">Пароль:</label><input type="password" id="loginPassword" required></div><button type="submit" class="modal-btn">Войти</button><div class="recovery-link"><a href="#" id="forgotPassword">Забыли пароль?</a></div><div id="loginResponse" class="response-message"></div></form></div></div>
+    <div id="recoveryModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Восстановление пароля</h2><span class="recovery-close">&times;</span></div><form id="recoveryForm"><div class="form-group"><label for="recoveryEmail">Email:</label><input type="email" id="recoveryEmail" required></div><button type="submit" class="modal-btn">Восстановить пароль</button><div id="recoveryResponse" class="response-message"></div></form></div></div>
 
-    <div id="loginModal" class="modal">
-      <div class="modal-content">
-        <div class="modal-header"><h2>Вход</h2><span class="modal-close">&times;</span></div>
-        <form id="loginForm">
-          <div class="form-group"><label for="loginEmail">Email или логин:</label><input type="text" id="loginEmail" required></div>
-          <div class="form-group"><label for="loginPassword">Пароль:</label><input type="password" id="loginPassword" required></div>
-          <button type="submit" class="modal-btn">Войти</button>
-          <div class="recovery-link"><a href="#" id="forgotPassword">Забыли пароль?</a></div>
-          <div id="loginResponse" class="response-message"></div>
-        </form>
-      </div>
-    </div>
-        
-    <div id="recoveryModal" class="modal">
-      <div class="modal-content">
-        <div class="modal-header"><h2>Восстановление пароля</h2><span class="recovery-close">&times;</span></div>
-        <form id="recoveryForm">
-          <div class="form-group"><label for="recoveryEmail">Email:</label><input type="email" id="recoveryEmail" required></div>
-          <button type="submit" class="modal-btn">Восстановить пароль</button>
-          <div id="recoveryResponse" class="response-message"></div>
-        </form>
-      </div>
-    </div>
-
-    <script src="script.js"></script>
+    <!-- Подключаем скрипты по частям -->
+    <script src="app.js"></script>
+    <script src="ui.js"></script>
+    <script src="media.js"></script>
 </body>
 </html>

@@ -11,7 +11,9 @@ def do_GET(self):
 
     if path == '/': self.serve_file('index.html', 'text/html; charset=utf-8')
     elif path == '/style.css': self.serve_file('style.css', 'text/css; charset=utf-8')
-    elif path == '/script.js': self.serve_file('script.js', 'application/javascript; charset=utf-8') 
+    elif path == '/app.js': self.serve_file('app.js', 'application/javascript; charset=utf-8')
+    elif path == '/ui.js': self.serve_file('ui.js', 'application/javascript; charset=utf-8') 
+    elif path == '/media.js': self.serve_file('media.js', 'application/javascript; charset=utf-8') 
     elif path == '/image': self.serve_file('image.html', 'text/html; charset=utf-8')
     elif path == '/images/f.png': self.serve_file('images/f.png', 'image/png')
     elif path == '/download-windows':
