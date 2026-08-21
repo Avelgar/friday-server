@@ -59,6 +59,10 @@ async def websocket_handler(websocket):
                     asyncio.create_task(handle_command(websocket, data))
                 elif "command_to_device" in data: 
                     asyncio.create_task(handle_target_command(websocket, data))
+                elif data.get('type') == 'video_stream_chunk':
+                    from app.websocket_server.handlers_cmds import handle_video_chunk
+                    logger.info("🎥 Получен кадр видео от клиента!")
+                    await handle_video_chunk(websocket, data)
                 elif data.get("type") == "web_client_auth": 
                     await handle_web_client_auth(websocket, data)
                 elif data.get("type") == "account_sync": 

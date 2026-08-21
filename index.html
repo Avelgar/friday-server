@@ -64,7 +64,6 @@
                             <option value="Charon">Charon (Эксперт)</option>
                         </select>
                     </div>
-                    <!-- Новые кнопки для видео -->
                     <button id="camera-btn" class="microphone-btn" title="Трансляция камеры">
                         <i class="fas fa-video"></i>
                     </button>
@@ -83,8 +82,13 @@
                 
                 <div class="chat-messages" id="chatMessages">
                 </div>
+
+                <!-- Блок для отображения камеры/экрана -->
+                <div id="video-preview-container" style="display: none; padding: 10px; background: #000; text-align: center; border-radius: 8px 8px 0 0; margin-top: 10px;">
+                    <video id="live-video" style="max-height: 150px; border-radius: 8px;" autoplay playsinline muted></video>
+                </div>
                 
-                <div class="chat-input">
+                <div class="chat-input" style="border-radius: 0 0 8px 8px;">
                     <div class="chat-input-wrapper">
                         <div class="file-input-wrapper">
                             <input type="file" id="file-upload" accept=".png,.jpg,.jpeg">
@@ -108,8 +112,7 @@
         </footer>
     </div>
 
-    <!-- Скрытые элементы для захвата видео -->
-    <video id="hidden-video" style="display:none;" autoplay playsinline muted></video>
+    <!-- Скрытый канвас для захвата кадров -->
     <canvas id="hidden-canvas" style="display:none;"></canvas>
 
     <div class="notification" id="notification">

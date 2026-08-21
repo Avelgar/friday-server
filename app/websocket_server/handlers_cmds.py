@@ -13,7 +13,6 @@ from app.websocket_server.utils import async_send, get_device_type, get_accessib
 logger = logging.getLogger("WS_Server")
 
 HISTORY_LIMIT = 10 
-# Очередь переименована для поддержки и аудио, и видео
 active_media_queues = {} 
 
 ACTION_DESCRIPTIONS = {
@@ -71,7 +70,6 @@ async def handle_audio_chunk(websocket, data):
         chunk = base64.b64decode(data.get("audio_base64", ""))
         active_media_queues[ui_msg_id].put_nowait({"type": "audio", "data": chunk})
 
-# ДОБАВЛЕН НОВЫЙ ХЕНДЛЕР: Обязательно пропиши его в роутере вебсокетов!
 async def handle_video_chunk(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
     if ui_msg_id in active_media_queues:
@@ -572,9 +570,10 @@ async def handle_target_command(websocket, data):
 
                     target_id = target_device_info['id']
                     target_mac = target_device_info['mac']
+                    # ИСПРАВЛЕНИЕ ОШИБКИ ЗДЕСЬ (было is_sender)
                     is_source = (target_id == source_id)
                     device_spoken_text = " ".join([a.get('action_value', '') for a in actions if a.get('action_type') in ["голосовой ответ", "текстовой ответ"]])
-                    target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if (not is_sender and device_spoken_text.strip()) else None
+                    target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if (not is_source and device_spoken_text.strip()) else None
 
                     target_ws = mac_to_websocket.get(target_mac)
                     if target_ws:

@@ -15,7 +15,8 @@ let currentDialogId = null;
 let videoStream = null;
 let currentVideoSource = null; // 'camera', 'screen', or null
 let videoInterval = null;
-const hiddenVideo = document.getElementById('hidden-video');
+const liveVideo = document.getElementById('live-video');
+const videoPreviewContainer = document.getElementById('video-preview-container');
 const hiddenCanvas = document.getElementById('hidden-canvas');
 const ctx = hiddenCanvas.getContext('2d');
 // ====================================================================
@@ -492,7 +493,8 @@ document.addEventListener('DOMContentLoaded', async function() {
             videoStream.getTracks().forEach(track => track.stop());
             videoStream = null;
         }
-        hiddenVideo.srcObject = null;
+        liveVideo.srcObject = null;
+        videoPreviewContainer.style.display = 'none';
         currentVideoSource = null;
         cameraBtn.classList.remove('active');
         screenBtn.classList.remove('active');
@@ -518,8 +520,8 @@ document.addEventListener('DOMContentLoaded', async function() {
                 videoStream.getVideoTracks()[0].addEventListener('ended', stopVideoStream);
             }
             currentVideoSource = sourceType;
-            hiddenVideo.srcObject = videoStream;
-            hiddenVideo.play();
+            liveVideo.srcObject = videoStream;
+            videoPreviewContainer.style.display = 'block';
         } catch (err) {
             console.error("Video error:", err);
             showNotification('Ошибка доступа к ' + (sourceType==='camera' ? 'камере' : 'экрану'), 'error');
@@ -530,26 +532,34 @@ document.addEventListener('DOMContentLoaded', async function() {
     cameraBtn.addEventListener('click', () => toggleVideoSource('camera'));
     screenBtn.addEventListener('click', () => toggleVideoSource('screen'));
 
-    function captureAndSendVideoFrame() {
-        // Отправляем кадры, ТОЛЬКО когда есть открытая сессия Gemini (микрофон ловит звук / идет стрим)
-        if (!currentVideoSource || !videoStream || !activeStreamMsgId) return;
-        if (!websocketConnection || websocketConnection.readyState !== WebSocket.OPEN) return;
-
-        const w = hiddenVideo.videoWidth;
-        const h = hiddenVideo.videoHeight;
-        if (w === 0 || h === 0) return;
+    // Фукнция для моментального захвата 1 кадра (Canvas -> Base64)
+    function captureSingleFrame() {
+        if (!currentVideoSource || !videoStream) return null;
+        const w = liveVideo.videoWidth;
+        const h = liveVideo.videoHeight;
+        if (w === 0 || h === 0) return null;
 
         hiddenCanvas.width = w;
         hiddenCanvas.height = h;
-        ctx.drawImage(hiddenVideo, 0, 0, w, h);
+        ctx.drawImage(liveVideo, 0, 0, w, h);
         
-        const base64Image = hiddenCanvas.toDataURL('image/jpeg', 0.5).split(',')[1];
-        
-        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ 
-            type: 'video_stream_chunk', 
-            video_base64: base64Image, 
-            ui_msg_id: activeStreamMsgId 
-        })))));
+        // Возвращаем Base64 строку без префикса "data:image/jpeg;base64,"
+        return hiddenCanvas.toDataURL('image/jpeg', 0.5).split(',')[1];
+    }
+
+    // Отправка кадра в активный вебсокет (во время диктовки)
+    function sendWSVideoFrame() {
+        if (!currentVideoSource || !activeStreamMsgId) return;
+        if (!websocketConnection || websocketConnection.readyState !== WebSocket.OPEN) return;
+
+        const base64Image = captureSingleFrame();
+        if (base64Image) {
+            websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ 
+                type: 'video_stream_chunk', 
+                video_base64: base64Image, 
+                ui_msg_id: activeStreamMsgId 
+            })))));
+        }
     }
 
 
@@ -613,7 +623,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                         chunkInterval = setInterval(sendStreamChunk, 250);
                         // Запускаем отправку кадров (1 раз в секунду)
                         if (currentVideoSource && !videoInterval) {
-                            videoInterval = setInterval(captureAndSendVideoFrame, 1000);
+                            videoInterval = setInterval(sendWSVideoFrame, 1000);
                         }
                     }
                 }
@@ -624,6 +634,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                     if (silenceFrames > SILENCE_FRAMES) {
                         vadState = 'processing';
                         if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
+                        
                         if (useRealtime) {
                             clearInterval(chunkInterval); sendStreamChunk(); 
                             websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'audio_stream_end', ui_msg_id: activeStreamMsgId })))));
@@ -631,6 +642,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                         } else {
                             updatePendingBubble('⏳ Транскрибирую...');
                             const pcm16 = new Int16Array(pcmBuffer); pcmBuffer = []; preBuffer = [];
+                            // Для гостей по HTTP: делаем снимок с видео в момент завершения фразы
                             sendToServer("", "голосовое сообщение", bufferToBase64(pcm16.buffer), activeStreamMsgId, false);
                             activeStreamMsgId = null;
                         }
@@ -661,6 +673,7 @@ document.addEventListener('DOMContentLoaded', async function() {
                 if (vadState === 'recording') {
                     vadState = 'processing';
                     if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
+                    
                     if (websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
                         clearInterval(chunkInterval); sendStreamChunk();
                         websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'audio_stream_end', ui_msg_id: activeStreamMsgId })))));
@@ -689,6 +702,9 @@ document.addEventListener('DOMContentLoaded', async function() {
             const selectedVoice = document.getElementById('voice-type').value;
             const finalUiMsgId = ui_msg_id || Date.now().toString();
             
+            // Если включена камера, пытаемся сделать снимок
+            let frameBase64 = currentVideoSource ? captureSingleFrame() : null;
+            
             if (token && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
                 const requestData = { 
                     type: 'web_command', command: prompt, audio_base64: audio_base64, 
@@ -696,16 +712,45 @@ document.addEventListener('DOMContentLoaded', async function() {
                     voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId, 
                     stream_audio: stream_audio, dialog_id: currentDialogId
                 };
-                if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData))))); currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = ''; }; r.readAsDataURL(currentFile); } 
-                else websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
+                
+                // Если есть загруженный файл
+                if (currentFile) { 
+                    const r = new FileReader(); 
+                    r.onload = function() { 
+                        requestData.screenshot = r.result.split(',')[1]; 
+                        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData))))); 
+                        currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = ''; 
+                    }; 
+                    r.readAsDataURL(currentFile); 
+                } 
+                else {
+                    // Иначе, если у нас НЕ СТРИМ, но включена камера, шлем снимок камеры
+                    if (!stream_audio && frameBase64) {
+                        requestData.screenshot = frameBase64;
+                    }
+                    websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData)))));
+                }
             } else {
+                // ДЛЯ ГОСТЕЙ (HTTP POST)
                 const requestData = { 
                     prompt: prompt, audio_base64: audio_base64, bot_name: "Пятница", 
                     voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId,
                     dialog_id: currentDialogId, token: token 
                 };
                 if (!token) requestData.message_history = messageHistory; 
-                if (currentFile) { const r = new FileReader(); r.onload = function() { requestData.screenshot = r.result.split(',')[1]; sendFetchRequest(requestData); }; r.readAsDataURL(currentFile); } else sendFetchRequest(requestData);
+                
+                if (currentFile) { 
+                    const r = new FileReader(); 
+                    r.onload = function() { 
+                        requestData.screenshot = r.result.split(',')[1]; 
+                        sendFetchRequest(requestData); 
+                    }; 
+                    r.readAsDataURL(currentFile); 
+                } else {
+                    // Вставляем скриншот с камеры в HTTP-запрос, если камера включена
+                    if (frameBase64) requestData.screenshot = frameBase64;
+                    sendFetchRequest(requestData);
+                }
             }
         } catch (error) { showNotification('Ошибка', 'error'); vadState = 'idle'; removePendingBubble(); }
     }
@@ -725,7 +770,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     }
 
     document.getElementById('sendMessage').addEventListener('click', function() {
-        const message = document.getElementById('messageInput').value.trim(); if (!message && !currentFile) return;
+        const message = document.getElementById('messageInput').value.trim(); 
+        if (!message && !currentFile && !currentVideoSource) return;
+        
         document.getElementById('messageInput').style.height = 'auto'; const uiMsgId = Date.now().toString();
         if (message) addMessage('user', message, false, uiMsgId); document.getElementById('messageInput').value = ''; document.getElementById('imagePreviewContainer').style.display = 'none';
         sendToServer(message, "текстовое сообщение", null, uiMsgId, false);
