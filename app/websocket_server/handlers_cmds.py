@@ -352,7 +352,7 @@ async def handle_command(websocket, data):
             else:
                 if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
-        lif sender_ws:
+        elif sender_ws:
             await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Первичный цикл завершен.\n" + "="*50)
