@@ -444,7 +444,6 @@ class AIService:
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription:
-                                logger.info(f"[USER TRANSCRIPTION]: {sc.input_transcription.text}")
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
                             if sc.output_transcription:
                                 has_yielded_data = True
