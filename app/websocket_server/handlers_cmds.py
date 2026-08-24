@@ -35,7 +35,12 @@ ACTION_DESCRIPTIONS = {
     "выключить режим камеры": "любой текст",
     "выключить микрофон": "любой текст (доступно только на веб-сайте)",
     "голосовой ответ": "текст для озвучивания (используй ТОЛЬКО для отправки фразы на УДАЛЕННОЕ устройство, с локальным говори просто так)",
-    "название диалога": "краткое название для текущего диалога (1-3 слова). Обязательно вызови это при старте нового чата."
+    "название диалога": "краткое название для текущего диалога (1-3 слова). Обязательно вызови это при старте нового чата.",
+    
+    # --- ДОБАВЛЕННЫЕ ВОЗМОЖНОСТИ МАЛИНЫ ---
+    "смена имени": "любой текст (новое имя для бота)",
+    "движение": "строго одно из: 'вперед', 'назад', 'влево', 'вправо'",
+    "разбудить": "любой текст (отправляет WOL пакет для включения ПК по сети)"
 }
 
 BASE_PC = [
@@ -55,6 +60,10 @@ BASE_WEB = [
     "смена голоса", "выключить микрофон", "очистка истории", "check_network_devices"
 ]
 
+# --- ДОБАВЛЕН СПИСОК МАЛИНЫ ---
+BASE_PI = [
+    "музыка", "очистка истории", "смена имени", "движение", "разбудить", "check_network_devices", "голосовой ответ"
+]
 # =========================================================================
 # УПРАВЛЕНИЕ ОЧЕРЕДЬЮ АУДИО (Исключает наложение звука на клиенте)
 # =========================================================================
@@ -196,9 +205,14 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
-        if device_type == 'компьютер': base_acts = list(BASE_PC)
-        elif device_type == 'телефон': base_acts = list(BASE_PHONE)
-        else: base_acts = list(BASE_WEB)
+        if device_type == 'компьютер': 
+            base_acts = list(BASE_PC)
+        elif device_type == 'телефон': 
+            base_acts = list(BASE_PHONE)
+        elif mac.lower() == 'b8:27:eb:00:51:06' or 'pibot' in sender_name.lower(): 
+            base_acts = list(BASE_PI)
+        else: 
+            base_acts = list(BASE_WEB)
 
         if dialog_id and "очистка истории" in base_acts:
             base_acts.remove("очистка истории")
@@ -476,8 +490,18 @@ async def handle_target_command(websocket, data):
 
             is_local = (executor_device['id'] == source_device_info['id'])
             target_device_type = get_device_type(executor_device['mac'])
+            target_mac = executor_device['mac'].lower()
+            target_name = executor_device['device_name'].lower()
             
-            allowed_acts = list(BASE_PC) if target_device_type == 'компьютер' else list(BASE_PHONE)
+            if target_device_type == 'компьютер': 
+                allowed_acts = list(BASE_PC)
+            elif target_device_type == 'телефон': 
+                allowed_acts = list(BASE_PHONE)
+            elif target_mac == 'b8:27:eb:00:51:06' or 'pibot' in target_name: 
+                allowed_acts = list(BASE_PI)
+            else: 
+                allowed_acts = list(BASE_WEB)
+            
             if "check_network_devices" in allowed_acts:
                 allowed_acts.remove("check_network_devices") 
             if dialog_id and "очистка истории" in allowed_acts:
