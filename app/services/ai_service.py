@@ -321,6 +321,14 @@ class AIService:
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
 
+        # ОТКЛЮЧАЕМ ВСЕ ФИЛЬТРЫ БЕЗОПАСНОСТИ, ЧТОБЫ ИИ НЕ МОЛЧАЛ
+        safety_settings = [
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        ]
+
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
@@ -363,6 +371,7 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
+                    safety_settings=safety_settings, # ВНЕДРИЛИ ФИЛЬТРЫ
                     input_audio_transcription={},
                     output_audio_transcription={},
                     realtime_input_config=types.RealtimeInputConfig(
@@ -392,8 +401,6 @@ class AIService:
                         has_sent_activity_start = False
                         bytes_received = 0
                         bytes_sent = 0
-                        first_chunk_time = None
-                        last_chunk_time = None
 
                         try:
                             if prompt_text:
@@ -411,9 +418,6 @@ class AIService:
                                     if item["type"] == "audio" and len(item["data"]) > 0:
                                         chunk = item["data"]
                                         bytes_received += len(chunk)
-                                        current_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-                                        if first_chunk_time is None: first_chunk_time = current_time
-                                        last_chunk_time = current_time
 
                                         if not has_sent_activity_start:
                                             await session.send_realtime_input(activity_start=types.ActivityStart())
@@ -423,12 +427,10 @@ class AIService:
                                         bytes_sent += len(chunk)
                                         
                                     elif item["type"] == "video" and len(item["data"]) > 0:
-                                        frame_bytes = item["data"]
-                                        # Кадры шлем как есть, они не требуют activity_start
-                                        await session.send_realtime_input(video=types.Blob(data=frame_bytes, mime_type="image/jpeg"))
+                                        await session.send_realtime_input(video=types.Blob(data=item["data"], mime_type="image/jpeg"))
                                         
                                 except asyncio.TimeoutError:
-                                    logger.warning(f"[API STREAM DEBUG] Очередь пуста (таймаут). Получено: {bytes_received}, Отправлено: {bytes_sent}")
+                                    # Если мы уже начали говорить, но клиент оборвал поток
                                     if has_sent_activity_start:
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
                                     break
@@ -439,20 +441,26 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
+                        # ТАЙМАУТ: Если ИИ молчит больше 20 секунд - прерываем
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
                         
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription:
+                                logger.info(f"[USER TRANSCRIPTION]: {sc.input_transcription.text}")
+                                has_yielded_data = True  # Мы получили транскрипцию, ключ работает, перебирать дальше нельзя!
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
+                            
                             if sc.output_transcription:
                                 has_yielded_data = True
                                 yield {"type": "bot_text", "text": sc.output_transcription.text}
+                                
                             if sc.model_turn:
                                 for part in sc.model_turn.parts:
                                     if part.inline_data:
                                         has_yielded_data = True
                                         yield {"type": "audio", "data": part.inline_data.data}
+                                        
                             if sc.turn_complete:
                                 logger.info("[API] Модель завершила реплику.")
                                 break
@@ -473,6 +481,8 @@ class AIService:
                             await session.send_tool_response(function_responses=function_responses)
                             
                 except (asyncio.TimeoutError, TimeoutError):
+                    logger.warning("[API] Таймаут получения данных от Gemini (receive)")
+                    # Если мы уже получили хотя бы транскрипцию, просто выходим (клиент разблокируется)
                     if has_yielded_data:
                         return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
@@ -487,7 +497,10 @@ class AIService:
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                if has_yielded_data: return
+                # Если с этого ключа мы уже получили хоть что-то (например STT) - выходим, не трогаем другие ключи
+                if has_yielded_data: 
+                    return
+                    
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
                 else: break

@@ -183,26 +183,31 @@ async function startMicStream() {
                 }
             }
         } else if (vadState === 'recording') {
-            pcmBuffer.push(...pcm);
-            if (volume < VAD_THRESHOLD) {
-                silenceFrames += pcm.length;
-                if (silenceFrames > SILENCE_FRAMES) {
-                    vadState = 'processing';
-                    if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
-                    
-                    if (useRealtime) {
-                        clearInterval(chunkInterval); sendStreamChunk(); 
-                        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'audio_stream_end', ui_msg_id: activeStreamMsgId })))));
-                        updatePendingBubble('⏳ Транскрибирую...'); activeStreamMsgId = null; preBuffer = [];
-                    } else {
-                        updatePendingBubble('⏳ Транскрибирую...');
-                        const pcm16 = new Int16Array(pcmBuffer); pcmBuffer = []; preBuffer = [];
-                        sendToServer("", "голосовое сообщение", bufferToBase64(pcm16.buffer), activeStreamMsgId, false);
-                        activeStreamMsgId = null;
+                pcmBuffer.push(...pcm);
+                if (volume < VAD_THRESHOLD) {
+                    silenceFrames += pcm.length;
+                    if (silenceFrames > SILENCE_FRAMES) {
+                        vadState = 'processing';
+                        
+                        // === ДОБАВЛЕНО: ЖЕСТКАЯ БЛОКИРОВКА ===
+                        isPlaying = true; // Обманываем скрипт, чтобы микрофон игнорил звуки
+                        // ===================================
+
+                        if (videoInterval) { clearInterval(videoInterval); videoInterval = null; }
+                        
+                        if (useRealtime) {
+                            clearInterval(chunkInterval); sendStreamChunk(); 
+                            websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'audio_stream_end', ui_msg_id: activeStreamMsgId })))));
+                            updatePendingBubble('⏳ Транскрибирую...'); activeStreamMsgId = null; preBuffer = [];
+                        } else {
+                            updatePendingBubble('⏳ Транскрибирую...');
+                            const pcm16 = new Int16Array(pcmBuffer); pcmBuffer = []; preBuffer = [];
+                            sendToServer("", "голосовое сообщение", bufferToBase64(pcm16.buffer), activeStreamMsgId, false);
+                            activeStreamMsgId = null;
+                        }
                     }
-                }
-            } else silenceFrames = 0;
-        }
+                } else silenceFrames = 0;
+            }
     };
 }
     

@@ -191,8 +191,17 @@ function handleIncomingStreamData(data) {
     }
 
     if (data.type === 'new_message') {
-        if (vadState === 'processing') vadState = 'idle';
         const msgId = data.message_id || data.ui_msg_id;
+        
+        // Проверяем, является ли это сообщение финальным (пустой текст и нет действий)
+        const isFinal = !data.text && (!data.actions || data.actions.length === 0);
+        
+        if (isFinal) {
+            // === СНИМАЕМ ЖЕСТКУЮ БЛОКИРОВКУ МИКРОФОНА ===
+            isPlaying = false; 
+            vadState = 'idle';
+        }
+
         if (data.text && msgId !== ignoredMessageId) {
             const bubbleId = msgId ? 'msg_' + msgId : null;
             let existingBubble = bubbleId ? document.getElementById(bubbleId) : null;
@@ -206,8 +215,14 @@ function handleIncomingStreamData(data) {
         }
     }
 
-    if (data.type === 'delete_message') removePendingBubble();
-    if (data.type === 'audio_chunk') playPCM24kHz(data.audio_base64); // Вызов из media.js
+    if (data.type === 'delete_message') {
+        removePendingBubble();
+        // === СНИМАЕМ БЛОКИРОВКУ ДАЖЕ ЕСЛИ ПРОИЗОШЕЛ ТАЙМАУТ ===
+        isPlaying = false; 
+        vadState = 'idle';
+    }
+
+    if (data.type === 'audio_chunk') playPCM24kHz(data.audio_base64);
     if (data.type === 'notification') showNotification(data.message, data.level || 'info');
 }
 
