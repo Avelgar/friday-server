@@ -207,7 +207,6 @@ class AIService:
                     )
                 )
                 
-                # Подключение истории через Gemini 3.1 Live API
                 if formatted_history:
                     config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
 
@@ -321,14 +320,6 @@ class AIService:
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
 
-        # ОТКЛЮЧАЕМ ВСЕ ФИЛЬТРЫ БЕЗОПАСНОСТИ, ЧТОБЫ ИИ НЕ МОЛЧАЛ
-        safety_settings = [
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        ]
-
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
             self._rotate_key()
@@ -371,7 +362,6 @@ class AIService:
                     speech_config=types.SpeechConfig(
                         voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                     ),
-                    safety_settings=safety_settings, # ВНЕДРИЛИ ФИЛЬТРЫ
                     input_audio_transcription={},
                     output_audio_transcription={},
                     realtime_input_config=types.RealtimeInputConfig(
