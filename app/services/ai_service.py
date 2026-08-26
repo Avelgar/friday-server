@@ -295,7 +295,14 @@ class AIService:
                     raise Exception("Таймаут получения данных от Gemini (receive)")
                 except StopAsyncIteration: pass
                 finally:
-                    if sender_task: sender_task.cancel()
+                    if sender_task:
+                        sender_task.cancel()
+                        try:
+                            await sender_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            pass
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
@@ -313,12 +320,17 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА (ТЕПЕРЬ С ПРАВИЛЬНЫМ КОНТЕКСТОМ)
+    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С БУФЕРИЗАЦИЕЙ ПАДЕНИЙ КЛЮЧЕЙ
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, media_queue, formatted_history=None, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
+
+        # ЛОКАЛЬНЫЙ КЭШ. Живет только в рамках этого вызова. Очистится сам при return.
+        session_audio_cache = bytearray()
+        last_video_frame = None
+        has_reached_stream_end = False
 
         total_keys_tried = 0
         while total_keys_tried < len(self.api_keys):
@@ -388,42 +400,58 @@ class AIService:
                         await session.send_client_content(turns=formatted_history, turn_complete=True)
                     
                     async def send_input_task():
+                        # Используем nonlocal, чтобы изменять переменные, объявленные выше
+                        nonlocal session_audio_cache, last_video_frame, has_reached_stream_end
                         has_sent_activity_start = False
-                        bytes_received = 0
-                        bytes_sent = 0
 
                         try:
                             if prompt_text:
                                 await session.send_realtime_input(text=prompt_text)
 
-                            while True:
-                                try:
-                                    item = await asyncio.wait_for(media_queue.get(), timeout=3.0)
-                                    if item is None:
-                                        logger.info(f"[STREAM DEBUG] Клиент прислал stream_end (None). Получено: {bytes_received}, Отправлено: {bytes_sent}")
+                            # 1. ОТПРАВЛЯЕМ КЭШ, ЕСЛИ ЭТО ПОВТОРНАЯ ПОПЫТКА С НОВЫМ КЛЮЧОМ
+                            if session_audio_cache:
+                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                has_sent_activity_start = True
+                                await session.send_realtime_input(audio=types.Blob(data=bytes(session_audio_cache), mime_type="audio/pcm;rate=16000"))
+                                logger.info(f"[CACHE] Переотправлен закэшированный звук ({len(session_audio_cache)} байт).")
+
+                            if last_video_frame:
+                                await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
+
+                            # 2. ЕСЛИ КЛИЕНТ УЖЕ ЗАКОНЧИЛ ГОВОРИТЬ РАНЕЕ, ПРОСТО ШЛЕМ END
+                            if has_reached_stream_end:
+                                if has_sent_activity_start:
+                                    await session.send_realtime_input(activity_end=types.ActivityEnd())
+                            
+                            # 3. ЕСЛИ КЛИЕНТ ЕЩЕ ГОВОРИТ, ПРОДОЛЖАЕМ ЧИТАТЬ ОЧЕРЕДЬ
+                            else:
+                                while True:
+                                    try:
+                                        item = await asyncio.wait_for(media_queue.get(), timeout=3.0)
+                                        if item is None:
+                                            has_reached_stream_end = True
+                                            if has_sent_activity_start:
+                                                await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                            break
+                                            
+                                        if item["type"] == "audio" and len(item["data"]) > 0:
+                                            chunk = item["data"]
+                                            session_audio_cache.extend(chunk) # <--- СОХРАНЯЕМ В КЭШ
+
+                                            if not has_sent_activity_start:
+                                                await session.send_realtime_input(activity_start=types.ActivityStart())
+                                                has_sent_activity_start = True
+
+                                            await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                            
+                                        elif item["type"] == "video" and len(item["data"]) > 0:
+                                            last_video_frame = item["data"] # <--- ОБНОВЛЯЕМ ПОСЛЕДНИЙ КАДР В КЭШЕ
+                                            await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
+                                            
+                                    except asyncio.TimeoutError:
                                         if has_sent_activity_start:
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
-                                        
-                                    if item["type"] == "audio" and len(item["data"]) > 0:
-                                        chunk = item["data"]
-                                        bytes_received += len(chunk)
-
-                                        if not has_sent_activity_start:
-                                            await session.send_realtime_input(activity_start=types.ActivityStart())
-                                            has_sent_activity_start = True
-
-                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
-                                        bytes_sent += len(chunk)
-                                        
-                                    elif item["type"] == "video" and len(item["data"]) > 0:
-                                        await session.send_realtime_input(video=types.Blob(data=item["data"], mime_type="image/jpeg"))
-                                        
-                                except asyncio.TimeoutError:
-                                    # Если мы уже начали говорить, но клиент оборвал поток
-                                    if has_sent_activity_start:
-                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                    break
                         except Exception as e:
                             logger.error(f"[API STREAM ERROR] {e}")
 
@@ -431,14 +459,13 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        # ТАЙМАУТ: Если ИИ молчит больше 20 секунд - прерываем
                         response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
                         
                         sc = response.server_content
                         if sc:
                             if sc.input_transcription:
                                 logger.info(f"[USER TRANSCRIPTION]: {sc.input_transcription.text}")
-                                has_yielded_data = True  # Мы получили транскрипцию, ключ работает, перебирать дальше нельзя!
+                                has_yielded_data = True
                                 yield {"type": "user_text", "text": sc.input_transcription.text}
                             
                             if sc.output_transcription:
@@ -472,13 +499,19 @@ class AIService:
                             
                 except (asyncio.TimeoutError, TimeoutError):
                     logger.warning("[API] Таймаут получения данных от Gemini (receive)")
-                    # Если мы уже получили хотя бы транскрипцию, просто выходим (клиент разблокируется)
                     if has_yielded_data:
                         return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
                 except StopAsyncIteration: pass
                 finally:
-                    if sender_task: sender_task.cancel()
+                    if sender_task:
+                        sender_task.cancel()
+                        try:
+                            await sender_task
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            pass
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
@@ -487,7 +520,6 @@ class AIService:
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                # Если с этого ключа мы уже получили хоть что-то (например STT) - выходим, не трогаем другие ключи
                 if has_yielded_data: 
                     return
                     
