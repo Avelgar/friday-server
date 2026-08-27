@@ -308,15 +308,15 @@ async def handle_command(websocket, data):
                             act_val = act.get('action_value')
                             
                             # === ПЕРЕДАЧА ЗАДАЧИ МОЗГУ ===
-                            if act_type == "check_network_devices" or act_type == "delegate_to_heavy_brain":
+                            if act_type in ["delegate_to_brain", "delegate_to_heavy_brain"]:
                                 logger.warning(f"🧠 [ФАСАД ДЕЛЕГИРУЕТ ЗАДАЧУ МОЗГУ]: {act_val}")
                                 pseudo_data = {
                                     "internal_routing": "brain_agent", 
-                                    "task": act_val if act_type == "delegate_to_heavy_brain" else (task if is_internal == "brain_agent" else original_command), 
+                                    "task": act_val,
                                     "brain_type": act_type, # легкий или тяжелый
-                                    "source_name": source_name, 
-                                    "mac": source_mac, 
-                                    "user_id": user_id, 
+                                    "source_name": sender_name, 
+                                    "mac": mac, 
+                                    "user_id": sender_device.get('user_id'),
                                     "user_msg_id": user_msg_id, 
                                     "voice_type": voice_name, 
                                     "message_history": message_history, 
