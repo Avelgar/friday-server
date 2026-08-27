@@ -529,4 +529,113 @@ class AIService:
 
         raise Exception("AI Live Service Unavailable")
 
+    # ==============================================================================
+    # 3. ТЕКСТОВОЙ АГЕНТ (МОЗГ-ОРКЕСТРАТОР)
+    # ==============================================================================
+    async def execute_text_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history=None, model_id="gemini-3.5-flash-lite"):
+        """
+        Сверхбыстрый текстовый запрос для логики и оркестрации.
+        Используется для работы с процессами, программами и сетью.
+        """
+        total_keys_tried = 0
+        last_error_msg = ""
+
+        # Фильтры отключаем, Мозг должен работать без цензуры
+        safety_settings = [
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        ]
+
+        # Тот же самый инструмент, что и в Live API, чтобы ответы парсились одинаково
+        device_control_tool = types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="send_device_commands",
+                    description="Отправляет команды на устройства пользователя.",
+                    parameters=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства"),
+                            "actions": types.Schema(
+                                type=types.Type.ARRAY,
+                                items=types.Schema(
+                                    type=types.Type.OBJECT,
+                                    properties={
+                                        "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
+                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение (параметр) команды")
+                                    },
+                                    required=["action_type", "action_value"]
+                                )
+                            )
+                        },
+                        required=["target_device", "actions"]
+                    )
+                )
+            ]
+        )
+
+        config_kwargs = dict(
+            system_instruction=system_instruction,
+            tools=[device_control_tool],
+            safety_settings=safety_settings,
+            temperature=0.2 # Низкая температура, чтобы Мозг мыслил логично и не фантазировал
+        )
+
+        while total_keys_tried < len(self.api_keys):
+            self._rotate_key()
+            try:
+                client = self._get_client()
+                
+                # Собираем историю (если есть) и добавляем текущий промпт
+                contents = []
+                if formatted_history:
+                    for msg in formatted_history:
+                        contents.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
+                
+                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt_text)]))
+
+                logger.info(f"[BRAIN] Отправка запроса в {model_id} (Ключ {self.current_key_index})...")
+                
+                # Асинхронный вызов текстовой модели
+                response = await client.aio.models.generate_content(
+                    model=model_id,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**config_kwargs)
+                )
+
+                result = {"text": "", "commands": []}
+
+                if not response.candidates:
+                    raise Exception("Пустой ответ от модели")
+
+                candidate = response.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        # 1. Если Мозг решил что-то сказать (например, итоговый отчет)
+                        if part.text:
+                            result["text"] += part.text + " "
+                        
+                        # 2. Если Мозг решил вызвать функцию (отправить команду)
+                        if part.function_call:
+                            fc = part.function_call
+                            args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                            if isinstance(args_dict, dict) and "actions" in args_dict:
+                                result["commands"].append(args_dict)
+
+                logger.info(f"[BRAIN DONE] Текст: {bool(result['text'])} | Команд: {len(result['commands'])}")
+                return result
+
+            except Exception as e:
+                last_error_msg = str(e)
+                logger.error(f"[BRAIN ERROR] Ошибка на ключе {self.current_key_index}: {last_error_msg}")
+                total_keys_tried += 1
+                if total_keys_tried < len(self.api_keys):
+                    await asyncio.sleep(1)
+                else:
+                    break
+
+        raise Exception(f"Brain Service недоступен. Ошибка: {last_error_msg}")
+
 ai_instance = AIService()

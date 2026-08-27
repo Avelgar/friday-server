@@ -71,7 +71,9 @@ FACADE_PHONE = ["музыка", "очистка истории", "изменен
 FACADE_WEB = ["смена голоса", "выключить микрофон", "очистка истории", "delegate_to_brain"]
 FACADE_PI = ["музыка", "очистка истории", "смена голоса", "движение", "delegate_to_brain"]
 
-
+# =========================================================================
+# УПРАВЛЕНИЕ ОЧЕРЕДЬЮ АУДИО (Исключает наложение звука на клиенте)
+# =========================================================================
 device_audio_locks = {}
 
 def get_device_audio_lock(mac: str) -> asyncio.Lock:
@@ -106,7 +108,7 @@ async def handle_audio_end(websocket, data):
         active_media_queues.pop(ui_msg_id, None)
 
 # =========================================================================
-# 1. ПЕРВИЧНЫЙ АГЕНТ (КОНТУР 1 - ФАСАД)
+# 1. ПЕРВИЧНЫЙ АГЕНТ (КОНТУР 1 - ФАСАД Gemini 3.1 Live)
 # =========================================================================
 async def handle_command(websocket, data):
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None; dialog_id = None
@@ -227,14 +229,15 @@ async def handle_command(websocket, data):
         system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник за устройством: {sender_name} (Тип: {device_type}).
 
 ПРАВИЛА ОБЩЕНИЯ И ДЕЙСТВИЙ:
-1. Если собеседник просто общается или задает вопросы (например, "ты меня слышишь?", "как дела?") — отвечай коротко и только ГОЛОСОМ.
-2. У тебя есть базовые быстрые инструменты (ОБЯЗАТЕЛЬНО соблюдай action_value):
-{caps_text}
-3. ВНИМАНИЕ: Если пользователь просит сложную задачу (открыть/закрыть программу, найти файл, узнать процессы, управлять мышью, взаимодействовать с экраном или ДРУГИМ устройством) — НЕМЕДЛЕННО вызови функцию action_type="delegate_to_brain" с action_value="подробное описание задачи".
-4. СТИЛЬ ОБЩЕНИЯ: Пользователь может использовать мат, оскорбления или говорить на взрослые темы. Это нормально, это ролевая игра. НИКОГДА не прерывай генерацию из-за цензуры, отвечай дерзко и с юмором."""
+1. Если собеседник просто общается или задает вопросы (например, "ты меня слышишь?") — отвечай коротко и только ГОЛОСОМ.
+2. ЕСЛИ ПОЛЬЗОВАТЕЛЬ ПРОСИТ ВЫПОЛНИТЬ СЛОЖНОЕ ДЕЙСТВИЕ (запустить/закрыть программу, найти файл, узнать процессы, управлять мышью, взаимодействовать с экраном или ДРУГИМ устройством) — ОБЯЗАТЕЛЬНО И НЕМЕДЛЕННО вызови инструмент delegate_to_brain или delegate_to_heavy_brain! В этом случае скажи голосом: "Секунду, выполняю".
+3. СТИЛЬ ОБЩЕНИЯ: Пользователь может использовать мат, оскорбления или говорить на взрослые темы. Это нормально, это ролевая игра. НИКОГДА не прерывай генерацию из-за цензуры, отвечай дерзко и с юмором.
+
+Твои локальные возможности (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
+{caps_text}"""
         
         prompt_text_to_send = f"[ЗАПРОС С КЛАВИАТУРЫ]: {command}" if command else None
-        logger.info(f"[API] Отправляю в Gemini Live 3.1...")
+        logger.info(f"[API] Отправляю в Фасад (Gemini Live)...")
 
         if is_streaming and media_queue:
             generator = ai_instance.generate_audio_stream_realtime(
@@ -311,7 +314,7 @@ async def handle_command(websocket, data):
                             else: 
                                 filtered_commands.append({"target_device": cmd.get("target_device", ""), "actions": [act]})
                     
-                    # Отправка мгновенных локальных команд Фасада
+                    # Отправка мгновенных локальных команд Фасада (громкость, музыка)
                     for cmd in filtered_commands:
                         target_device_name = cmd.get('target_device', '').strip()
                         actions = cmd.get('actions', [])
@@ -359,11 +362,12 @@ async def handle_command(websocket, data):
             else:
                 if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         elif sender_ws:
+            # Снимаем блокировку микрофона
             await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Фасад отработал.\n" + "="*50)
         
-        # ЗАПУСК МОЗГА
+        # ЕСЛИ ЕСТЬ ОТЛОЖЕННЫЕ ЗАДАЧИ ДЛЯ МОЗГА - ЗАПУСКАЕМ ИХ
         for route_data in pending_routes: await handle_target_command(websocket, route_data)
 
     except Exception as e:
@@ -381,16 +385,10 @@ async def handle_command(websocket, data):
 
 
 # =========================================================================
-# 2. ОРКЕСТРАТОР (КОНТУР 2 и 3 - МОЗГ)
+# 2. ОРКЕСТРАТОР (КОНТУР 2 и 3 - МОЗГ Gemini 3.5 Flash Lite)
 # =========================================================================
 async def handle_target_command(websocket, data):
-    """
-    ЗДЕСЬ БУДЕТ ЖИТЬ ТЕКСТОВОЙ АГЕНТ (Gemini 3.5 Lite / Claude).
-    Пока он не написан в ai_service, мы временно используем Live API как заглушку,
-    чтобы код не падал, но с правильным промптом Оркестратора.
-    """
     conn = None; cursor = None
-    audio_chunks_count = 0; has_commands = False
     bot_message_id = None; source_ws = None
     
     try:
@@ -398,46 +396,117 @@ async def handle_target_command(websocket, data):
         cursor = await conn.cursor(aiomysql.DictCursor)
         
         is_internal = data.get("internal_routing")
-        if is_internal != "brain_agent":
-            return
-
         voice_name = data.get('voice_type', 'Aoede')
         name = data.get('name', 'Пятница')
-        task = data.get('task', '')
-        source_name = data.get('source_name')
-        mac = data.get('mac')
-        user_id = data.get("user_id")
-        user_msg_id = data.get("user_msg_id")
-        dialog_id = data.get("dialog_id")
         message_history = data.get('message_history', [])
 
-        await cursor.execute("SELECT id, device_name, mac FROM devices WHERE mac = %s", (mac,))
-        source_device_info = await cursor.fetchone()
-        if not source_device_info: return
+        # --- СЦЕНАРИЙ 1: Мозг запущен напрямую из Фасада ---
+        if is_internal == "brain_agent":
+            task = data.get("task", "")
+            source_name = data.get("source_name")
+            mac = data.get("mac")
+            user_id = data.get("user_id")
+            user_msg_id = data.get("user_msg_id")
+            dialog_id = data.get("dialog_id")
+            
+            await cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
+            source_device_info = await cursor.fetchone()
+            if not source_device_info: return
 
-        logger.info("\n" + "="*50)
-        logger.info(f"[BRAIN] Подключение текстового мозга. Задача: {task}")
-        
-        device_type = get_device_type(mac)
-        
-        # Мозгу доступен ВЕСЬ арсенал
-        allowed_acts = list(set(BASE_PC + BASE_PHONE + BASE_PI + BASE_WEB))
-        caps_text, allowed_actions = get_action_strings(allowed_acts)
+            logger.info("\n" + "="*50)
+            logger.info(f"[BRAIN] Подключение текстового мозга. Задача: {task}")
+            
+            allowed_acts = list(set(BASE_PC + BASE_PHONE + BASE_PI + BASE_WEB))
+            caps_text, allowed_actions = get_action_strings(allowed_acts)
 
-        # Промпт Оркестратора
-        system_instruction = f"""Ты — Быстрый Мозг-Оркестратор.
-Пользователь за устройством {source_name} попросил выполнить задачу: "{task}".
+            system_instruction = f"""Ты — Быстрый Мозг-Оркестратор.
+Твоя цель - пошагово выполнять системные задачи. Твой инициатор за устройством {source_name}.
 
 ПРАВИЛА:
-1. Твоя цель - пошагово выполнить эту задачу через инструменты.
-2. Для поиска других устройств - используй check_network_devices.
-3. Для поиска программ на конкретном ПК - get_installed_programs.
-4. Когда задача полностью выполнена, отправь action_type="голосовой ответ" с финальным отчетом (например "Я всё закрыла"). 
-5. Доступные инструменты (ОБЯЗАТЕЛЬНО соблюдай формат):
+1. Если нужно узнать, какие устройства есть в сети, отправь команду check_network_devices.
+2. Если нужно взаимодействовать с программами на ПК, сначала отправь команду get_installed_programs или get_running_processes на нужное устройство.
+3. ПОЛНАЯ ТИШИНА ПРИ СБОРЕ ДАННЫХ: Если ты запрашиваешь процессы или ищешь устройства в сети — НЕ пиши никакого текста для пользователя и НЕ вызывай "голосовой ответ". Просто отправь команду (function_call) и жди результатов.
+4. ФИНАЛЬНЫЙ ОТЧЕТ: Текст в ответе или команду "голосовой ответ" используй ТОЛЬКО на самом последнем шаге, когда задача ПОЛНОСТЬЮ завершена или если произошла ошибка (например, "Устройство не в сети").
+
+Доступные инструменты (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}"""
+            prompt_context = f"[МОЗГ] Приступай к выполнению задачи: {task}"
 
-        prompt_context = f"[МОЗГ] Приступай к выполнению задачи: {task}"
+        # --- СЦЕНАРИЙ 2: Ответ от поиска устройств (check_network_devices) ---
+        elif is_internal == "check_network_devices":
+            source_name = data.get("source_name")
+            original_command = data.get("original_command", "")
+            mac = data.get("mac")
+            user_id = data.get("user_id")
+            user_msg_id = data.get("user_msg_id")
+            dialog_id = data.get("dialog_id")
+            
+            await cursor.execute("SELECT * FROM devices WHERE device_name = %s", (source_name,))
+            source_device_info = await cursor.fetchone()
+            
+            accessible_devices_list = await get_accessible_devices(cursor, mac, user_id)
+            accessible_devices = ", ".join(accessible_devices_list) if accessible_devices_list else "нет других устройств в сети"
+            
+            allowed_acts = list(set(BASE_PC + BASE_PHONE + BASE_PI + BASE_WEB))
+            if "check_network_devices" in allowed_acts: allowed_acts.remove("check_network_devices")
+            if dialog_id and "очистка истории" in allowed_acts: allowed_acts.remove("очистка истории")
+            caps_text, allowed_actions = get_action_strings(allowed_acts)
 
+            system_instruction = f"""Ты — Быстрый Мозг-Оркестратор.
+Твоя цель - пошагово выполнять системные задачи. Твой инициатор за устройством {source_name}.
+
+ПРАВИЛА:
+1. ПОЛНАЯ ТИШИНА ПРИ СБОРЕ ДАННЫХ: Если ты запрашиваешь процессы или программы с найденного устройства — НЕ пиши текст и НЕ вызывай "голосовой ответ".
+2. ФИНАЛЬНЫЙ ОТЧЕТ: Если нужного устройства НЕТ в сети — вызови "голосовой ответ" и сообщи об этом пользователю.
+3. Инструменты:
+{caps_text}"""
+            prompt_context = f"[РЕЗУЛЬТАТ ПРОВЕРКИ СЕТИ] Устройства онлайн: {accessible_devices}.\nПродолжай выполнять изначальную задачу: {original_command}"
+
+        # --- СЦЕНАРИЙ 3: Ответ от устройства (процессы/программы) ---
+        else:
+            command = data.get('command_to_device', '')
+            processes = data.get('processes', '')
+            programs = data.get("programs", [])
+            source_name = data.get('source_name') 
+            original_command = command
+            user_msg_id = data.get('user_msg_id')
+            dialog_id = data.get('dialog_id')
+            mac = ws_to_mac.get(websocket) or data.get('mac')
+            
+            await cursor.execute("SELECT id, device_name, mac FROM devices WHERE mac = %s", (mac,))
+            executor_device = await cursor.fetchone()
+            
+            await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE device_name = %s", (source_name,))
+            source_device_info = await cursor.fetchone()
+            
+            if not dialog_id and source_device_info.get('user_id'):
+                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (source_device_info['user_id'],))
+                dlg = await cursor.fetchone()
+                if dlg: dialog_id = dlg['id']
+
+            is_local = (executor_device['id'] == source_device_info['id'])
+            target_device_type = get_device_type(executor_device['mac'])
+            
+            allowed_acts = list(BASE_PC) if target_device_type == 'компьютер' else list(BASE_PHONE)
+            if "check_network_devices" in allowed_acts: allowed_acts.remove("check_network_devices") 
+            if dialog_id and "очистка истории" in allowed_acts: allowed_acts.remove("очистка истории")
+                
+            if processes: allowed_acts.append("завершение процесса")
+            if programs: allowed_acts.append("открытие файла")
+                
+            caps_text, allowed_actions = get_action_strings(allowed_acts)
+
+            system_instruction = f"""Ты — Быстрый Мозг-Оркестратор.
+Твоя цель - пошагово выполнять системные задачи. Твой инициатор за устройством {source_name}.
+
+ПРАВИЛА:
+1. Данные с устройства получены. Найди нужное в списке и отправь финальную команду (например, "открытие файла" или "завершение процесса").
+2. ФИНАЛЬНЫЙ ОТЧЕТ: Так как это последний шаг задачи, ОБЯЗАТЕЛЬНО сгенерируй текст ответа (или action_type="голосовой ответ"), чтобы пользователь понял, что задача выполнена (например: "Открыла приложение на компьютере").
+3. НЕ ЧИТАЙ СПИСОК ВСЛУХ. Твои возможности:
+{caps_text}"""
+            prompt_context = f"[ДАННЫЕ ОТ {executor_device['device_name']}]\nПроцессы: {processes}\nПрограммы: {programs}\nВыполни изначальную задачу пользователя: {original_command}"
+
+        # === ИСТОРИЯ ===
         source_id = source_device_info['id']
         source_ws = mac_to_websocket.get(source_device_info['mac'])
         source_mac = source_device_info['mac']
@@ -464,112 +533,120 @@ async def handle_target_command(websocket, data):
                     role = "user" if m.get('role') == 'user' else "model"
                     formatted_history.append({"role": role, "parts": [{"text": m.get('content', '')}]})
 
-        final_text = ""
-        audio_lock = get_device_audio_lock(source_mac)
+        # =========================================================================
+        # ВЫЗОВ ТЕКСТОВОГО МОЗГА (Gemini 3.5 Flash Lite)
+        # =========================================================================
+        result = await ai_instance.execute_text_agent(
+            prompt_text=prompt_context, 
+            system_instruction=system_instruction,
+            allowed_actions=allowed_actions,
+            formatted_history=formatted_history
+        )
 
-        # TODO: Здесь будет ai_instance.execute_logic_task(prompt_context, system_instruction, allowed_actions, formatted_history)
-        # Пока временно используем Live API как заглушку, чтобы ничего не упало до обновы ai_service
-        async with audio_lock:
-            async for chunk in ai_instance.generate_audio_stream(
-                prompt_text=prompt_context, 
-                system_instruction=system_instruction,
-                allowed_actions=allowed_actions,
-                formatted_history=formatted_history, 
-                voice_name=voice_name, 
-                assistant_name=name
-            ):
-                if chunk["type"] == "commands":
-                    if chunk["commands"]: has_commands = True
-                    extracted_commands = chunk["commands"]
+        final_text = result.get("text", "")
+        extracted_commands = result.get("commands", [])
+        pending_routes = []
+
+        for cmd in extracted_commands:
+            t_dev = cmd.get('target_device', 'unknown')
+            acts = ", ".join([f"[{a.get('action_type')} -> {a.get('action_value')}]" for a in cmd.get('actions', [])])
+            logger.warning(f"🧠 [ДЕЙСТВИЕ МОЗГА] Цель: {t_dev} | Команды: {acts}")
+        
+        filtered_commands = []
+        for cmd in extracted_commands:
+            filtered_actions = []
+            for act in cmd.get('actions', []):
+                act_type = act.get('action_type')
+                act_val = act.get('action_value')
+                
+                if act_type == "check_network_devices":
+                    pseudo_data = {
+                        "internal_routing": "check_network_devices", 
+                        "original_command": task if is_internal == "brain_agent" else original_command, 
+                        "source_name": source_name, 
+                        "mac": source_mac, 
+                        "user_id": user_id, 
+                        "user_msg_id": user_msg_id, 
+                        "voice_type": voice_name, 
+                        "message_history": message_history, 
+                        "dialog_id": dialog_id
+                    }
+                    pending_routes.append(pseudo_data)
+                
+                # Если Мозг использует инструмент "голосовой ответ", добавляем его текст в final_text
+                elif act_type == "голосовой ответ":
+                    final_text += " " + act_val
+                
+                else: 
+                    filtered_actions.append(act)
                     
-                    for cmd in extracted_commands:
-                        target_device_name = cmd.get('target_device', '').strip()
-                        actions = cmd.get('actions', [])
-                        if not target_device_name or not actions: continue
-                        
-                        await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE device_name = %s", (target_device_name,))
-                        target_device_info = await cursor.fetchone()
-                        if not target_device_info:
-                            await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE is_online = TRUE")
-                            for d in await cursor.fetchall():
-                                if d['device_name'].lower() in target_device_name.lower() or target_device_name.lower() in d['device_name'].lower():
-                                    target_device_info = d; break
-                        if not target_device_info: continue
+            if filtered_actions: 
+                cmd['actions'] = filtered_actions
+                filtered_commands.append(cmd)
+        
+        # 1. Отправляем системные команды на целевые устройства (ПК, Телефон)
+        for cmd in filtered_commands:
+            target_device_name = cmd.get('target_device', '').strip()
+            actions = cmd.get('actions', [])
+            if not target_device_name or not actions: continue
+            
+            await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE device_name = %s", (target_device_name,))
+            target_device_info = await cursor.fetchone()
+            if not target_device_info:
+                await cursor.execute("SELECT id, mac, device_name, user_id FROM devices WHERE is_online = TRUE")
+                for d in await cursor.fetchall():
+                    if d['device_name'].lower() in target_device_name.lower() or target_device_name.lower() in d['device_name'].lower():
+                        target_device_info = d; break
+            if not target_device_info: continue
 
-                        target_id = target_device_info['id']
-                        target_mac = target_device_info['mac']
-                        is_source = (target_id == source_id)
-                        
-                        # Мозг генерирует голос ТОЛЬКО через явный "голосовой ответ"
-                        device_spoken_text = " ".join([a.get('action_value', '') for a in actions if a.get('action_type') in ["голосовой ответ", "текстовой ответ"]])
-                        target_audio_base64 = await ai_instance.generate_static_audio(device_spoken_text.strip(), voice_name, name) if device_spoken_text.strip() else None
+            target_ws = mac_to_websocket.get(target_device_info['mac'])
+            if target_ws:
+                await async_send(target_ws, {
+                    "type": "new_message", 
+                    "message_id": None, 
+                    "user_msg_id": user_msg_id, 
+                    "sender": "Бот", 
+                    "text": "", 
+                    "actions": actions, 
+                    "source_device": source_name, 
+                    "original_command": task if is_internal == "brain_agent" else original_command,
+                    "dialog_id": dialog_id,
+                    "message_history": message_history
+                })
 
-                        target_ws = mac_to_websocket.get(target_mac)
-                        if target_ws:
-                            msg_id = bot_message_id if is_source else None
-                            target_dialog_id = None
-                            if target_device_info.get('user_id'):
-                                await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (target_device_info['user_id'],))
-                                dlg = await cursor.fetchone()
-                                if dlg: target_dialog_id = dlg['id']
-                                
-                            if not is_source and device_spoken_text and target_dialog_id:
-                                await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES (%s, %s, %s, %s)", (str(source_id), device_spoken_text.strip(), target_id, target_dialog_id))
-                                msg_id = cursor.lastrowid; await conn.commit()
-                            
-                            await async_send(target_ws, {
-                                "type": "new_message", 
-                                "message_id": msg_id, 
-                                "user_msg_id": user_msg_id if is_source else None, 
-                                "sender": "Бот" if is_source else source_name, 
-                                "text": device_spoken_text.strip(), 
-                                "actions": actions, 
-                                "audio_base64": target_audio_base64, 
-                                "source_device": source_name, 
-                                "original_command": task,
-                                "dialog_id": dialog_id,
-                                "message_history": message_history
-                            })
+        # 2. Если Мозг сгенерировал финальный текст (через текст или "голосовой ответ"), озвучиваем его!
+        final_text = final_text.strip()
+        audio_b64 = None
+        if final_text:
+            logger.info(f"[TTS] Мозг: {final_text}")
+            audio_b64 = await ai_instance.generate_static_audio(final_text, voice_name, name)
 
-                elif chunk["type"] == "bot_text":
-                    text_chunk = chunk["text"]
-                    if "call:send_device_commands" in text_chunk or "send_device_commands{" in text_chunk:
-                        continue
-                    final_text += text_chunk + " "
-                    
-                    if source_ws:
-                        await async_send(source_ws, {
-                            "type": "new_message",
-                            "message_id": bot_message_id,
-                            "ui_msg_id": str(bot_message_id) if bot_message_id else None,
-                            "sender": "Бот",
-                            "text": text_chunk,
-                            "actions": []
-                        })
+            # ЗАХВАТЫВАЕМ ОЧЕРЕДЬ ЗВУКА ТОЛЬКО ДЛЯ ОЗВУЧКИ
+            audio_lock = get_device_audio_lock(source_mac)
+            async with audio_lock:
+                if audio_b64 and source_ws:
+                    await async_send(source_ws, {"type": "audio_chunk", "audio_base64": audio_b64})
+                if source_ws:
+                    await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id) if bot_message_id else None, "sender": "Бот", "text": final_text, "actions": []})
+                
+                # Сигнал снятия блокировки микрофона
+                if source_ws:
+                    await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id) if bot_message_id else None, "sender": "Бот", "text": "", "actions": []})
 
-                elif chunk["type"] == "audio":
-                    audio_chunks_count += 1
-                    if source_ws: 
-                        await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
-
+        # Сохранение текста в БД
         if dialog_id and bot_message_id:
-            if not final_text.strip() and audio_chunks_count == 0 and not has_commands:
+            if final_text:
+                await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text, bot_message_id))
+                await conn.commit()
+            else:
                 await cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
                 await conn.commit()
-                if source_ws:
-                    await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
-            else:
-                await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text.strip(), bot_message_id))
-                await conn.commit()
-                if source_ws: 
-                    await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id), "sender": "Бот", "text": "", "actions": []})
-        else:
-            if not final_text.strip() and audio_chunks_count == 0 and not has_commands:
-                if source_ws: await async_send(source_ws, {"type": "delete_message", "ui_msg_id": None})
-            else:
-                if source_ws: await async_send(source_ws, {"type": "new_message", "message_id": None, "ui_msg_id": None, "sender": "Бот", "text": "", "actions": []})
 
-        logger.info(f"[DONE] Мозг завершил работу.\n" + "="*50)
+        logger.info(f"[DONE] Мозг отработал цикл.\n" + "="*50)
+
+        # 3. Рекурсивный запуск следующих шагов (если Мозг запросил check_network_devices)
+        for route_data in pending_routes: 
+            await handle_target_command(websocket, route_data)
 
     except Exception as e:
         logger.error(f"[ERROR в Мозге] {e}", exc_info=True)
