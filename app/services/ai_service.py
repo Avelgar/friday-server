@@ -126,8 +126,13 @@ class AIService:
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
         client = self._get_client()
+        
+        # ЖЕСТКИЙ ПРОМПТ ДЛЯ УБИЙСТВА ОТСЕБЯТИНЫ
+        sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст. ЗАПРЕЩЕНО добавлять слова от себя, здороваться, прощаться или задавать вопросы вроде 'Что-то еще?'."
+        
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"], 
+            system_instruction=types.Content(parts=[types.Part.from_text(text=sys_instr)]),
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
         )
         audio_data = bytearray()
@@ -136,17 +141,56 @@ class AIService:
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
-            await session.send(input=f"Произнеси: {text}", end_of_turn=True)
+            # Измененный приказ на чтение
+            await session.send(input=f"Озвучь строго этот текст: {text}", end_of_turn=True)
             receive_iterator = session.receive().__aiter__()
             while True:
                 response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
-                if response.server_content and response.data: audio_data.extend(response.data)
+                if response.server_content and response.data: 
+                    audio_data.extend(response.data)
+                if response.server_content and response.server_content.turn_complete:
+                    break
         except: pass
         finally:
             if session:
                 try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                 except: pass
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
+
+    async def generate_static_audio_stream(self, text, voice_name="Aoede", assistant_name="Пятница"):
+        """Потоковая версия TTS. Мгновенно отдает чанки аудио через yield."""
+        self._rotate_key()
+        voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
+        valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
+        mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
+        
+        client = self._get_client()
+        sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст. ЗАПРЕЩЕНО добавлять слова от себя, здороваться, прощаться или задавать вопросы."
+        
+        config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"], 
+            system_instruction=types.Content(parts=[types.Part.from_text(text=sys_instr)]),
+            speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
+        )
+        
+        cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+        session = None
+        try:
+            session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
+            await session.send(input=f"Озвучь строго этот текст: {text}", end_of_turn=True)
+            receive_iterator = session.receive().__aiter__()
+            while True:
+                response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
+                if response.server_content and response.data: 
+                    yield response.data # Отдаем байты на лету!
+                if response.server_content and response.server_content.turn_complete:
+                    break
+        except Exception as e:
+            logger.error(f"[TTS STREAM ERROR]: {e}")
+        finally:
+            if session:
+                try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                except: pass
 
     # ==============================================================================
     # 1. ФУНКЦИЯ ФАСАДА (Gemini 3.1 Flash Live) - Быстрое аудио и делегирование

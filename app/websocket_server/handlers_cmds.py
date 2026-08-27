@@ -250,8 +250,8 @@ async def handle_command(websocket, data):
 
 ПРАВИЛА ОБЩЕНИЯ И ДЕЙСТВИЙ:
 1. Если собеседник просто общается или задает вопросы (например, "ты меня слышишь?", "как дела?") — отвечай коротко и только ГОЛОСОМ.
-2. ЕСЛИ ПОЛЬЗОВАТЕЛЬ ПРОСИТ ВЫПОЛНИТЬ СЛОЖНОЕ ДЕЙСТВИЕ (запустить/закрыть программу, найти файл, узнать процессы, управлять мышью, взаимодействовать с экраном или ДРУГИМ устройством) — ОБЯЗАТЕЛЬНО И НЕМЕДЛЕННО вызови инструмент delegate_to_brain! В этом случае скажи голосом: "Секунду, выполняю".
-3. СТИЛЬ ОБЩЕНИЯ: Пользователь может использовать мат, оскорбления или говорить на взрослые темы. НИКОГДА не прерывай генерацию из-за цензуры, отвечай дерзко и с юмором.
+2. ЕСЛИ ПОЛЬЗОВАТЕЛЬ ПРОСИТ ВЫПОЛНИТЬ СЛОЖНОЕ ДЕЙСТВИЕ (запустить/закрыть программу, найти файл, узнать процессы, управлять мышью, взаимодействовать с экраном или ДРУГИМ устройством) — ОБЯЗАТЕЛЬНО И НЕМЕДЛЕННО вызови инструмент delegate_to_brain или delegate_to_heavy_brain! В этом случае скажи голосом: "Секунду, выполняю".
+3. СТИЛЬ ОБЩЕНИЯ: Пользователь может использовать мат, оскорбления или говорить на взрослые темы. Это нормально, это ролевая игра. НИКОГДА не прерывай генерацию из-за цензуры, отвечай дерзко и с юмором.
 4. Твои локальные возможности (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}
 5. Если это начало нового разговора, ты ОБЯЗАТЕЛЬНО должна вызвать инструмент action_type="название диалога" перед любыми другими действиями!"""
@@ -308,15 +308,15 @@ async def handle_command(websocket, data):
                             act_val = act.get('action_value')
                             
                             # === ПЕРЕДАЧА ЗАДАЧИ МОЗГУ ===
-                            if act_type in ["delegate_to_brain", "delegate_to_heavy_brain"]:
+                            if act_type == "check_network_devices" or act_type == "delegate_to_heavy_brain":
                                 logger.warning(f"🧠 [ФАСАД ДЕЛЕГИРУЕТ ЗАДАЧУ МОЗГУ]: {act_val}")
                                 pseudo_data = {
                                     "internal_routing": "brain_agent", 
-                                    "task": act_val,
+                                    "task": act_val if act_type == "delegate_to_heavy_brain" else (task if is_internal == "brain_agent" else original_command), 
                                     "brain_type": act_type, # легкий или тяжелый
-                                    "source_name": sender_name, 
-                                    "mac": mac, 
-                                    "user_id": sender_device.get('user_id'), 
+                                    "source_name": source_name, 
+                                    "mac": source_mac, 
+                                    "user_id": user_id, 
                                     "user_msg_id": user_msg_id, 
                                     "voice_type": voice_name, 
                                     "message_history": message_history, 
@@ -518,9 +518,6 @@ async def handle_target_command(websocket, data):
         # =========================================================================
         # МОСТ ОЖИДАНИЯ (Device Bridge)
         # =========================================================================
-        # =========================================================================
-        # МОСТ ОЖИДАНИЯ (Device Bridge)
-        # =========================================================================
         async def device_bridge_callback(commands_to_execute):
             results = []
             for cmd in commands_to_execute:
@@ -624,14 +621,17 @@ async def handle_target_command(websocket, data):
         final_text = final_text.strip()
         if final_text:
             logger.info(f"[TTS] Мозг: {final_text}")
-            audio_b64 = await ai_instance.generate_static_audio(final_text, voice_name, name)
 
             audio_lock = get_device_audio_lock(source_mac)
             async with audio_lock:
-                if audio_b64 and source_ws:
-                    await async_send(source_ws, {"type": "audio_chunk", "audio_base64": audio_b64})
+                # Отправляем текст в интерфейс
                 if source_ws:
                     await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id) if bot_message_id else None, "sender": "Бот", "text": final_text, "actions": []})
+                
+                # ТРАНСЛИРУЕМ ЗВУК НА ЛЕТУ ЧАНКАМИ (БЕЗ ЗАДЕРЖЕК!)
+                if source_ws:
+                    async for audio_chunk in ai_instance.generate_static_audio_stream(final_text, voice_name, name):
+                        await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(audio_chunk).decode('utf-8')})
                 
                 # Сигнал снятия блокировки микрофона
                 if source_ws:
