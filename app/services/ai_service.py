@@ -67,7 +67,6 @@ class AIService:
         except Exception as e:
             raise Exception(f"Ошибка при работе с Pollinations AI: {str(e)}")
 
-
     def generate_image(self, prompt, model_type="generate"):
         models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
         model_id = models_map.get(model_type, models_map["generate"])
@@ -120,7 +119,6 @@ class AIService:
                 
         raise Exception(f"AI Image Service недоступен после перебора всех ключей. Последняя ошибка: {last_error_msg}")
 
-
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         self._rotate_key()
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -151,7 +149,7 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     # ==============================================================================
-    # 1. ФУНКЦИЯ ДЛЯ ИМЯ+КОМАНДА / HTTP
+    # 1. ФУНКЦИЯ ФАСАДА (Gemini 3.1 Flash Live) - Быстрое аудио и делегирование
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, formatted_history=None, voice_name="Aoede", assistant_name="Пятница", media_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -297,12 +295,9 @@ class AIService:
                 finally:
                     if sender_task:
                         sender_task.cancel()
-                        try:
-                            await sender_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception:
-                            pass
+                        try: await sender_task
+                        except asyncio.CancelledError: pass
+                        except Exception: pass
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
@@ -320,14 +315,13 @@ class AIService:
         raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С БУФЕРИЗАЦИЕЙ ПАДЕНИЙ КЛЮЧЕЙ
+    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С БУФЕРИЗАЦИЕЙ ПАДЕНИЙ КЛЮЧЕЙ (ФАСАД)
     # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, media_queue, formatted_history=None, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
 
-        # ЛОКАЛЬНЫЙ КЭШ. Живет только в рамках этого вызова. Очистится сам при return.
         session_audio_cache = bytearray()
         last_video_frame = None
         has_reached_stream_end = False
@@ -400,7 +394,6 @@ class AIService:
                         await session.send_client_content(turns=formatted_history, turn_complete=True)
                     
                     async def send_input_task():
-                        # Используем nonlocal, чтобы изменять переменные, объявленные выше
                         nonlocal session_audio_cache, last_video_frame, has_reached_stream_end
                         has_sent_activity_start = False
 
@@ -408,22 +401,17 @@ class AIService:
                             if prompt_text:
                                 await session.send_realtime_input(text=prompt_text)
 
-                            # 1. ОТПРАВЛЯЕМ КЭШ, ЕСЛИ ЭТО ПОВТОРНАЯ ПОПЫТКА С НОВЫМ КЛЮЧОМ
                             if session_audio_cache:
                                 await session.send_realtime_input(activity_start=types.ActivityStart())
                                 has_sent_activity_start = True
                                 await session.send_realtime_input(audio=types.Blob(data=bytes(session_audio_cache), mime_type="audio/pcm;rate=16000"))
-                                logger.info(f"[CACHE] Переотправлен закэшированный звук ({len(session_audio_cache)} байт).")
 
                             if last_video_frame:
                                 await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
 
-                            # 2. ЕСЛИ КЛИЕНТ УЖЕ ЗАКОНЧИЛ ГОВОРИТЬ РАНЕЕ, ПРОСТО ШЛЕМ END
                             if has_reached_stream_end:
                                 if has_sent_activity_start:
                                     await session.send_realtime_input(activity_end=types.ActivityEnd())
-                            
-                            # 3. ЕСЛИ КЛИЕНТ ЕЩЕ ГОВОРИТ, ПРОДОЛЖАЕМ ЧИТАТЬ ОЧЕРЕДЬ
                             else:
                                 while True:
                                     try:
@@ -436,7 +424,7 @@ class AIService:
                                             
                                         if item["type"] == "audio" and len(item["data"]) > 0:
                                             chunk = item["data"]
-                                            session_audio_cache.extend(chunk) # <--- СОХРАНЯЕМ В КЭШ
+                                            session_audio_cache.extend(chunk)
 
                                             if not has_sent_activity_start:
                                                 await session.send_realtime_input(activity_start=types.ActivityStart())
@@ -445,7 +433,7 @@ class AIService:
                                             await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
                                             
                                         elif item["type"] == "video" and len(item["data"]) > 0:
-                                            last_video_frame = item["data"] # <--- ОБНОВЛЯЕМ ПОСЛЕДНИЙ КАДР В КЭШЕ
+                                            last_video_frame = item["data"]
                                             await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
                                             
                                     except asyncio.TimeoutError:
@@ -499,19 +487,15 @@ class AIService:
                             
                 except (asyncio.TimeoutError, TimeoutError):
                     logger.warning("[API] Таймаут получения данных от Gemini (receive)")
-                    if has_yielded_data:
-                        return 
+                    if has_yielded_data: return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
                 except StopAsyncIteration: pass
                 finally:
                     if sender_task:
                         sender_task.cancel()
-                        try:
-                            await sender_task
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception:
-                            pass
+                        try: await sender_task
+                        except asyncio.CancelledError: pass
+                        except Exception: pass
                     if session:
                         try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                         except: pass
@@ -520,27 +504,53 @@ class AIService:
 
             except Exception as e:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                if has_yielded_data: 
-                    return
-                    
+                if has_yielded_data: return
                 total_keys_tried += 1
                 if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
                 else: break
 
         raise Exception("AI Live Service Unavailable")
 
-    # ==============================================================================
-    # 3. ТЕКСТОВОЙ АГЕНТ (МОЗГ-ОРКЕСТРАТОР)
-    # ==============================================================================
-    async def execute_text_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history=None, model_id="gemini-3.5-flash-lite"):
-        """
-        Сверхбыстрый текстовый запрос для логики и оркестрации.
-        Используется для работы с процессами, программами и сетью.
-        """
-        total_keys_tried = 0
-        last_error_msg = ""
 
-        # Фильтры отключаем, Мозг должен работать без цензуры
+    # ==============================================================================
+    # 3. ТЕКСТОВОЙ ОРКЕСТРАТОР (БЫСТРЫЙ И ТЯЖЕЛЫЙ МОЗГ)
+    # ==============================================================================
+    async def _chat_send_with_retry(self, model_id, config, history, input_data):
+        """Вспомогательный метод для отправки сообщений Мозгу с автоматической сменой ключей."""
+        total_keys = len(self.api_keys)
+        attempts = 0
+        last_err = ""
+        
+        while attempts < total_keys:
+            client = self._get_client()
+            chat = client.aio.chats.create(model=model_id, config=config, history=history)
+            try:
+                response = await chat.send_message(input_data)
+                return chat, response
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"[Key {self.current_key_index}] Ошибка Brain Chat: {last_err}")
+                
+                if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
+                    import re
+                    match = re.search(r"retry in ([\d\.]+)s", last_err)
+                    if match:
+                        sleep_time = float(match.group(1)) + 0.5
+                        await asyncio.sleep(sleep_time)
+                        
+                self._rotate_key()
+                attempts += 1
+                await asyncio.sleep(1)
+                
+        raise Exception(f"Brain Chat недоступен. Последняя ошибка: {last_err}")
+
+    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash-lite"):
+        """
+        Умный агент, который работает в цикле (Stateful ReAct).
+        device_bridge_callback - асинхронная функция из handlers_cmds.py, которая ждет выполнения на клиенте.
+        """
+        logger.info(f"[BRAIN INIT] Запуск оркестратора на базе {model_id}...")
+
         safety_settings = [
             types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
             types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
@@ -548,7 +558,6 @@ class AIService:
             types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
         ]
 
-        # Тот же самый инструмент, что и в Live API, чтобы ответы парсились одинаково
         device_control_tool = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -576,66 +585,66 @@ class AIService:
             ]
         )
 
-        config_kwargs = dict(
+        config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=[device_control_tool],
             safety_settings=safety_settings,
-            temperature=0.2 # Низкая температура, чтобы Мозг мыслил логично и не фантазировал
+            temperature=0.2 
         )
 
-        while total_keys_tried < len(self.api_keys):
-            self._rotate_key()
-            try:
-                client = self._get_client()
+        history = []
+        if formatted_history:
+            for msg in formatted_history:
+                history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
+
+        current_input = prompt_text
+        max_turns = 10 
+        current_turn = 0
+
+        while current_turn < max_turns:
+            current_turn += 1
+            
+            chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
+            history = list(chat.get_history())
+
+            text_result = ""
+            commands_to_execute = []
+
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.text:
+                        text_result += part.text + " "
+                    if part.function_call:
+                        fc = part.function_call
+                        args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                        if isinstance(args_dict, dict) and "actions" in args_dict:
+                            commands_to_execute.append({
+                                "name": fc.name,
+                                "id": getattr(fc, "id", ""),
+                                "args": args_dict
+                            })
+
+            if commands_to_execute:
+                logger.info(f"[BRAIN TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
                 
-                # Собираем историю (если есть) и добавляем текущий промпт
-                contents = []
-                if formatted_history:
-                    for msg in formatted_history:
-                        contents.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
+                # Замираем и ждем, пока устройство выполнит команду и вернет ответ (например, список процессов)
+                tool_results = await device_bridge_callback(commands_to_execute)
                 
-                contents.append(types.Content(role="user", parts=[types.Part.from_text(text=prompt_text)]))
-
-                logger.info(f"[BRAIN] Отправка запроса в {model_id} (Ключ {self.current_key_index})...")
+                function_responses = []
+                for res in tool_results:
+                    function_responses.append(
+                        types.Part.from_function_response(
+                            name=res["name"],
+                            response=res["response"]
+                        )
+                    )
+                current_input = function_responses
+            else:
+                final_answer = text_result.strip()
+                logger.info(f"[BRAIN DONE] Цикл завершен. Ответ: {final_answer}")
+                return final_answer
                 
-                # Асинхронный вызов текстовой модели
-                response = await client.aio.models.generate_content(
-                    model=model_id,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**config_kwargs)
-                )
-
-                result = {"text": "", "commands": []}
-
-                if not response.candidates:
-                    raise Exception("Пустой ответ от модели")
-
-                candidate = response.candidates[0]
-                if candidate.content and candidate.content.parts:
-                    for part in candidate.content.parts:
-                        # 1. Если Мозг решил что-то сказать (например, итоговый отчет)
-                        if part.text:
-                            result["text"] += part.text + " "
-                        
-                        # 2. Если Мозг решил вызвать функцию (отправить команду)
-                        if part.function_call:
-                            fc = part.function_call
-                            args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                            if isinstance(args_dict, dict) and "actions" in args_dict:
-                                result["commands"].append(args_dict)
-
-                logger.info(f"[BRAIN DONE] Текст: {bool(result['text'])} | Команд: {len(result['commands'])}")
-                return result
-
-            except Exception as e:
-                last_error_msg = str(e)
-                logger.error(f"[BRAIN ERROR] Ошибка на ключе {self.current_key_index}: {last_error_msg}")
-                total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys):
-                    await asyncio.sleep(1)
-                else:
-                    break
-
-        raise Exception(f"Brain Service недоступен. Ошибка: {last_error_msg}")
+        logger.warning(f"[BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
+        return text_result.strip()
 
 ai_instance = AIService()
