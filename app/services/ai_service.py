@@ -647,4 +647,131 @@ class AIService:
         logger.warning(f"[BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
         return text_result.strip()
 
+    # ==============================================================================
+    # 4. ТЯЖЕЛЫЙ МОЗГ (ЗРЕНИЕ И УПРАВЛЕНИЕ МЫШЬЮ)
+    # ==============================================================================
+    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-2.5-pro"):
+        """
+        Тяжелый агент с компьютерным зрением (VLM). Запрашивает скриншоты и кликает.
+        """
+        logger.info(f"[HEAVY BRAIN] Запуск тяжелого агента на базе {model_id}...")
+
+        safety_settings = [
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        ]
+
+        device_control_tool = types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="send_device_commands",
+                    description="Отправляет команды на устройства пользователя.",
+                    parameters=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства"),
+                            "actions": types.Schema(
+                                type=types.Type.ARRAY,
+                                items=types.Schema(
+                                    type=types.Type.OBJECT,
+                                    properties={
+                                        "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
+                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение (параметр) команды")
+                                    },
+                                    required=["action_type", "action_value"]
+                                )
+                            )
+                        },
+                        required=["target_device", "actions"]
+                    )
+                )
+            ]
+        )
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            tools=[device_control_tool],
+            safety_settings=safety_settings,
+            temperature=0.0 # НУЛЕВАЯ температура для максимальной точности координат
+        )
+
+        history = []
+        if formatted_history:
+            for msg in formatted_history:
+                history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
+
+        current_input = [types.Part.from_text(text=prompt_text)]
+        max_turns = 15 # Даем больше шагов, так как визуальные задачи длинные (нашел->кликнул->ввел текст->отправил)
+        current_turn = 0
+
+        while current_turn < max_turns:
+            current_turn += 1
+            
+            chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
+            history = list(chat.get_history())
+
+            text_result = ""
+            commands_to_execute = []
+            task_is_completed = False
+
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.text:
+                        text_result += part.text + " "
+                    if part.function_call:
+                        fc = part.function_call
+                        args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                        if isinstance(args_dict, dict) and "actions" in args_dict:
+                            # Проверяем, не вызвал ли ИИ "task_completed"
+                            for act in args_dict.get("actions", []):
+                                if act.get("action_type") == "task_completed":
+                                    task_is_completed = True
+                            
+                            commands_to_execute.append({
+                                "name": fc.name,
+                                "id": getattr(fc, "id", ""),
+                                "args": args_dict
+                            })
+
+            if commands_to_execute:
+                logger.info(f"[HEAVY TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
+                
+                # Идем на C# клиент (там выполнится клик или скриншот)
+                tool_results = await device_bridge_callback(commands_to_execute)
+                
+                # Собираем ответ для Мозга
+                current_input = []
+                for res in tool_results:
+                    # 1. Добавляем системный ответ функции (JSON)
+                    current_input.append(
+                        types.Part.from_function_response(
+                            name=res["name"],
+                            response=res["response"]
+                        )
+                    )
+                    
+                    # 2. МУЛЬТИМОДАЛЬНАЯ МАГИЯ: Если функция вернула скриншот, прикрепляем его как картинку!
+                    if res.get("attached_image_base64"):
+                        logger.info("[HEAVY TURN] Прикрепляю полученный скриншот к ответу для ИИ.")
+                        img_bytes = base64.b64decode(res["attached_image_base64"])
+                        res_str = res.get("attached_resolution", "неизвестно")
+                        
+                        # Даем ИИ подсказку с разрешением, чтобы он точно высчитал X/Y
+                        current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}."))
+                        current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
+
+                if task_is_completed:
+                    logger.info(f"[HEAVY DONE] Визуальная задача выполнена! Ответ: {text_result.strip()}")
+                    return text_result.strip()
+
+            else:
+                final_answer = text_result.strip()
+                logger.info(f"[HEAVY DONE] Цикл завершен (без вызова функций). Ответ: {final_answer}")
+                return final_answer
+                
+        logger.warning(f"[HEAVY BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
+        return text_result.strip()
+
 ai_instance = AIService()

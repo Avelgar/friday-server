@@ -519,6 +519,9 @@ async def handle_target_command(websocket, data):
         # =========================================================================
         # МОСТ ОЖИДАНИЯ (Device Bridge)
         # =========================================================================
+        # =========================================================================
+        # МОСТ ОЖИДАНИЯ (Device Bridge)
+        # =========================================================================
         async def device_bridge_callback(commands_to_execute):
             results = []
             for cmd in commands_to_execute:
@@ -528,6 +531,8 @@ async def handle_target_command(websocket, data):
                 actions = args.get("actions", [])
                 
                 tool_resp = {"result": "success"}
+                attached_image = None
+                attached_res = ""
                 
                 for act in actions:
                     act_type = act.get("action_type")
@@ -543,7 +548,6 @@ async def handle_target_command(websocket, data):
                         target_ws = mac_to_websocket.get(target_mac)
                         if target_ws:
                             future = asyncio.Future()
-                            # Регестрируем перехватчик по ID текущей задачи
                             pending_device_responses[str(user_msg_id)] = future
                             
                             logger.info(f"[BRIDGE] Отправка запроса ({act_type}) на устройство {target_mac}. Ожидание ответа...")
@@ -553,13 +557,16 @@ async def handle_target_command(websocket, data):
                                 "actions": [act]
                             })
                             try:
-                                # ЗАМИРАЕМ ДО ТЕХ ПОР, ПОКА C# КЛИЕНТ НЕ ОТВЕТИТ В HANDLE_COMMAND
                                 client_data = await asyncio.wait_for(future, timeout=25.0)
                                 logger.info(f"[BRIDGE] Ответ от устройства {target_mac} успешно получен!")
                                 
                                 if act_type == "get_running_processes": tool_resp["processes"] = client_data.get("processes")
                                 elif act_type == "get_installed_programs": tool_resp["programs"] = client_data.get("programs")
-                                elif act_type == "request_screenshot": tool_resp["screenshot_base64_received"] = "Скриншот получен, анализируй."
+                                elif act_type == "request_screenshot": 
+                                    tool_resp["status"] = "Скриншот прикреплен к сообщению"
+                                    # Вытаскиваем картинку для Тяжелого Мозга!
+                                    attached_image = client_data.get("screenshot_base64_received")
+                                    attached_res = client_data.get("screen_resolution", "unknown")
                             except asyncio.TimeoutError:
                                 logger.warning(f"[BRIDGE] Таймаут ответа от устройства {target_mac}")
                                 tool_resp["error"] = "Устройство не ответило вовремя"
@@ -570,11 +577,10 @@ async def handle_target_command(websocket, data):
                             
                     elif act_type == "delegate_to_heavy_brain":
                         logger.info(f"[BRIDGE] Быстрый Мозг вызвал Тяжелый Мозг для задачи: {act_val}")
-                        # Делегирование Тяжелому мозгу пока просто возвращает заглушку, чтобы ИИ понимал, что запрос принят
                         tool_resp["heavy_brain_status"] = "Задача передана Тяжелому мозгу. Сообщи пользователю, что ты приступаешь к выполнению."
                         
-                    else:
-                        # Локальные действия, не требующие ответа (клик, музыка и т.д.)
+                    elif act_type != "task_completed":
+                        # Локальные действия (клик, набор текста и т.д.)
                         target_mac = await get_mac_by_name(cursor, target_device_name, source_mac)
                         target_ws = mac_to_websocket.get(target_mac)
                         if target_ws:
@@ -584,21 +590,36 @@ async def handle_target_command(websocket, data):
                                 "actions": [act]
                             })
                             
-                results.append({"name": name_tool, "response": tool_resp})
+                # Если была картинка, передаем её отдельно от JSON-ответа
+                res_dict = {"name": name_tool, "response": tool_resp}
+                if attached_image:
+                    res_dict["attached_image_base64"] = attached_image
+                    res_dict["attached_resolution"] = attached_res
+                    
+                results.append(res_dict)
                 
             return results
-
         # =========================================================================
-        # ВЫЗОВ ЦИКЛА ТЕКСТОВОГО МОЗГА
+        # ВЫЗОВ НУЖНОГО МОЗГА
         # =========================================================================
-        final_text = await ai_instance.run_brain_orchestrator(
-            prompt_text=f"Выполни задачу: {task}",
-            system_instruction=system_instruction,
-            allowed_actions=allowed_actions,
-            formatted_history=formatted_history,
-            device_bridge_callback=device_bridge_callback,
-            model_id=model_id
-        )
+        if brain_type == "delegate_to_heavy_brain":
+            final_text = await ai_instance.execute_heavy_agent(
+                prompt_text=f"Выполни визуальную задачу: {task}",
+                system_instruction=system_instruction,
+                allowed_actions=allowed_actions,
+                formatted_history=formatted_history,
+                device_bridge_callback=device_bridge_callback,
+                model_id=model_id
+            )
+        else:
+            final_text = await ai_instance.run_brain_orchestrator(
+                prompt_text=f"Выполни задачу: {task}",
+                system_instruction=system_instruction,
+                allowed_actions=allowed_actions,
+                formatted_history=formatted_history,
+                device_bridge_callback=device_bridge_callback,
+                model_id=model_id
+            )
 
         # 2. ОЗВУЧКА РЕЗУЛЬТАТА И СНЯТИЕ БЛОКИРОВОК
         final_text = final_text.strip()
