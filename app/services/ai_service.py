@@ -694,7 +694,7 @@ class AIService:
     # ==============================================================================
     # 4. ТЯЖЕЛЫЙ МОЗГ (ЗРЕНИЕ И УПРАВЛЕНИЕ МЫШЬЮ)
     # ==============================================================================
-    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash-lite"):
+    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3-flash-preview"):
         """
         Тяжелый агент с компьютерным зрением (VLM). Запрашивает скриншоты и кликает.
         """
