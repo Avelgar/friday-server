@@ -112,14 +112,12 @@ async def handle_command(websocket, data):
     # ПЕРЕХВАТ ДАННЫХ ДЛЯ МОЗГА
     client_msg_id = str(data.get('user_msg_id', ''))
     if client_msg_id and client_msg_id in pending_device_responses:
-        processes = data.get('processes')
-        programs = data.get('programs')
-        screenshot = data.get('screenshot')
-        
-        if processes is not None or programs is not None or screenshot is not None:
+        # Проверяем наличие ключей-маркеров ответа
+        if "processes" in data or "programs" in data or "screenshot_base64_received" in data:
             logger.info(f"[BRIDGE] Перехват ответа от устройства! Возвращаем данные Мозгу.")
             future = pending_device_responses[client_msg_id]
-            if not future.done(): future.set_result(data)
+            if not future.done(): 
+                future.set_result(data)
             return
 
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None; dialog_id = None
