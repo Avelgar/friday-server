@@ -638,7 +638,6 @@ class AIService:
         if formatted_history:
             for msg in formatted_history:
                 history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
-        raise Exception(f"Brain Chat недоступен после перебора всех {total_keys} ключей. Ошибка: {last_err}")
 
         current_input = prompt_text
         max_turns = 10 
@@ -670,7 +669,7 @@ class AIService:
             if commands_to_execute:
                 logger.info(f"[BRAIN TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
                 
-                # Замираем и ждем, пока устройство выполнит команду и вернет ответ (например, список процессов)
+                # Замираем и ждем, пока устройство выполнит команду и вернет ответ
                 tool_results = await device_bridge_callback(commands_to_execute)
                 
                 function_responses = []
