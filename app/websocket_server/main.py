@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import sys
 sys.path.append('/opt/friday')
 
@@ -22,6 +23,9 @@ def reset_online_statuses():
     except Exception as e:
         logger.error(f"Ошибка сброса статусов: {e}")
 
+async def main():
+    await start_ws_server()
+
 if __name__ == '__main__':
     reset_online_statuses()
-    asyncio.run(start_ws_server())
+    asyncio.run(main())
