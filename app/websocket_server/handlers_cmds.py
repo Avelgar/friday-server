@@ -521,24 +521,19 @@ async def handle_target_command(websocket, data):
                             logger.info(f"[BRIDGE] Отправка запроса ({act_type}) на устройство {target_mac}...")
                             await async_send(target_ws, {"type": "new_message", "user_msg_id": user_msg_id, "actions": [act]})
                             try:
-                                client_data = await asyncio.wait_for(future, timeout=25.0)
+                                # Отвязываем ожидание от главного цикла обработки сообщений
+                                wait_task = asyncio.create_task(asyncio.wait_for(future, timeout=25.0))
+                                client_data = await wait_task
                                 logger.info(f"[BRIDGE] Ответ от устройства {target_mac} успешно получен!")
                                 
                                 if act_type == "get_running_processes": tool_resp["processes"] = client_data.get("processes")
                                 elif act_type == "get_installed_programs": tool_resp["programs"] = client_data.get("programs")
                                 elif act_type == "request_screenshot": 
-                                    scr_b64 = client_data.get("screenshot_base64_received")
-                                    if scr_b64:
-                                        tool_resp["status"] = "Скриншот получен, анализируй."
-                                        attached_image = scr_b64
-                                        attached_res = client_data.get("screen_resolution", "unknown")
-                                        logger.info(f"[BRIDGE] Скриншот успешно извлечен из ответа: {len(scr_b64)} байт, разрешение {attached_res}")
-                                    else:
-                                        tool_resp["error"] = "C#-клиент прислал пустой скриншот (null)"
-                                        logger.error("[BRIDGE] ❌ Скриншот пуст! C#-клиент не смог его сделать или сжать.")
-                                        
-                            except TimeoutError:
-                                logger.error(f"❌ [BRIDGE] ТАЙМАУТ! Устройство {target_mac} не ответило за 25 секунд.")
+                                    tool_resp["status"] = "Скриншот получен, анализируй."
+                                    attached_image = client_data.get("screenshot_base64_received")
+                                    attached_res = client_data.get("screen_resolution", "unknown")
+                            except asyncio.TimeoutError:
+                                logger.warning(f"[BRIDGE] Таймаут ответа от устройства {target_mac}")
                                 tool_resp["error"] = "Устройство не ответило вовремя"
                             except Exception as ex:
                                 logger.error(f"❌ [BRIDGE] Непредвиденная ошибка ожидания: {ex}")
