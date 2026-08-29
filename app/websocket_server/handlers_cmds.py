@@ -112,9 +112,14 @@ async def handle_command(websocket, data):
     # ПЕРЕХВАТ ДАННЫХ ДЛЯ МОЗГА
     client_msg_id = str(data.get('user_msg_id', ''))
     if client_msg_id and client_msg_id in pending_device_responses:
+        logger.info(f"[BRIDGE DEBUG] Пойман ответ от C#. msg_id={client_msg_id}. Доступные ключи: {list(data.keys())}")
+        
         # Проверяем наличие ключей-маркеров ответа
         if "processes" in data or "programs" in data or "screenshot_base64_received" in data:
-            logger.info(f"[BRIDGE] Перехват ответа от устройства! Возвращаем данные Мозгу.")
+            scr_b64 = data.get("screenshot_base64_received")
+            scr_len = len(scr_b64) if scr_b64 else 0
+            logger.info(f"[BRIDGE] Перехват ответа от устройства! Длина картинки: {scr_len} байт.")
+            
             future = pending_device_responses[client_msg_id]
             if not future.done(): 
                 future.set_result(data)
@@ -509,14 +514,27 @@ async def handle_target_command(websocket, data):
                             await async_send(target_ws, {"type": "new_message", "user_msg_id": user_msg_id, "actions": [act]})
                             try:
                                 client_data = await asyncio.wait_for(future, timeout=25.0)
+                                logger.info(f"[BRIDGE] Ответ от устройства {target_mac} успешно получен!")
+                                
                                 if act_type == "get_running_processes": tool_resp["processes"] = client_data.get("processes")
                                 elif act_type == "get_installed_programs": tool_resp["programs"] = client_data.get("programs")
                                 elif act_type == "request_screenshot": 
-                                    tool_resp["status"] = "Скриншот получен, анализируй."
-                                    attached_image = client_data.get("screenshot_base64_received")
-                                    attached_res = client_data.get("screen_resolution", "unknown")
-                            except asyncio.TimeoutError:
-                                tool_resp["error"] = "Таймаут ответа от устройства"
+                                    scr_b64 = client_data.get("screenshot_base64_received")
+                                    if scr_b64:
+                                        tool_resp["status"] = "Скриншот получен, анализируй."
+                                        attached_image = scr_b64
+                                        attached_res = client_data.get("screen_resolution", "unknown")
+                                        logger.info(f"[BRIDGE] Скриншот успешно извлечен из ответа: {len(scr_b64)} байт, разрешение {attached_res}")
+                                    else:
+                                        tool_resp["error"] = "C#-клиент прислал пустой скриншот (null)"
+                                        logger.error("[BRIDGE] ❌ Скриншот пуст! C#-клиент не смог его сделать или сжать.")
+                                        
+                            except TimeoutError:
+                                logger.error(f"❌ [BRIDGE] ТАЙМАУТ! Устройство {target_mac} не ответило за 25 секунд.")
+                                tool_resp["error"] = "Устройство не ответило вовремя"
+                            except Exception as ex:
+                                logger.error(f"❌ [BRIDGE] Непредвиденная ошибка ожидания: {ex}")
+                                tool_resp["error"] = str(ex)
                             finally:
                                 pending_device_responses.pop(str(user_msg_id), None)
                         else:

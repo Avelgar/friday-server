@@ -782,12 +782,18 @@ class AIService:
             if commands_to_execute:
                 logger.info(f"[HEAVY TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
                 
+                # ЛОГИРУЕМ ВСЕ ДЕЙСТВИЯ, КОТОРЫЕ МОЗГ ПЫТАЕТСЯ ВЫЗВАТЬ
+                for cmd in commands_to_execute:
+                    logger.info(f"   🛠 [HEAVY CALL]: {cmd['name']} -> {cmd['args']}")
+                
                 # Идем на C# клиент (там выполнится клик или скриншот)
                 tool_results = await device_bridge_callback(commands_to_execute)
                 
                 # Собираем ответ для Мозга
                 current_input = []
                 for res in tool_results:
+                    logger.info(f"   📥 [HEAVY RESP]: Отдаем мозгу результат -> {res['response']}")
+                    
                     # 1. Добавляем системный ответ функции (JSON)
                     current_input.append(
                         types.Part.from_function_response(
@@ -798,13 +804,18 @@ class AIService:
                     
                     # 2. МУЛЬТИМОДАЛЬНАЯ МАГИЯ: Если функция вернула скриншот, прикрепляем его как картинку!
                     if res.get("attached_image_base64"):
-                        logger.info("[HEAVY TURN] Прикрепляю полученный скриншот к ответу для ИИ.")
-                        img_bytes = base64.b64decode(res["attached_image_base64"])
-                        res_str = res.get("attached_resolution", "неизвестно")
+                        img_b64 = res["attached_image_base64"]
+                        logger.info(f"[HEAVY TURN] Прикрепляю скриншот к ответу для ИИ. Длина Base64: {len(img_b64)} байт.")
                         
-                        # Даем ИИ подсказку с разрешением, чтобы он точно высчитал X/Y
-                        current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}."))
-                        current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
+                        try:
+                            img_bytes = base64.b64decode(img_b64)
+                            res_str = res.get("attached_resolution", "неизвестно")
+                            
+                            # Даем ИИ подсказку с разрешением, чтобы он точно высчитал X/Y
+                            current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}. Обязательно пересчитай координаты в эти пиксели перед кликом!"))
+                            current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
+                        except Exception as decode_err:
+                            logger.error(f"❌ Ошибка декодирования скриншота от клиента: {decode_err}")
 
                 if task_is_completed:
                     logger.info(f"[HEAVY DONE] Визуальная задача выполнена! Ответ: {text_result.strip()}")
