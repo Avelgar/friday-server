@@ -110,20 +110,28 @@ async def handle_audio_end(websocket, data):
 # =========================================================================
 async def handle_command(websocket, data):
     # ПЕРЕХВАТ ДАННЫХ ДЛЯ МОЗГА
+    # -------------------------------------------------------------------------
+    # МАГИЯ ПЕРЕХВАТА: Если это ответ от C# с процессами/программами для Мозга
+    # -------------------------------------------------------------------------
     client_msg_id = str(data.get('user_msg_id', ''))
     if client_msg_id and client_msg_id in pending_device_responses:
-        logger.info(f"[BRIDGE DEBUG] Пойман ответ от C#. msg_id={client_msg_id}. Доступные ключи: {list(data.keys())}")
+        logger.info(f"[BRIDGE DEBUG] Пойман ответ от C#. msg_id={client_msg_id}. Ключи: {list(data.keys())}")
         
-        # Проверяем наличие ключей-маркеров ответа
+        # Перехватываем, если есть ключи ИЛИ если это ответ на request_screenshot
         if "processes" in data or "programs" in data or "screenshot_base64_received" in data:
             scr_b64 = data.get("screenshot_base64_received")
             scr_len = len(scr_b64) if scr_b64 else 0
-            logger.info(f"[BRIDGE] Перехват ответа от устройства! Длина картинки: {scr_len} байт.")
+            
+            if "screenshot_base64_received" in data and scr_len == 0:
+                logger.error("[BRIDGE] ❌ КЛИЕНТ ПРИСЛАЛ ПУСТОЙ СКРИНШОТ! Ошибка в C# коде.")
+            else:
+                logger.info(f"[BRIDGE] Перехват ответа от устройства! Длина картинки: {scr_len} байт.")
             
             future = pending_device_responses[client_msg_id]
             if not future.done(): 
                 future.set_result(data)
-            return
+            return  # ПРЕРЫВАЕМ ФАСАД, ЭТО ПАКЕТ ДЛЯ МОЗГА!
+    # -------------------------------------------------------------------------
 
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None; dialog_id = None
     audio_chunks_count = 0; has_commands = False
