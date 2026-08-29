@@ -677,12 +677,15 @@ class AIService:
                 # Замираем и ждем, пока устройство выполнит команду и вернет ответ
                 tool_results = await device_bridge_callback(commands_to_execute)
                 
+                function_responses = [] # <--- ВЕРНИ ЭТУ СТРОЧКУ!
+                
                 # --- И ВОТ ЭТИ СТРОКИ ДЛЯ ОТВЕТА ---
                 for res in tool_results:
-                    # Урезаем ответ, если он слишком длинный (например, список всех программ)
+                    # Урезаем ответ, если он слишком длинный
                     resp_str = str(res['response'])
                     if len(resp_str) > 300: resp_str = resp_str[:300] + "... [ОБРЕЗАНО]"
                     logger.info(f"   📥 [FAST BRAIN RESP]: {resp_str}")
+                    
                     function_responses.append(
                         types.Part.from_function_response(
                             name=res["name"],
