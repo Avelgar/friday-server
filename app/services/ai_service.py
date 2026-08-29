@@ -560,7 +560,7 @@ class AIService:
     # 3. ТЕКСТОВОЙ ОРКЕСТРАТОР (БЫСТРЫЙ И ТЯЖЕЛЫЙ МОЗГ)
     # ==============================================================================
     async def _chat_send_with_retry(self, model_id, config, history, input_data):
-        """Вспомогательный метод для отправки сообщений Мозгу с автоматической сменой ключей."""
+        """Мгновенный перебор ключей без сна и задержек при 429."""
         total_keys = len(self.api_keys)
         attempts = 0
         last_err = ""
@@ -573,130 +573,27 @@ class AIService:
                 return chat, response
             except Exception as e:
                 last_err = str(e)
-                logger.warning(f"[Key {self.current_key_index}] Ошибка Brain Chat: {last_err}")
                 
+                # МГНОВЕННО МЕНЯЕМ КЛЮЧ БЕЗ ПАУЗ (0 СЕКУНД ОЖИДАНИЯ)
                 if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
-                    import re
-                    match = re.search(r"retry in ([\d\.]+)s", last_err)
-                    if match:
-                        sleep_time = float(match.group(1)) + 0.5
-                        await asyncio.sleep(sleep_time)
-                        
+                    logger.warning(f"[Key {self.current_key_index}] Квота исчерпана (429). Мгновенно переключаем ключ...")
+                else:
+                    logger.warning(f"[Key {self.current_key_index}] Ошибка Brain Chat: {last_err}")
+                
                 self._rotate_key()
                 attempts += 1
-                await asyncio.sleep(1)
+                # Никаких sleep() — сразу бомбим с нового ключа!
                 
-        raise Exception(f"Brain Chat недоступен. Последняя ошибка: {last_err}")
+        raise Exception(f"Brain Chat недоступен после перебора всех {total_keys} ключей. Ошибка: {last_err}")
 
-    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash-lite"):
-        """
-        Умный агент, который работает в цикле (Stateful ReAct).
-        device_bridge_callback - асинхронная функция из handlers_cmds.py, которая ждет выполнения на клиенте.
-        """
-        logger.info(f"[BRAIN INIT] Запуск оркестратора на базе {model_id}...")
-
-        safety_settings = [
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        ]
-
-        device_control_tool = types.Tool(
-            function_declarations=[
-                types.FunctionDeclaration(
-                    name="send_device_commands",
-                    description="Отправляет команды на устройства пользователя.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства"),
-                            "actions": types.Schema(
-                                type=types.Type.ARRAY,
-                                items=types.Schema(
-                                    type=types.Type.OBJECT,
-                                    properties={
-                                        "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение (параметр) команды")
-                                    },
-                                    required=["action_type", "action_value"]
-                                )
-                            )
-                        },
-                        required=["target_device", "actions"]
-                    )
-                )
-            ]
-        )
-
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=[device_control_tool],
-            safety_settings=safety_settings,
-            temperature=0.2 
-        )
-
-        history = []
-        if formatted_history:
-            for msg in formatted_history:
-                history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
-
-        current_input = prompt_text
-        max_turns = 10 
-        current_turn = 0
-
-        while current_turn < max_turns:
-            current_turn += 1
-            
-            chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
-            history = list(chat.get_history())
-
-            text_result = ""
-            commands_to_execute = []
-
-            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if part.text:
-                        text_result += part.text + " "
-                    if part.function_call:
-                        fc = part.function_call
-                        args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                        if isinstance(args_dict, dict) and "actions" in args_dict:
-                            commands_to_execute.append({
-                                "name": fc.name,
-                                "id": getattr(fc, "id", ""),
-                                "args": args_dict
-                            })
-
-            if commands_to_execute:
-                logger.info(f"[BRAIN TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
-                
-                # Замираем и ждем, пока устройство выполнит команду и вернет ответ (например, список процессов)
-                tool_results = await device_bridge_callback(commands_to_execute)
-                
-                function_responses = []
-                for res in tool_results:
-                    function_responses.append(
-                        types.Part.from_function_response(
-                            name=res["name"],
-                            response=res["response"]
-                        )
-                    )
-                current_input = function_responses
-            else:
-                final_answer = text_result.strip()
-                logger.info(f"[BRAIN DONE] Цикл завершен. Ответ: {final_answer}")
-                return final_answer
-                
-        logger.warning(f"[BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
-        return text_result.strip()
 
     # ==============================================================================
-    # 4. ТЯЖЕЛЫЙ МОЗГ (ЗРЕНИЕ И УПРАВЛЕНИЕ МЫШЬЮ)
+    # 4. ТЯЖЕЛЫЙ МОЗГ (НА БАЗЕ СВЕРХБЫСТРОГО 3.5 FLASH)
     # ==============================================================================
-    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.6-flash"):
+    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash"):
         """
-        Тяжелый агент с компьютерным зрением (VLM). Запрашивает скриншоты и кликает.
+        Тяжелый агент с компьютерным зрением (VLM). 
+        По умолчанию использует gemini-3.5-flash для скорости ~1.5 сек.
         """
         logger.info(f"[HEAVY BRAIN] Запуск тяжелого агента на базе {model_id}...")
 
@@ -738,7 +635,7 @@ class AIService:
             system_instruction=system_instruction,
             tools=[device_control_tool],
             safety_settings=safety_settings,
-            temperature=0.0 # НУЛЕВАЯ температура для максимальной точности координат
+            temperature=0.0 
         )
 
         history = []
@@ -747,7 +644,7 @@ class AIService:
                 history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
 
         current_input = [types.Part.from_text(text=prompt_text)]
-        max_turns = 15 # Даем больше шагов, так как визуальные задачи длинные (нашел->кликнул->ввел текст->отправил)
+        max_turns = 10 
         current_turn = 0
 
         while current_turn < max_turns:
@@ -768,7 +665,6 @@ class AIService:
                         fc = part.function_call
                         args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                         if isinstance(args_dict, dict) and "actions" in args_dict:
-                            # Проверяем, не вызвал ли ИИ "task_completed"
                             for act in args_dict.get("actions", []):
                                 if act.get("action_type") == "task_completed":
                                     task_is_completed = True
@@ -781,20 +677,14 @@ class AIService:
 
             if commands_to_execute:
                 logger.info(f"[HEAVY TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
-                
-                # ЛОГИРУЕМ ВСЕ ДЕЙСТВИЯ, КОТОРЫЕ МОЗГ ПЫТАЕТСЯ ВЫЗВАТЬ
                 for cmd in commands_to_execute:
                     logger.info(f"   🛠 [HEAVY CALL]: {cmd['name']} -> {cmd['args']}")
                 
-                # Идем на C# клиент (там выполнится клик или скриншот)
                 tool_results = await device_bridge_callback(commands_to_execute)
                 
-                # Собираем ответ для Мозга
                 current_input = []
                 for res in tool_results:
                     logger.info(f"   📥 [HEAVY RESP]: Отдаем мозгу результат -> {res['response']}")
-                    
-                    # 1. Добавляем системный ответ функции (JSON)
                     current_input.append(
                         types.Part.from_function_response(
                             name=res["name"],
@@ -802,20 +692,16 @@ class AIService:
                         )
                     )
                     
-                    # 2. МУЛЬТИМОДАЛЬНАЯ МАГИЯ: Если функция вернула скриншот, прикрепляем его как картинку!
                     if res.get("attached_image_base64"):
                         img_b64 = res["attached_image_base64"]
-                        logger.info(f"[HEAVY TURN] Прикрепляю скриншот к ответу для ИИ. Длина Base64: {len(img_b64)} байт.")
-                        
+                        logger.info(f"[HEAVY TURN] Прикрепляю скриншот к ответу для ИИ ({len(img_b64)} байт).")
                         try:
                             img_bytes = base64.b64decode(img_b64)
                             res_str = res.get("attached_resolution", "неизвестно")
-                            
-                            # Даем ИИ подсказку с разрешением, чтобы он точно высчитал X/Y
                             current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}. Обязательно пересчитай координаты в эти пиксели перед кликом!"))
                             current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
                         except Exception as decode_err:
-                            logger.error(f"❌ Ошибка декодирования скриншота от клиента: {decode_err}")
+                            logger.error(f"❌ Ошибка декодирования скриншота: {decode_err}")
 
                 if task_is_completed:
                     logger.info(f"[HEAVY DONE] Визуальная задача выполнена! Ответ: {text_result.strip()}")
@@ -823,7 +709,7 @@ class AIService:
 
             else:
                 final_answer = text_result.strip()
-                logger.info(f"[HEAVY DONE] Цикл завершен (без вызова функций). Ответ: {final_answer}")
+                logger.info(f"[HEAVY DONE] Цикл завершен. Ответ: {final_answer}")
                 return final_answer
                 
         logger.warning(f"[HEAVY BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")

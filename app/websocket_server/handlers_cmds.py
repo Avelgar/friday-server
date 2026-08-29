@@ -503,7 +503,8 @@ async def handle_target_command(websocket, data):
                             system_instruction=heavy_instruction,
                             allowed_actions=heavy_allowed,
                             formatted_history=[], 
-                            device_bridge_callback=lambda cmds: device_bridge_callback(cmds, is_heavy=True)
+                            device_bridge_callback=lambda cmds: device_bridge_callback(cmds, is_heavy=True),
+                            model_id="gemini-3.5-flash" # <--- СТАВИМ 3.5 FLASH
                         )
                         tool_resp["heavy_brain_report"] = heavy_result
                         
