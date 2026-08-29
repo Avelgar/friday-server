@@ -703,7 +703,7 @@ class AIService:
     # ==============================================================================
     # 4. ТЯЖЕЛЫЙ МОЗГ (НА БАЗЕ СВЕРХБЫСТРОГО 3.5 FLASH)
     # ==============================================================================
-    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash"):
+    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3-flash-preview"):
         """
         Тяжелый агент с компьютерным зрением (VLM). 
         По умолчанию использует gemini-3.5-flash для скорости ~1.5 сек.
