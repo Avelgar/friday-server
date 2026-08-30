@@ -827,4 +827,65 @@ class AIService:
         logger.warning(f"[HEAVY BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
         return text_result.strip()
 
+    # ==============================================================================
+    # 5. РОБОТ-АГЕНТ (ER МОДЕЛЬ ДЛЯ ПРОСТРАНСТВЕННОГО АНАЛИЗА)
+    # ==============================================================================
+    async def execute_robotics_agent(self, prompt_text, device_bridge_callback, model_id="gemini-robotics-er-2-preview"):
+        logger.info(f"[ROBOT BRAIN] Запуск агента ER на базе {model_id}...")
+
+        # Настраиваем жесткий промпт для выдачи координат
+        system_instruction = """Ты — мозг физического робота. Тебе пришлют кадр с камеры и название объекта (или задачу). 
+        Твоя задача — вернуть координаты центра нужного объекта в формате [y, x], где значения по обеим осям от 0 до 1000.
+        Если объекта нет в кадре, верни [0, 0]. Не пиши ничего, кроме координат."""
+
+        config = types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.0
+        )
+
+        logger.info("[ROBOT BRAIN] Запрашиваю кадр с камеры PiBot...")
+        # Вызываем мост, чтобы дергнуть request_screenshot у робота
+        tool_results = await device_bridge_callback([
+            {"name": "send_device_commands", "args": {"target_device": "PiBot", "actions": [{"action_type": "request_screenshot", "action_value": ""}]}}
+        ])
+        
+        img_b64 = None
+        for res in tool_results:
+            if res.get("attached_image_base64"):
+                img_b64 = res["attached_image_base64"]
+                break
+
+        if not img_b64:
+            logger.error("[ROBOT BRAIN] Ошибка: Камера не ответила.")
+            return "Камера робота не ответила на запрос."
+
+        logger.info(f"[ROBOT BRAIN] Кадр получен! Отправляю в ER модель...")
+        img_bytes = base64.b64decode(img_b64)
+        current_input = [
+            types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)),
+            types.Part.from_text(text=f"Найди объект: {prompt_text}")
+        ]
+
+        total_keys = len(self.api_keys)
+        attempts = 0
+        last_err = ""
+        
+        while attempts < total_keys:
+            try:
+                client = self._get_client()
+                response = await client.aio.models.generate_content(
+                    model=model_id, 
+                    contents=current_input,
+                    config=config
+                )
+                er_result = response.text.strip()
+                logger.info(f"[ROBOT BRAIN ER OUTPUT]: {er_result}")
+                return f"Координаты объекта '{prompt_text}' в поле зрения робота: {er_result}"
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"[ROBOT BRAIN ERROR Key {self.current_key_index}] {last_err}")
+                self._rotate_key()
+                attempts += 1
+                
+        return f"Ошибка ER модели после {total_keys} попыток: {last_err}"
 ai_instance = AIService()
