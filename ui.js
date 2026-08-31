@@ -198,8 +198,12 @@ function handleIncomingStreamData(data) {
         
         if (isFinal) {
             // === СНИМАЕМ ЖЕСТКУЮ БЛОКИРОВКУ МИКРОФОНА ===
-            isPlaying = false; 
             vadState = 'idle';
+            // Если ИИ прислал аудио, ждем пока оно доиграет (playPCM24kHz сам снимет isPlaying)
+            // Если аудио нет (только текст), снимаем блокировку принудительно прямо сейчас:
+            if (!window.streamAudioContext || window.streamAudioContext.currentTime >= window.nextPlayTime) {
+                isPlaying = false;
+            }
         }
 
         if (data.text && msgId !== ignoredMessageId) {

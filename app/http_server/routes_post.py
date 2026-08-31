@@ -116,6 +116,9 @@ def do_POST(self):
                     self._send_sse({"type": "delete_message"})
                 else:
                     logger.info("[HTTP] Генерация потока успешно завершена.")
+                    # --- ДОБАВЬ ВОТ ЭТУ СТРОЧКУ ---
+                    self._send_sse({"type": "new_message", "message_id": bot_msg_id, "text": "", "actions": []})
+                    # ------------------------------
 
             try: asyncio.run(run_ai_stream())
             except Exception as ex:
