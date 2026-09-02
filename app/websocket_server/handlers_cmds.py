@@ -291,12 +291,14 @@ async def handle_command(websocket, data):
                             act_val = act.get('action_value')
                             
                             # ДЕЛЕГИРОВАНИЕ МОЗГУ
+                            # ДЕЛЕГИРОВАНИЕ МОЗГУ
                             if act_type == "delegate_to_brain":
                                 logger.warning(f"🧠 [ФАСАД ДЕЛЕГИРУЕТ ЗАДАЧУ МОЗГУ]: {act_val}")
                                 pseudo_data = {
                                     "internal_routing": "brain_agent", 
                                     "task": act_val,
                                     "source_name": sender_name, 
+                                    "source_type": device_type,  # <--- НОВАЯ СТРОЧКА!
                                     "mac": mac, 
                                     "user_id": sender_device.get('user_id'), 
                                     "user_msg_id": user_msg_id, 
@@ -402,6 +404,7 @@ async def handle_target_command(websocket, data):
         name = data.get('name', 'Пятница')
         task = data.get('task', '')
         source_name = data.get('source_name')
+        source_type = data.get('source_type', 'неизвестно') # <--- НОВАЯ СТРОЧКА!
         mac = data.get('mac')
         user_id = data.get("user_id")
         user_msg_id = data.get("user_msg_id")
@@ -447,14 +450,16 @@ async def handle_target_command(websocket, data):
         fast_caps, fast_allowed = get_action_strings(fast_acts)
 
         fast_instruction = f"""Ты — Быстрый Мозг-Оркестратор. 
-Твое текущее устройство (инициатор): {source_name}. Задача: {task}.
+Твое текущее устройство (инициатор): {source_name} (Тип: {source_type}). Задача: {task}.
 
 АЛГОРИТМ РАБОТЫ (СТРОГО СВЕРХУ ВНИЗ):
-1. ШАГ 1 - ПРОВЕРКА ВОЗМОЖНОСТЕЙ:
-Внимательно изучи список своих инструментов. Если просят сделать то, чего ты не умеешь (например, узнать IP-адрес, выключить компьютер) — НИКУДА НЕ ДЕЛЕГИРУЙ! Верни ответ: "Я пока не умею этого делать".
 
-2. ШАГ 2 - ПОИСК УСТРОЙСТВА:
-Если просят выполнить действие на другом устройстве в сети, вызови "check_network_devices". В "target_device" укажи "{source_name}".
+1. ШАГ 1 - ПРОВЕРКА ВОЗМОЖНОСТЕЙ:
+Внимательно изучи список своих инструментов. Если просят сделать то, чего ты не умеешь — НИКУДА НЕ ДЕЛЕГИРУЙ! Верни ответ: "Я пока не умею этого делать".
+
+2. ШАГ 2 - ОПРЕДЕЛЕНИЕ ЦЕЛЕВОГО УСТРОЙСТВА:
+Если в задаче не указано устройство, оцени свой Тип: "{source_type}". Если ты находишься в браузере (WEB) или на телефоне, а задача требует системных команд ПК (например: процессы, программы, файлы, клики), ты НЕ МОЖЕШЬ выполнить её локально. 
+В этом случае СНАЧАЛА вызови "check_network_devices" (указав target_device="{source_name}"), чтобы получить список устройств и найти там компьютер пользователя (ПК) в сети. Затем отправляй команды уже на этот найденный компьютер!
 
 3. ШАГ 3 - ДЕЛЕГИРОВАНИЕ СЛОЖНЫХ ЗАДАЧ:
 - ВИЗУАЛЬНОЕ УПРАВЛЕНИЕ ПК: Вызывай "delegate_to_heavy_brain" ТОЛЬКО для кликов мышью, печати или анализа экрана ПК.
@@ -465,6 +470,7 @@ async def handle_target_command(websocket, data):
 
 5. ШАГ 5 - ФИНАЛ:
 Когда задача выполнена, напиши финальный текст ответа для пользователя.
+
 Доступные инструменты:
 {fast_caps}"""
 
