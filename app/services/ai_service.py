@@ -630,7 +630,7 @@ class AIService:
             system_instruction=system_instruction,
             tools=[device_control_tool],
             safety_settings=safety_settings,
-            temperature=0.2 
+            temperature=0.2
         )
 
         history = []
@@ -810,11 +810,10 @@ class AIService:
                         try:
                             img_bytes = base64.b64decode(img_b64)
                             res_str = res.get("attached_resolution", "неизвестно")
-                            current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}. Пересчитай координаты в пиксели перед кликом!"))
+                            current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}. Выполни задачу пользователя."))                      
                             current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
                         except Exception as decode_err:
                             logger.error(f"❌ Ошибка декодирования скриншота: {decode_err}")
-
                 if task_is_completed:
                     logger.info(f"[HEAVY DONE] Визуальная задача выполнена! Ответ: {text_result.strip()}")
                     return text_result.strip()
