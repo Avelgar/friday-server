@@ -830,62 +830,167 @@ class AIService:
     # ==============================================================================
     # 5. РОБОТ-АГЕНТ (ER МОДЕЛЬ ДЛЯ ПРОСТРАНСТВЕННОГО АНАЛИЗА)
     # ==============================================================================
-    async def execute_robotics_agent(self, prompt_text, device_bridge_callback, model_id="gemini-robotics-er-2-preview"):
-        logger.info(f"[ROBOT BRAIN] Запуск агента ER на базе {model_id}...")
+    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash"):
+        logger.info(f"[HEAVY BRAIN] Запуск тяжелого агента (NATIVE COMPUTER USE) на базе {model_id}...")
 
-        # Настраиваем жесткий промпт для выдачи координат
-        system_instruction = """Ты — мозг физического робота. Тебе пришлют кадр с камеры и название объекта (или задачу). 
-        Твоя задача — вернуть координаты центра нужного объекта в формате [y, x], где значения по обеим осям от 0 до 1000.
-        Если объекта нет в кадре, верни [0, 0]. Не пиши ничего, кроме координат."""
+        safety_settings = [
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
+        ]
+
+        # 1. Твой классический инструмент (оставляем для скриншотов и task_completed)
+        device_control_tool = types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="send_device_commands",
+                    description="Отправляет команды на устройства пользователя.",
+                    parameters=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства"),
+                            "actions": types.Schema(
+                                type=types.Type.ARRAY,
+                                items=types.Schema(
+                                    type=types.Type.OBJECT,
+                                    properties={
+                                        "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
+                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение (параметр) команды")
+                                    },
+                                    required=["action_type", "action_value"]
+                                )
+                            )
+                        },
+                        required=["target_device", "actions"]
+                    )
+                )
+            ]
+        )
+
+        # 2. ОФИЦИАЛЬНЫЙ ИНСТРУМЕНТ GOOGLE COMPUTER USE
+        native_computer_use_tool = types.Tool(
+            computer_use=types.ComputerUse(
+                environment=types.Environment.ENVIRONMENT_BROWSER # Включает нативный пространственный движок Gemini
+            )
+        )
 
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
-            temperature=0.0
+            tools=[device_control_tool, native_computer_use_tool], # Активируем обе системы
+            safety_settings=safety_settings,
+            temperature=0.0 
         )
 
-        logger.info("[ROBOT BRAIN] Запрашиваю кадр с камеры PiBot...")
-        # Вызываем мост, чтобы дергнуть request_screenshot у робота
-        tool_results = await device_bridge_callback([
-            {"name": "send_device_commands", "args": {"target_device": "PiBot", "actions": [{"action_type": "request_screenshot", "action_value": ""}]}}
-        ])
-        
-        img_b64 = None
-        for res in tool_results:
-            if res.get("attached_image_base64"):
-                img_b64 = res["attached_image_base64"]
-                break
+        history = []
+        if formatted_history:
+            for msg in formatted_history:
+                history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
 
-        if not img_b64:
-            logger.error("[ROBOT BRAIN] Ошибка: Камера не ответила.")
-            return "Камера робота не ответила на запрос."
+        current_input = [types.Part.from_text(text=prompt_text)]
+        max_turns = 10 
+        current_turn = 0
 
-        logger.info(f"[ROBOT BRAIN] Кадр получен! Отправляю в ER модель...")
-        img_bytes = base64.b64decode(img_b64)
-        current_input = [
-            types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)),
-            types.Part.from_text(text=f"Найди объект: {prompt_text}")
-        ]
+        while current_turn < max_turns:
+            current_turn += 1
+            
+            chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
+            history = list(chat.get_history())
 
-        total_keys = len(self.api_keys)
-        attempts = 0
-        last_err = ""
-        
-        while attempts < total_keys:
-            try:
-                client = self._get_client()
-                response = await client.aio.models.generate_content(
-                    model=model_id, 
-                    contents=current_input,
-                    config=config
-                )
-                er_result = response.text.strip()
-                logger.info(f"[ROBOT BRAIN ER OUTPUT]: {er_result}")
-                return f"Координаты объекта '{prompt_text}' в поле зрения робота: {er_result}"
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"[ROBOT BRAIN ERROR Key {self.current_key_index}] {last_err}")
-                self._rotate_key()
-                attempts += 1
+            text_result = ""
+            commands_to_execute = []
+            task_is_completed = False
+
+            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if part.text:
+                        text_result += part.text + " "
+                    if part.function_call:
+                        fc = part.function_call
+                        args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                        
+                        logger.info(f"⚡ [NATIVE TOOL CATCHER]: ИИ вызвал: {fc.name} -> {args_dict}")
+
+                        # АДАПТЕР: ПЕРЕВОДИМ НАТИВНЫЕ КОМАНДЫ В ФОРМАТ ТВОЕГО C#
+                        if fc.name != "send_device_commands":
+                            mapped_actions = []
+                            name_lower = fc.name.lower()
+                            
+                            # Перехватываем клик
+                            if "click" in name_lower:
+                                x = args_dict.get("x", 0)
+                                y = args_dict.get("y", 0)
+                                mapped_actions.append({"action_type": "переместить мышь", "action_value": f"{x}, {y}"})
+                                # Если это right_click, можно поменять на "пкм". По умолчанию делаем "лкм"
+                                btn = "пкм" if "right" in name_lower else "лкм"
+                                mapped_actions.append({"action_type": "нажать кнопку мыши", "action_value": btn})
+                                
+                            # Перехватываем ввод с клавиатуры
+                            elif "type" in name_lower or "keyboard" in name_lower:
+                                text_to_type = args_dict.get("text", "")
+                                mapped_actions.append({"action_type": "напечатать текст", "action_value": text_to_type})
+                            
+                            if mapped_actions:
+                                # Извлекаем имя ПК из промпта
+                                target_dev = prompt_text.split("Целевое устройство: ")[-1].split(".")[0].strip() if "Целевое устройство" in prompt_text else ""
+                                args_dict = {
+                                    "target_device": target_dev,
+                                    "actions": mapped_actions
+                                }
+                                fc.name = "send_device_commands" # Подменяем имя, чтобы твой Bridge понял
+                        
+                        # Дальше твоя стандартная логика
+                        if isinstance(args_dict, dict) and "actions" in args_dict:
+                            for act in args_dict.get("actions", []):
+                                if act.get("action_type") == "task_completed":
+                                    task_is_completed = True
+                                    if act.get("action_value"):
+                                        text_result = act.get("action_value")
+                            
+                            commands_to_execute.append({
+                                "name": fc.name,
+                                "id": getattr(fc, "id", ""),
+                                "args": args_dict
+                            })
+
+            if commands_to_execute:
+                logger.info(f"[HEAVY TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
+                for cmd in commands_to_execute:
+                    logger.info(f"   🛠 [HEAVY CALL]: {cmd['name']} -> {cmd['args']}")
                 
-        return f"Ошибка ER модели после {total_keys} попыток: {last_err}"
+                tool_results = await device_bridge_callback(commands_to_execute)
+                
+                current_input = []
+                for res in tool_results:
+                    logger.info(f"   📥 [HEAVY RESP]: Отдаем мозгу результат -> {res['response']}")
+                    current_input.append(
+                        types.Part.from_function_response(
+                            name=res["name"],
+                            response=res["response"]
+                        )
+                    )
+                    
+                    if res.get("attached_image_base64"):
+                        img_b64 = res["attached_image_base64"]
+                        logger.info(f"[HEAVY TURN] Прикрепляю скриншот к ответу для ИИ ({len(img_b64)} байт).")
+                        try:
+                            img_bytes = base64.b64decode(img_b64)
+                            res_str = res.get("attached_resolution", "неизвестно")
+                            # Убираем из подсказки математику! Нативному тулу это не нужно.
+                            current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот получен. Разрешение монитора: {res_str}."))
+                            current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
+                        except Exception as decode_err:
+                            logger.error(f"❌ Ошибка декодирования скриншота: {decode_err}")
+
+                if task_is_completed:
+                    logger.info(f"[HEAVY DONE] Визуальная задача выполнена! Ответ: {text_result.strip()}")
+                    return text_result.strip()
+
+            else:
+                final_answer = text_result.strip()
+                logger.info(f"[HEAVY DONE] Цикл завершен. Ответ: {final_answer}")
+                return final_answer
+                
+        logger.warning(f"[HEAVY BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
+        return text_result.strip()
 ai_instance = AIService()
