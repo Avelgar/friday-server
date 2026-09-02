@@ -423,8 +423,8 @@ async def handle_target_command(websocket, data):
 
         logger.info("\n" + "="*50)
         logger.info(f"[BRAIN] Подключение текстового мозга. Задача: {task}")
-
-        # === ИНСТРУКЦИИ ТЯЖЕЛОГО МОЗГА ===
+ 
+        # === ИНСТРУКЦИИ ТЯЖЕЛОГО МОЗГА === 123
         heavy_acts = ["нажать кнопку мыши", "переместить мышь", "напечатать текст", "request_screenshot", "task_completed"]
         heavy_caps, heavy_allowed = get_action_strings(heavy_acts)
         
