@@ -585,7 +585,7 @@ class AIService:
                 
         raise Exception(f"Brain Chat недоступен после перебора всех {total_keys} ключей. Ошибка: {last_err}")
 
-    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash-lite"):
+    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-robotics-er-2-preview"):
         """
         Умный агент, который работает в цикле (Stateful ReAct).
         device_bridge_callback - асинхронная функция из handlers_cmds.py, которая ждет выполнения на клиенте.
