@@ -1,0 +1,244 @@
+/* --- БАЗОВЫЕ НАСТРОЙКИ И ПЕРЕМЕННЫЕ --- */
+:root {
+    /* Твоя палитра с брендборда */
+    --gradient: linear-gradient(135deg, #3A98D8 0%, #755BC8 100%);
+    --color-text: #1E2330;
+    --color-white: #FFFFFF;
+    --color-light: #F8F9FA; /* Легкий оттенок для разделения блоков */
+    
+    /* Шрифты */
+    --font-head: 'Montserrat', sans-serif;
+    --font-body: 'Inter', sans-serif;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-body);
+    color: var(--color-text);
+    background-color: var(--color-white);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, .logo {
+    font-family: var(--font-head);
+    font-weight: 700;
+}
+
+.container {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+/* Утилиты (вспомогательные классы) */
+.text-center { text-align: center; }
+.gradient-bg { background: var(--gradient); color: var(--color-white); }
+.bg-white { background: var(--color-white); }
+.bg-light { background: var(--color-light); }
+
+/* --- КНОПКИ --- */
+.btn {
+    display: inline-block;
+    padding: 14px 28px;
+    border-radius: 50px;
+    text-decoration: none;
+    font-weight: 500;
+    font-size: 15px;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.btn-white {
+    background-color: var(--color-white);
+    color: var(--color-text);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+
+.btn-white:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.15);
+}
+
+.btn-outline {
+    border: 2px solid var(--color-text);
+    color: var(--color-text);
+    padding: 10px 24px;
+}
+
+.btn-outline:hover {
+    background-color: var(--color-text);
+    color: var(--color-white);
+}
+
+/* --- НАВИГАЦИЯ --- */
+.navbar {
+    padding: 20px 0;
+    background-color: var(--color-white);
+}
+
+.nav-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.logo {
+    font-size: 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--color-text);
+}
+
+/* --- HERO (Главный экран) --- */
+.hero {
+    padding: 100px 0 120px;
+    text-align: center;
+}
+
+.hero h1 {
+    font-size: 54px;
+    line-height: 1.2;
+    margin-bottom: 24px;
+}
+
+.hero p {
+    font-size: 18px;
+    max-width: 600px;
+    margin: 0 auto 40px;
+    opacity: 0.9;
+}
+
+/* --- ПРЕИМУЩЕСТВА (Блок 2) --- */
+.features {
+    padding: 100px 0;
+}
+
+.section-title {
+    font-size: 36px;
+    text-align: center;
+    margin-bottom: 60px;
+}
+
+.features-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 30px;
+}
+
+.feature-card {
+    background: var(--color-white);
+    padding: 40px 30px;
+    border-radius: 20px;
+    box-shadow: 0 10px 30px rgba(30, 35, 48, 0.05);
+    text-align: center;
+    transition: transform 0.3s ease;
+}
+
+.feature-card:hover {
+    transform: translateY(-5px);
+}
+
+.feature-card .icon {
+    font-size: 40px;
+    margin-bottom: 20px;
+}
+
+.feature-card h3 {
+    font-size: 20px;
+    margin-bottom: 15px;
+}
+
+.feature-card p {
+    font-size: 15px;
+    color: #555;
+}
+
+/* --- УТП (Блок 3) --- */
+.usp {
+    padding: 80px 0;
+}
+
+.usp-content {
+    max-width: 800px;
+    text-align: center;
+}
+
+.usp-text {
+    font-size: 18px;
+    line-height: 1.8;
+}
+
+/* --- ИНТЕРФЕЙС (Блок 4) --- */
+.showcase {
+    padding: 100px 0;
+}
+
+.mockup-container {
+    margin-top: 50px;
+    display: flex;
+    justify-content: center;
+}
+
+.mockup-placeholder {
+    width: 100%;
+    max-width: 600px;
+    height: 300px;
+    border-radius: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 20px 40px rgba(117, 91, 200, 0.2);
+}
+
+.mockup-window {
+    background: var(--color-white);
+    color: var(--color-text);
+    padding: 20px 40px;
+    border-radius: 16px;
+    font-weight: bold;
+    font-size: 24px;
+    text-align: left;
+}
+
+.mockup-window span {
+    font-size: 14px;
+    font-weight: normal;
+    color: #666;
+}
+
+/* --- CTA И ФУТЕР (Блок 5) --- */
+.cta {
+    padding: 80px 0;
+}
+
+.cta h2 {
+    font-size: 36px;
+    margin-bottom: 20px;
+}
+
+.cta p {
+    font-size: 18px;
+    margin-bottom: 40px;
+    opacity: 0.9;
+}
+
+.footer {
+    padding: 30px 0;
+    text-align: center;
+    color: #888;
+    font-size: 14px;
+}
+
+/* --- АДАПТИВНОСТЬ (Мобильные устройства) --- */
+@media (max-width: 768px) {
+    .hero h1 { font-size: 38px; }
+    .features-grid { grid-template-columns: 1fr; }
+    .section-title { font-size: 28px; margin-bottom: 40px; }
+}

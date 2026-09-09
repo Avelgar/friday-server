@@ -11,6 +11,9 @@ def do_GET(self):
 
     if path == '/': self.serve_file('index.html', 'text/html; charset=utf-8')
     elif path == '/style.css': self.serve_file('style.css', 'text/css; charset=utf-8')
+    elif path == '/favicon.ico': self.serve_file('favicon.ico', 'image/x-icon')
+    elif path == '/landing.css': self.serve_file('landing.css', 'text/css; charset=utf-8')
+    elif path == '/landing': self.serve_file('landing.html', 'text/html; charset=utf-8')
     elif path == '/app.js': self.serve_file('app.js', 'application/javascript; charset=utf-8')
     elif path == '/ui.js': self.serve_file('ui.js', 'application/javascript; charset=utf-8') 
     elif path == '/media.js': self.serve_file('media.js', 'application/javascript; charset=utf-8') 
