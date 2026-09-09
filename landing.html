@@ -3,99 +3,179 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Пятница — Ваш голосовой помощник для Windows</title>
+    <title>Пятница — Голосовой помощник для Windows</title>
     
-    <!-- Подключение шрифтов из Google Fonts -->
+    <!-- Шрифты по брендборду -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Montserrat:wght@700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Montserrat:wght@700;800&display=swap" rel="stylesheet">
     
-    <!-- Подключение стилей -->
     <link rel="stylesheet" href="landing.css">
 </head>
 <body>
 
-    <!-- Навигация -->
+    <!-- НАВИГАЦИЯ -->
     <header class="navbar">
-        <div class="container nav-container">
+        <div class="container nav-content">
             <div class="logo">
-                <span class="logo-icon">🤖</span> Пятница
+                <span class="logo-icon">🤖</span>
+                <span class="logo-text">Пятница</span>
             </div>
-            <a href="#download" class="btn btn-outline">Скачать</a>
+            <nav class="nav-links">
+                <a href="#features">Функции</a>
+                <a href="#usp">Особенности</a>
+                <a href="#preview">Интерфейс</a>
+                <a href="https://friday-assistant.ru" target="_blank" class="nav-ghost">Веб-версия</a>
+                <a href="#download" class="btn btn-nav">Скачать</a>
+            </nav>
         </div>
     </header>
 
-    <!-- БЛОК 1: Главный экран (Hero) -->
-    <section class="hero gradient-bg">
-        <div class="container hero-content">
-            <h1>Говорите —<br>«Пятница» сделает</h1>
-            <p>Голосовой помощник для ПК, который не просто ищет информацию, а реально управляет системой, окнами и файлами вместо вас.</p>
-            <a href="#download" class="btn btn-white">Попробовать бесплатно</a>
-        </div>
-    </section>
-
-    <!-- БЛОК 2: Как это работает (Преимущества) -->
-    <section class="features bg-white">
-        <div class="container">
-            <h2 class="section-title">Меньше рутины, больше результата</h2>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <div class="icon">🚀</div>
-                    <h3>Запускает софт</h3>
-                    <p>Просто скажите «Открой Word и браузер», и Пятница сама найдет и запустит нужные программы.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">📁</div>
-                    <h3>Управляет файлами</h3>
-                    <p>Ищет, копирует, переименовывает и перемещает документы по одной голосовой команде.</p>
-                </div>
-                <div class="feature-card">
-                    <div class="icon">⚙️</div>
-                    <h3>Настраивает систему</h3>
-                    <p>Меняет громкость, включает темную тему или отправляет ПК в спящий режим без кликов мышкой.</p>
+    <main>
+        <!-- БЛОК 1: Главный экран (Hero + Главный CTA) -->
+        <section class="section hero">
+            <div class="container hero-inner">
+                <div class="pill-tag">✨ Интеллектуальный помощник для Windows</div>
+                <h1 class="hero-title">Говорите —<br>«Пятница» сделает</h1>
+                <p class="hero-subtitle">
+                    Голосовой ассистент, который не просто ищет информацию в сети, а напрямую управляет файлами, окнами и программами на вашем компьютере.
+                </p>
+                <div class="cta-group">
+                    <a href="#download" class="btn btn-white-cta">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.901-1.799"/></svg>
+                        Скачать для Windows
+                    </a>
+                    <a href="https://friday-assistant.ru" target="_blank" class="btn btn-glass-cta">
+                        Попробовать веб-версию →
+                    </a>
                 </div>
             </div>
-        </div>
-    </section>
+        </section>
 
-    <!-- БЛОК 3: Уникальное торговое предложение (УТП) -->
-    <section class="usp bg-light">
-        <div class="container usp-content">
-            <h2 class="section-title">Почему «Пятница», а не чат-бот?</h2>
-            <p class="usp-text">
-                В отличие от обычных голосовых помощников или нейросетей, запертых в браузере, «Пятница» интегрирована непосредственно в Windows. Она не просто отвечает на вопросы текстом, а <strong>выполняет действия в системе</strong>: управляет активными окнами, взаимодействует с файловой системой и автоматизирует ваши повторяющиеся задачи.
-            </p>
-        </div>
-    </section>
-
-    <!-- БЛОК 4: Визуальная демонстрация -->
-    <section class="showcase bg-white">
-        <div class="container text-center">
-            <h2 class="section-title">Интерфейс, который не отвлекает</h2>
-            <p>Минималистичный дизайн, плавные формы и ощущение полного контроля.</p>
-            <div class="mockup-container">
-                <!-- Сюда в будущем можно вставить реальный скриншот приложения -->
-                <div class="mockup-placeholder gradient-bg">
-                    <div class="mockup-window">
-                        🤖 Слушаю...<br><span>Управляйте компьютером голосом</span>
+        <!-- БЛОК 2: Карточки функционала (Белые плашки на градиенте) -->
+        <section id="features" class="section">
+            <div class="container">
+                <div class="section-title-wrap">
+                    <span class="section-label">Возможности</span>
+                    <h2>Меньше рутины — больше результата</h2>
+                </div>
+                <div class="features-grid">
+                    <div class="card feature-card">
+                        <div class="card-icon">🚀</div>
+                        <h3>Запуск программ</h3>
+                        <p>«Открой браузер и редактор кода» — рабочее окружение запускается мгновенно одной фразой.</p>
+                    </div>
+                    <div class="card feature-card">
+                        <div class="card-icon">📁</div>
+                        <h3>Управление файлами</h3>
+                        <p>Быстрый поиск, сортировка документов, очистка корзины и перемещение файлов без проводника.</p>
+                    </div>
+                    <div class="card feature-card">
+                        <div class="card-icon">⚙️</div>
+                        <h3>Контроль системы</h3>
+                        <p>Регулировка громкости, смена тем оформления и выключение компьютера по расписанию голосом.</p>
                     </div>
                 </div>
             </div>
-        </div>
-    </section>
+        </section>
 
-    <!-- БЛОК 5: Финальный призыв к действию (CTA) и Подвал -->
-    <section id="download" class="cta gradient-bg">
-        <div class="container text-center">
-            <h2>Освободите свои руки уже сегодня</h2>
-            <p>Скачайте бета-версию «Пятницы» для Windows.</p>
-            <a href="#" class="btn btn-white cta-btn">Скачать для Windows</a>
-        </div>
-    </section>
+        <!-- БЛОК 3: УТП и Сравнение (По методичке) -->
+        <section id="usp" class="section">
+            <div class="container">
+                <div class="section-title-wrap">
+                    <span class="section-label">Преимущество</span>
+                    <h2>Почему «Пятница», а не чат-бот?</h2>
+                </div>
+                <div class="card comparison-card">
+                    <div class="compare-side bad">
+                        <div class="compare-heading">Обычные браузерные ИИ ✕</div>
+                        <ul>
+                            <li>Заперты на вкладке браузера</li>
+                            <li>Только генерируют текст, не влияя на систему</li>
+                            <li>Приходится вручную копировать команды и окна</li>
+                            <li>Нет прямого доступа к локальным файлам</li>
+                        </ul>
+                    </div>
+                    <div class="compare-divider"></div>
+                    <div class="compare-side good">
+                        <div class="compare-heading">Помощник «Пятница» ✓</div>
+                        <ul>
+                            <li><strong>Прямая интеграция</strong> с операционной системой Windows</li>
+                            <li><strong>Выполняет действия:</strong> запускает софт, сворачивает окна</li>
+                            <li><strong>Работает в фоне</strong> поверх любых игр и рабочих программ</li>
+                            <li><strong>Персонализация:</strong> выбор голоса и характера ассистента</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
 
-    <footer class="footer bg-white">
-        <div class="container">
-            <p>© 2026 Проект «Пятница». Все права защищены.</p>
+        <!-- БЛОК 4: Интерфейс / Демонстрация приложения -->
+        <section id="preview" class="section">
+            <div class="container">
+                <div class="section-title-wrap">
+                    <span class="section-label">Интерфейс</span>
+                    <h2>Управление без лишних окон</h2>
+                </div>
+                <!-- Окно приложения как на сайте friday-assistant.ru -->
+                <div class="card app-showcase-window">
+                    <div class="mock-header">
+                        <div class="mock-dots">
+                            <span></span><span></span><span></span>
+                        </div>
+                        <span class="mock-title">Friday Assistant — Windows Client</span>
+                    </div>
+                    <div class="mock-body">
+                        <div class="mock-sidebar">
+                            <div class="mock-newchat-btn">+ Новый чат</div>
+                            <div class="mock-chat-tab active">Гостевой диалог</div>
+                            <div class="mock-chat-tab">История команд</div>
+                        </div>
+                        <div class="mock-chat-pane">
+                            <div class="mock-controls">
+                                <span class="voice-badge">Голос: Aoede (Женский)</span>
+                                <button class="mock-action-mic">🎙 Включить микрофон</button>
+                            </div>
+                            <div class="mock-messages">
+                                <div class="msg user-msg">Пятница, открой рабочий проект и поставь музыку потише.</div>
+                                <div class="msg ai-msg">Готово! Открыла проект и убавила системную громкость до 30%.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- БЛОК 5: Завершающий CTA и каналы связи (По методичке) -->
+        <section id="download" class="section">
+            <div class="container">
+                <div class="card download-card">
+                    <h2>Начните управлять ПК голосом</h2>
+                    <p class="download-desc">
+                        Скачайте бета-клиент для Windows 10/11 или присоединяйтесь к нашему Telegram-сообществу для тестирования новых функций.
+                    </p>
+                    <div class="download-buttons">
+                        <a href="#" class="btn btn-gradient-action">
+                            📥 Скачать бета-версию (v1.0)
+                        </a>
+                        <a href="https://t.me/" target="_blank" class="btn btn-outline-action">
+                            💬 Telegram проекта
+                        </a>
+                    </div>
+                    <span class="subtext">Бесплатно на этапе открытого тестирования</span>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ПОДВАЛ -->
+    <footer class="footer">
+        <div class="container footer-inner">
+            <span>© 2026 Проект «Пятница». Все права защищены.</span>
+            <div class="footer-links">
+                <a href="https://friday-assistant.ru" target="_blank">Веб-приложение</a>
+                <a href="#hero">Наверх ↑</a>
+            </div>
         </div>
     </footer>
 
