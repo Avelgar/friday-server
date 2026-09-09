@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Пятница — Голосовой помощник для Windows</title>
     
-    <!-- Шрифты по брендборду -->
+    <!-- Шрифты -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Montserrat:wght@700;800&display=swap" rel="stylesheet">
@@ -18,7 +18,8 @@
     <header class="navbar">
         <div class="container nav-content">
             <div class="logo">
-                <span class="logo-icon">🤖</span>
+                <!-- Твой логотип из Figma (файл лежит рядом с html) -->
+                <img src="logo.svg" alt="Логотип Пятница" class="logo-img">
                 <span class="logo-text">Пятница</span>
             </div>
             <nav class="nav-links">
@@ -32,11 +33,11 @@
     </header>
 
     <main>
-        <!-- БЛОК 1: Главный экран (Hero + Главный CTA) -->
+        <!-- БЛОК 1: Главный экран -->
         <section class="section hero">
             <div class="container hero-inner">
                 <div class="pill-tag">✨ Интеллектуальный помощник для Windows</div>
-                <h1 class="hero-title">Говорите —<br>«Пятница» сделает</h1>
+                <h1 class="hero-title">Говорите —<br><span class="hero-title-white">«Пятница» сделает</span></h1>
                 <p class="hero-subtitle">
                     Голосовой ассистент, который не просто ищет информацию в сети, а напрямую управляет файлами, окнами и программами на вашем компьютере.
                 </p>
@@ -52,12 +53,12 @@
             </div>
         </section>
 
-        <!-- БЛОК 2: Карточки функционала (Белые плашки на градиенте) -->
+        <!-- БЛОК 2: Карточки функционала -->
         <section id="features" class="section">
             <div class="container">
                 <div class="section-title-wrap">
                     <span class="section-label">Возможности</span>
-                    <h2>Меньше рутины — больше результата</h2>
+                    <h2>Меньше рутины — больше контроля</h2>
                 </div>
                 <div class="features-grid">
                     <div class="card feature-card">
@@ -79,7 +80,7 @@
             </div>
         </section>
 
-        <!-- БЛОК 3: УТП и Сравнение (По методичке) -->
+        <!-- БЛОК 3: УТП и Сравнение -->
         <section id="usp" class="section">
             <div class="container">
                 <div class="section-title-wrap">
@@ -117,7 +118,6 @@
                     <span class="section-label">Интерфейс</span>
                     <h2>Управление без лишних окон</h2>
                 </div>
-                <!-- Окно приложения как на сайте friday-assistant.ru -->
                 <div class="card app-showcase-window">
                     <div class="mock-header">
                         <div class="mock-dots">
@@ -146,13 +146,13 @@
             </div>
         </section>
 
-        <!-- БЛОК 5: Завершающий CTA и каналы связи (По методичке) -->
+        <!-- БЛОК 5: Скачивание и контакты -->
         <section id="download" class="section">
             <div class="container">
                 <div class="card download-card">
                     <h2>Начните управлять ПК голосом</h2>
                     <p class="download-desc">
-                        Скачайте бета-клиент для Windows 10/11 или присоединяйтесь к нашему Telegram-сообществу для тестирования новых функций.
+                        Скачайте бета-клиент для Windows 10/11 или присоединяйтесь к нашему Telegram-сообществу для обратной связи.
                     </p>
                     <div class="download-buttons">
                         <a href="#" class="btn btn-gradient-action">

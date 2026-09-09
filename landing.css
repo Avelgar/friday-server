@@ -1,11 +1,12 @@
-/* --- ПЕРЕМЕННЫЕ И ОСНОВНАЯ ПАЛИТРА --- */
+/* --- ПЕРЕМЕННЫЕ (ТОЧНЫЕ ЦВЕТА С БРЕНДБОРДА) --- */
 :root {
-    /* Точный сине-фиолетовый градиент из приложения и брендборда */
-    --gradient-bg: linear-gradient(135deg, #3A98D8 0%, #4F46E5 40%, #755BC8 100%);
-    --gradient-button: linear-gradient(135deg, #3A98D8 0%, #755BC8 100%);
+    /* Точный сине-фиолетовый градиент */
+    --gradient-bg: linear-gradient(135deg, #3A98D8 0%, #755BC8 100%);
     
+    --color-blue: #3A98D8;
+    --color-purple: #755BC8;
     --color-white: #FFFFFF;
-    --color-text-dark: #1E2330;      /* Графитовый цвет текста */
+    --color-text-dark: #1E2330;
     --color-text-muted: #64748B;
     --color-border: #E2E8F0;
     
@@ -19,7 +20,7 @@
     box-sizing: border-box;
 }
 
-/* ФОН ВСЕЙ СТРАНИЦЫ — СИНЕ-ФИОЛЕТОВЫЙ ГРАДИЕНТ */
+/* ФОН ВСЕЙ СТРАНИЦЫ — ЧИСТЫЙ ГРАДИЕНТ */
 body {
     font-family: var(--font-body);
     background: var(--gradient-bg);
@@ -43,7 +44,7 @@ h1, h2, h3 {
 
 /* --- НАВИГАЦИЯ --- */
 .navbar {
-    padding: 20px 0;
+    padding: 16px 0;
     position: sticky;
     top: 0;
     z-index: 1000;
@@ -61,11 +62,17 @@ h1, h2, h3 {
 .logo {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
     font-family: var(--font-heading);
     font-weight: 800;
     font-size: 22px;
     color: var(--color-white);
+}
+
+.logo-img {
+    width: 36px;
+    height: 36px;
+    object-fit: contain;
 }
 
 .nav-links {
@@ -103,20 +110,20 @@ h1, h2, h3 {
 
 .btn-nav {
     background: var(--color-white);
-    color: #4F46E5 !important;
+    color: var(--color-purple) !important;
     padding: 8px 18px;
     border-radius: 8px;
 }
 
 .btn-white-cta {
     background: var(--color-white);
-    color: #4F46E5;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+    color: var(--color-purple);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
 }
 
 .btn-white-cta:hover {
     transform: translateY(-2px);
-    box-shadow: 0 14px 35px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 14px 35px rgba(0, 0, 0, 0.3);
 }
 
 .btn-glass-cta {
@@ -131,12 +138,12 @@ h1, h2, h3 {
     transform: translateY(-2px);
 }
 
-/* --- КАРТОЧКИ (Белые плашки на градиенте) --- */
+/* --- КАРТОЧКИ --- */
 .card {
     background: var(--color-white);
     color: var(--color-text-dark);
     border-radius: 24px;
-    box-shadow: 0 20px 45px rgba(26, 17, 71, 0.25);
+    box-shadow: 0 20px 45px rgba(30, 20, 80, 0.22);
 }
 
 /* --- СЕКЦИИ --- */
@@ -160,7 +167,7 @@ h1, h2, h3 {
     font-size: 12px;
     letter-spacing: 2px;
     font-weight: 700;
-    color: rgba(255, 255, 255, 0.8);
+    color: rgba(255, 255, 255, 0.85);
     margin-bottom: 8px;
 }
 
@@ -190,7 +197,7 @@ h1, h2, h3 {
     font-size: 19px;
     max-width: 650px;
     margin: 0 auto 36px;
-    color: rgba(255, 255, 255, 0.9);
+    color: rgba(255, 255, 255, 0.95);
 }
 
 .cta-group {
@@ -199,7 +206,7 @@ h1, h2, h3 {
     gap: 16px;
 }
 
-/* --- FEATURES (Блок 2) --- */
+/* --- FEATURES --- */
 .features-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -231,7 +238,7 @@ h1, h2, h3 {
     font-size: 15px;
 }
 
-/* --- СРАВНЕНИЕ УТП (Блок 3) --- */
+/* --- СРАВНЕНИЕ (УТП) --- */
 .comparison-card {
     display: flex;
     overflow: hidden;
@@ -254,7 +261,7 @@ h1, h2, h3 {
 }
 
 .compare-side.bad .compare-heading { color: #DC2626; }
-.compare-side.good .compare-heading { color: #4F46E5; }
+.compare-side.good .compare-heading { color: var(--color-purple); }
 
 .compare-side ul {
     list-style: none;
@@ -272,7 +279,7 @@ h1, h2, h3 {
     background: #F8FAFC;
 }
 
-/* --- ОКНО ПРИЛОЖЕНИЯ (Блок 4) --- */
+/* --- ОКНО ПРИЛОЖЕНИЯ --- */
 .app-showcase-window {
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.3);
@@ -317,7 +324,7 @@ h1, h2, h3 {
 }
 
 .mock-newchat-btn {
-    background: var(--gradient-button);
+    background: var(--gradient-bg);
     color: #fff;
     padding: 10px;
     border-radius: 10px;
@@ -336,7 +343,7 @@ h1, h2, h3 {
 
 .mock-chat-tab.active {
     background: #EEF2FF;
-    color: #4F46E5;
+    color: var(--color-purple);
     font-weight: 600;
 }
 
@@ -363,7 +370,7 @@ h1, h2, h3 {
 }
 
 .mock-action-mic {
-    background: #2563EB;
+    background: var(--color-blue);
     color: #fff;
     border: none;
     padding: 8px 16px;
@@ -395,11 +402,11 @@ h1, h2, h3 {
 
 .ai-msg {
     background: #EEF2FF;
-    color: #3730A3;
+    color: var(--color-purple);
     align-self: flex-start;
 }
 
-/* --- СЕКЦИЯ СКАЧИВАНИЯ (Блок 5) --- */
+/* --- СЕКЦИЯ СКАЧИВАНИЯ --- */
 .download-card {
     padding: 60px 40px;
     text-align: center;
@@ -425,7 +432,7 @@ h1, h2, h3 {
 }
 
 .btn-gradient-action {
-    background: var(--gradient-button);
+    background: var(--gradient-bg);
     color: #fff;
     box-shadow: 0 10px 25px rgba(117, 91, 200, 0.35);
 }
