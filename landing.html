@@ -3,205 +3,382 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Пятница — Голосовой помощник для Windows</title>
-    
-    <!-- Шрифты -->
+    <meta name="description" content="«Пятница» — голосовой помощник для Windows, который запускает программы, управляет окнами и файлами, меняет настройки и помогает автоматизировать рутинные действия.">
+    <meta name="theme-color" content="#F2F8FD">
+    <title>Пятница — управляйте Windows голосом</title>
+
+    <link rel="icon" type="image/svg+xml" href="logo.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@700;800&display=swap" rel="stylesheet">
-    
     <link rel="stylesheet" href="landing.css">
 </head>
 <body>
-
-    <!-- Навигация в стиле Google AI -->
-    <header class="navbar">
+    <header class="site-header">
         <div class="container nav-content">
-            <a href="#" class="logo">
-                <img src="logo.svg" alt="Логотип" class="logo-img">
-                <span class="logo-text">Пятница</span>
+            <a href="#top" class="brand" aria-label="Пятница — наверх">
+                <img src="logo.svg" alt="" class="brand-logo">
+                <span>Пятница</span>
             </a>
-            <nav class="nav-links">
+
+            <nav class="nav-links" aria-label="Основная навигация">
                 <a href="#capabilities">Возможности</a>
-                <a href="https://friday-assistant.ru" target="_blank">Веб-версия</a>
-                <a href="https://github.com" target="_blank">GitHub</a>
-                <a href="#downloads" class="btn btn-nav">Скачать билд</a>
+                <a href="#how-it-works">Как работает</a>
+                <a href="#difference">Отличие</a>
             </nav>
+
+            <a href="/download-windows" class="button button-primary nav-cta">Скачать для Windows</a>
         </div>
     </header>
 
     <main>
-        <!-- БЛОК 1: HERO на весь экран (100vh) -->
-        <section class="hero-section">
-            <div class="ambient-glow"></div>
-            <div class="container hero-content">
-                <div class="hero-badge">Windows Client v1.0</div>
-                <h1 class="hero-title">Говорите —<br>«Пятница» сделает</h1>
-                <p class="hero-desc">
-                    Голосовой помощник с прямым доступом к системе. Управление файлами, окнами и процессами ПК.
-                </p>
-                <div class="hero-actions">
-                    <a href="#downloads" class="btn btn-primary">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.901-1.799"/></svg>
-                        Скачать для Windows
-                    </a>
-                    <a href="https://friday-assistant.ru" target="_blank" class="btn btn-secondary">
-                        Открыть веб-клиент →
-                    </a>
+        <section class="hero-section" id="top">
+            <div class="hero-grid" aria-hidden="true"></div>
+            <div class="hero-orb hero-orb-blue" aria-hidden="true"></div>
+            <div class="hero-orb hero-orb-purple" aria-hidden="true"></div>
+
+            <div class="container hero-layout">
+                <div class="hero-copy">
+                    <p class="eyebrow"><span></span> Голосовой помощник для Windows</p>
+                    <h1>Управляйте Windows <em>голосом</em></h1>
+                    <p class="hero-lead">
+                        «Пятница» запускает программы, работает с окнами и файлами,
+                        меняет настройки и берёт на себя повторяющиеся действия.
+                    </p>
+
+                    <div class="hero-actions">
+                        <a href="/download-windows" class="button button-primary button-large">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M3 5.4 10.5 4v7.3H3V5.4Zm8.6-1.6L21 2v9.3h-9.4V3.8ZM3 12.5h7.5v7.3L3 18.5v-6Zm8.6 0H21V22l-9.4-1.7v-7.8Z"/>
+                            </svg>
+                            Скачать для Windows
+                        </a>
+                        <a href="#how-it-works" class="button button-secondary button-large">
+                            Посмотреть, как работает <span aria-hidden="true">↓</span>
+                        </a>
+                    </div>
+
+                    <div class="hero-meta">
+                        <span class="meta-check" aria-hidden="true">✓</span>
+                        <span>Для Windows 10 и 11</span>
+                        <span class="meta-divider" aria-hidden="true"></span>
+                        <span>Открытый исходный код</span>
+                    </div>
+
+                    <p class="brand-phrase">Говорите — «Пятница» сделает</p>
+                </div>
+
+                <div class="command-demo" aria-label="Пример работы голосового помощника">
+                    <div class="demo-window">
+                        <div class="demo-titlebar">
+                            <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+                            <div class="demo-title"><img src="logo.svg" alt=""><span>Пятница</span></div>
+                            <span class="demo-status"><i></i> готова</span>
+                        </div>
+
+                        <div class="demo-body">
+                            <div class="demo-caption">Голосовая команда</div>
+                            <div class="speech-bubble user-command">
+                                <span class="microphone-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12h-2Z"/></svg>
+                                </span>
+                                <span>«Открой браузер»</span>
+                            </div>
+
+                            <div class="command-route" aria-hidden="true">
+                                <span class="route-line"></span>
+                                <span class="route-core"><img src="logo.svg" alt=""></span>
+                                <span class="route-line"></span>
+                            </div>
+                            <div class="route-label">Команда распознана</div>
+
+                            <div class="demo-caption demo-caption-right">Действие в Windows</div>
+                            <div class="speech-bubble action-result">
+                                <span class="result-check" aria-hidden="true">✓</span>
+                                <div><strong>Браузер открыт</strong><small>Действие выполнено</small></div>
+                            </div>
+
+                            <div class="demo-shortcuts" aria-hidden="true">
+                                <div>
+                                    <span class="shortcut-icon">
+                                        <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
+                                    </span>
+                                    Окна
+                                </div>
+                                <div>
+                                    <span class="shortcut-icon">
+                                        <svg viewBox="0 0 24 24"><path d="M3 8V6a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8Z"/><path d="M3 10h18"/></svg>
+                                    </span>
+                                    Файлы
+                                </div>
+                                <div>
+                                    <span class="shortcut-icon">
+                                        <svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h8M16 18h4"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg>
+                                    </span>
+                                    Настройки
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="demo-note"><span></span> Не объясняет действие — выполняет его</p>
                 </div>
             </div>
         </section>
 
-        <!-- БЛОК 2: Строгая таблица возможностей (Gemini style) -->
-        <section id="capabilities" class="section capabilities-section">
-            <div class="container">
-                <div class="capabilities-header">
-                    <h2>Возможности платформы</h2>
-                    <a href="https://github.com" target="_blank" class="btn btn-secondary btn-sm">
-                        Документация на GitHub
-                    </a>
+        <section class="routine-section" id="benefits">
+            <div class="container routine-layout">
+                <div class="section-intro routine-intro">
+                    <p class="section-label">Знакомая рутина</p>
+                    <h2>Компьютер требует слишком много мелких действий</h2>
+                    <p>Каждое из них занимает секунды. Вместе они постоянно отвлекают от основной задачи.</p>
                 </div>
 
-                <div class="capabilities-table-wrap">
-                    <!-- Заголовки колонок -->
-                    <div class="table-row table-head">
-                        <div class="col-feature">Функционал</div>
-                        <div class="col-product active-head">
-                            <span class="product-name">Desktop (Windows)</span>
-                            <span class="product-desc">Полный доступ к системе</span>
+                <div class="routine-list" aria-label="Примеры повседневных действий">
+                    <div class="routine-item">
+                        <span class="routine-mark" aria-hidden="true"></span>
+                        <span>Найти и запустить нужную программу</span>
+                        <span class="routine-key" aria-hidden="true">Пуск</span>
+                    </div>
+                    <div class="routine-item">
+                        <span class="routine-mark" aria-hidden="true"></span>
+                        <span>Переключить, свернуть или развернуть окно</span>
+                        <span class="routine-key" aria-hidden="true">Alt + Tab</span>
+                    </div>
+                    <div class="routine-item">
+                        <span class="routine-mark" aria-hidden="true"></span>
+                        <span>Открыть файл, папку или настройки Windows</span>
+                        <span class="routine-key" aria-hidden="true">Поиск</span>
+                    </div>
+                </div>
+
+                <div class="routine-answer">
+                    <img src="logo.svg" alt="">
+                    <div><span>Вместо лишних кликов</span><strong>Просто скажите, что нужно сделать.</strong></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="capabilities-section section" id="capabilities">
+            <div class="container">
+                <div class="section-heading">
+                    <div><p class="section-label">Возможности</p><h2>Скажите, что нужно сделать</h2></div>
+                    <p>«Пятница» помогает управлять повседневными действиями в Windows, не отрываясь от работы.</p>
+                </div>
+
+                <div class="capability-grid">
+                    <article class="capability capability-programs">
+                        <div class="capability-copy">
+                            <span class="capability-number">01</span>
+                            <h3>Запускайте программы голосом</h3>
+                            <p>Назовите приложение — «Пятница» откроет его за вас.</p>
                         </div>
-                        <div class="col-product">
-                            <span class="product-name">Web Client</span>
-                            <span class="product-desc">Работа в браузере</span>
+                        <div class="program-stack" aria-hidden="true">
+                            <div class="program-card program-card-back"><span></span></div>
+                            <div class="program-card program-card-middle"><span></span><i></i></div>
+                            <div class="program-card program-card-front">
+                                <div class="program-top"><b></b><b></b><b></b></div>
+                                <div class="program-content"><i></i><i></i><i></i></div>
+                            </div>
+                            <div class="voice-chip">«Открой браузер»</div>
                         </div>
-                    </div>
+                    </article>
 
-                    <!-- Строки таблицы -->
-                    <div class="table-row">
-                        <div class="col-feature">Голосовой ввод и диалог</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="check">✓</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Синтез речи (выбор из 4 голосов)</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="check">✓</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Запуск и завершение программ ПК</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="dash">—</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Управление окнами (свернуть, развернуть)</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="dash">—</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Работа с локальными файлами и папками</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="dash">—</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Фоновый режим и глобальный хоткей</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="dash">—</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Работа без установки (вкладка)</div>
-                        <div class="col-product active-col"><span class="dash">—</span></div>
-                        <div class="col-product"><span class="check">✓</span></div>
-                    </div>
-
-                    <div class="table-row">
-                        <div class="col-feature">Открытый исходный код</div>
-                        <div class="col-product active-col"><span class="check">✓</span></div>
-                        <div class="col-product"><span class="check">✓</span></div>
-                    </div>
-
-                    <!-- Кнопки внизу таблицы -->
-                    <div class="table-row table-foot">
-                        <div class="col-feature"></div>
-                        <div class="col-product active-foot">
-                            <a href="#downloads" class="btn btn-primary btn-full">Скачать .exe</a>
+                    <article class="capability capability-windows">
+                        <span class="capability-number">02</span>
+                        <div class="window-visual" aria-hidden="true">
+                            <div class="window-mini window-mini-back"></div>
+                            <div class="window-mini window-mini-front">
+                                <span class="window-control window-control-minimize"></span>
+                                <span class="window-control window-control-maximize"></span>
+                            </div>
                         </div>
-                        <div class="col-product">
-                            <a href="https://friday-assistant.ru" target="_blank" class="btn btn-secondary btn-full">Открыть веб</a>
+                        <h3>Управляйте окнами</h3>
+                        <p>Сворачивайте, разворачивайте и переключайте окна без мыши.</p>
+                    </article>
+
+                    <article class="capability capability-files">
+                        <span class="capability-number">03</span>
+                        <div class="folder-visual" aria-hidden="true">
+                            <span class="folder-tab"></span><span class="folder-body"></span><span class="search-line"></span>
                         </div>
+                        <h3>Работайте с файлами</h3>
+                        <p>Открывайте нужные файлы и папки с помощью команды.</p>
+                    </article>
+
+                    <article class="capability capability-settings">
+                        <span class="capability-number">04</span>
+                        <div class="settings-visual" aria-hidden="true">
+                            <div><span></span><i></i></div><div><span></span><i></i></div><div><span></span><i></i></div>
+                        </div>
+                        <h3>Меняйте настройки</h3>
+                        <p>Попросите открыть или изменить нужные параметры Windows.</p>
+                    </article>
+
+                    <article class="capability capability-routine">
+                        <div class="capability-copy">
+                            <span class="capability-number">05</span>
+                            <h3>Меньше повторяющихся действий</h3>
+                            <p>Передавайте помощнику рутинные задачи, которые приходится выполнять каждый день.</p>
+                        </div>
+                        <div class="routine-loop" aria-hidden="true">
+                            <span>команда</span>
+                            <i><svg viewBox="0 0 24 24"><path d="M5 12h14M14 7l5 5-5 5"/></svg></i>
+                            <span>действие</span>
+                            <i class="routine-repeat-icon"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-15.2-6.5L3 8M3 3v5h5M3 12a9 9 0 0 0 15.2 6.5L21 16M16 16h5v5"/></svg></i>
+                        </div>
+                    </article>
+                </div>
+            </div>
+        </section>
+
+        <section class="how-section section" id="how-it-works">
+            <div class="container">
+                <div class="section-heading how-heading">
+                    <div><p class="section-label">Как это работает</p><h2>От команды до результата — три шага</h2></div>
+                    <p>Не нужно запоминать сложные сочетания клавиш или искать нужный пункт меню.</p>
+                </div>
+
+                <ol class="steps-list">
+                    <li class="step-item">
+                        <span class="step-number">1</span>
+                        <div class="step-icon sound-icon" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+                        <h3>Скажите команду</h3>
+                        <p>Опишите действие обычными словами.</p>
+                    </li>
+                    <li class="step-item">
+                        <span class="step-number">2</span>
+                        <div class="step-icon assistant-icon" aria-hidden="true"><img src="logo.svg" alt=""></div>
+                        <h3>«Пятница» понимает задачу</h3>
+                        <p>Помощник определяет, что нужно сделать.</p>
+                    </li>
+                    <li class="step-item">
+                        <span class="step-number">3</span>
+                        <div class="step-icon done-icon" aria-hidden="true">✓</div>
+                        <h3>Windows выполняет действие</h3>
+                        <p>Результат появляется прямо на компьютере.</p>
+                    </li>
+                </ol>
+            </div>
+        </section>
+
+        <section class="difference-section" id="difference">
+            <div class="difference-glow" aria-hidden="true"></div>
+            <div class="container difference-layout">
+                <div class="difference-copy">
+                    <p class="section-label section-label-light">Главное отличие</p>
+                    <h2>Не просто отвечает.<br><em>Делает.</em></h2>
+                    <p>Обычный голосовой помощник подсказывает инструкцию. «Пятница» выполняет действие непосредственно в Windows.</p>
+                    <a href="/download-windows" class="button button-light">Скачать для Windows</a>
+                </div>
+
+                <div class="comparison" aria-label="Сравнение подходов голосовых помощников">
+                    <div class="comparison-panel comparison-usual">
+                        <span class="comparison-label">Обычный помощник</span>
+                        <p>«Чтобы открыть программу, найдите её в меню „Пуск“…»</p>
+                        <span class="comparison-result">Даёт инструкцию</span>
+                    </div>
+                    <div class="comparison-arrow" aria-hidden="true">→</div>
+                    <div class="comparison-panel comparison-friday">
+                        <span class="comparison-label"><img src="logo.svg" alt=""> Пятница</span>
+                        <p>«Открываю программу»</p>
+                        <span class="comparison-result"><i>✓</i> Действие выполнено</span>
                     </div>
                 </div>
             </div>
         </section>
 
-        <!-- БЛОК 3: Экосистема / Ссылки (GitHub, Веб, Билды) -->
-        <section id="downloads" class="section downloads-section">
-            <div class="container">
-                <div class="section-heading-center">
-                    <h2>Ресурсы проекта</h2>
-                    <p>Выберите удобный способ взаимодействия со стартапом</p>
+        <section class="commands-section section" id="commands">
+            <div class="container commands-layout">
+                <div class="commands-copy">
+                    <p class="section-label">Примеры команд</p>
+                    <h2>Говорите так, как привыкли</h2>
+                    <p>Короткая команда заменяет цепочку ручных действий.</p>
+                    <a href="/" class="text-link">Открыть веб-версию <span aria-hidden="true">↗</span></a>
                 </div>
 
-                <div class="downloads-grid">
-                    <!-- Карточка Windows -->
-                    <div class="download-card featured">
-                        <div class="card-badge">Релиз</div>
-                        <h3>Windows Client</h3>
-                        <p>Скомпилированная версия помощника для Windows 10 и 11.</p>
-                        <div class="card-action">
-                            <a href="https://github.com" target="_blank" class="btn btn-primary btn-full">
-                                Скачать с GitHub Releases
-                            </a>
-                        </div>
+                <div class="command-list">
+                    <div class="command-row">
+                        <span class="command-index">01</span><span class="command-text">«Открой браузер»</span><span class="command-response"><i>✓</i> Браузер открыт</span>
                     </div>
+                    <div class="command-row">
+                        <span class="command-index">02</span><span class="command-text">«Сверни активное окно»</span><span class="command-response"><i>✓</i> Окно свёрнуто</span>
+                    </div>
+                    <div class="command-row">
+                        <span class="command-index">03</span><span class="command-text">«Найди файл отчёта»</span><span class="command-response"><i>✓</i> Поиск запущен</span>
+                    </div>
+                    <div class="command-row">
+                        <span class="command-index">04</span><span class="command-text">«Открой настройки»</span><span class="command-response"><i>✓</i> Настройки открыты</span>
+                    </div>
+                </div>
+            </div>
+        </section>
 
-                    <!-- Карточка GitHub -->
-                    <div class="download-card">
-                        <div class="card-badge neutral">Open Source</div>
-                        <h3>Репозиторий GitHub</h3>
-                        <p>Исходный код проекта, документация команд и архитектура бэкенда.</p>
-                        <div class="card-action">
-                            <a href="https://github.com" target="_blank" class="btn btn-secondary btn-full">
-                                Перейти к репозиторию →
-                            </a>
-                        </div>
-                    </div>
+        <section class="access-section section" id="downloads">
+            <div class="container">
+                <div class="section-heading access-heading">
+                    <div><p class="section-label">Доступ к проекту</p><h2>Начните с удобного формата</h2></div>
+                    <p>Полное управление системой доступно в Windows-клиенте. Веб-версию можно попробовать без установки.</p>
+                </div>
 
-                    <!-- Карточка Веб-версии -->
-                    <div class="download-card">
-                        <div class="card-badge neutral">Web App</div>
-                        <h3>Браузерная версия</h3>
-                        <p>Быстрый доступ к голосовому ядру без установки на компьютер.</p>
-                        <div class="card-action">
-                            <a href="https://friday-assistant.ru" target="_blank" class="btn btn-secondary btn-full">
-                                Запустить в браузере →
-                            </a>
+                <div class="access-layout">
+                    <article class="windows-download">
+                        <div class="windows-copy">
+                            <span class="platform-label">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.4 10.5 4v7.3H3V5.4Zm8.6-1.6L21 2v9.3h-9.4V3.8ZM3 12.5h7.5v7.3L3 18.5v-6Zm8.6 0H21V22l-9.4-1.7v-7.8Z"/></svg>
+                                Основной продукт
+                            </span>
+                            <h3>«Пятница» для Windows</h3>
+                            <p>Полный доступ к программам, окнам, локальным файлам и настройкам компьютера.</p>
                         </div>
+                        <div class="windows-action">
+                            <span>Windows 10 и 11</span>
+                            <a href="/download-windows" class="button button-light">Скачать для Windows</a>
+                        </div>
+                    </article>
+
+                    <div class="secondary-access">
+                        <a href="/" class="access-link">
+                            <span class="access-icon globe-icon" aria-hidden="true">◎</span>
+                            <span><strong>Веб-версия</strong><small>Голосовой диалог в браузере без установки</small></span>
+                            <i aria-hidden="true">↗</i>
+                        </a>
+                        <a href="https://github.com/Avelgar/friday-server" target="_blank" rel="noopener noreferrer" class="access-link">
+                            <span class="access-icon code-icon" aria-hidden="true">&lt;/&gt;</span>
+                            <span><strong>Исходный код</strong><small>Репозиторий и структура проекта на GitHub</small></span>
+                            <i aria-hidden="true">↗</i>
+                        </a>
                     </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="final-cta-section">
+            <div class="container">
+                <div class="final-cta">
+                    <div class="final-orb" aria-hidden="true"></div>
+                    <img src="logo.svg" alt="" class="final-logo">
+                    <div class="final-copy">
+                        <p>Говорите — «Пятница» сделает</p>
+                        <h2>Меньше ручных действий.<br>Больше времени на главное.</h2>
+                    </div>
+                    <a href="/download-windows" class="button button-light button-large">Скачать для Windows</a>
                 </div>
             </div>
         </section>
     </main>
 
-    <!-- Подвал -->
-    <footer class="footer">
+    <footer class="site-footer">
         <div class="container footer-content">
-            <div class="footer-left">
-                <span class="footer-brand">Пятница</span>
-                <span class="footer-meta">© 2026 Friday Assistant. Open-source проект.</span>
-            </div>
+            <a href="#top" class="brand footer-brand" aria-label="Пятница — наверх">
+                <img src="logo.svg" alt="" class="brand-logo"><span>Пятница</span>
+            </a>
+            <p>Голосовой помощник для Windows</p>
             <div class="footer-links">
-                <a href="https://github.com" target="_blank">GitHub</a>
-                <a href="https://friday-assistant.ru" target="_blank">Веб-приложение</a>
-                <a href="#">Наверх ↑</a>
+                <a href="https://github.com/Avelgar/friday-server" target="_blank" rel="noopener noreferrer">GitHub</a>
+                <a href="/">Веб-версия</a>
+                <a href="#top">Наверх ↑</a>
             </div>
         </div>
     </footer>
-
 </body>
 </html>
