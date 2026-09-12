@@ -88,8 +88,8 @@ async function logout() {
         
         updateAuthUI(); 
         messageHistory = []; localStorage.removeItem('guestMessageHistory'); 
-        document.getElementById('chatMessages').innerHTML = ''; 
-        document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local">Гостевой диалог</div>';
+        renderEmptyChat();
+        document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local"><span>Гостевой диалог</span></div>';
         showNotification('Вы вышли из системы', 'success');
     } catch (e) { showNotification('Ошибка выхода', 'error'); }
 }
@@ -182,8 +182,10 @@ document.addEventListener('DOMContentLoaded', async function() {
     if (await verifyToken()) { 
         updateAuthUI(); connectWebSocket(); loadDialogs(); 
     } else { 
-        updateAuthUI(); document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local">Гостевой диалог</div>';
+        updateAuthUI(); document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local"><span>Гостевой диалог</span></div>';
     }
+
+    if (!document.querySelector('#chatMessages .message')) renderEmptyChat();
 
     document.getElementById('messageInput').addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; });
     
@@ -197,6 +199,21 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
                 
     document.getElementById('messageInput').addEventListener('keydown', function(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('sendMessage').click(); } });
+
+    document.getElementById('chatMessages').addEventListener('click', function(e) {
+        const suggestion = e.target.closest('.prompt-suggestion');
+        if (!suggestion) return;
+        const input = document.getElementById('messageInput');
+        input.value = suggestion.dataset.prompt || suggestion.textContent.trim();
+        input.dispatchEvent(new Event('input'));
+        input.focus();
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key !== 'Escape') return;
+        closeModals();
+        document.getElementById('sidebar').classList.remove('open');
+    });
     
     document.getElementById('file-upload').addEventListener('change', function(e) {
         const f = e.target.files[0]; const c = document.getElementById('imagePreviewContainer'); c.innerHTML = ''; c.style.display = 'none'; currentFile = null; 
@@ -215,7 +232,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     document.getElementById('registerForm').addEventListener('submit', async function(e) {
         e.preventDefault(); const em = document.getElementById('regEmail').value; const lo = document.getElementById('regLogin').value; const pw = document.getElementById('regPassword').value; const pwc = document.getElementById('regPasswordConfirm').value; const re = document.getElementById('registerResponse'); const sb = this.querySelector('button[type="submit"]');
         if (pw !== pwc) { re.textContent = 'Пароли не совпадают!'; re.className = 'response-message error'; return; }
-        try { sb.disabled = true; sb.textContent = 'Регистрация...'; const r = await fetch('/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em, login: lo, password: pw }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Зарегистрироваться'; }
+        try { sb.disabled = true; sb.textContent = 'Регистрация...'; const r = await fetch('/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em, login: lo, password: pw }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Создать аккаунт'; }
     });
 
     document.getElementById('loginForm').addEventListener('submit', async function(e) {
@@ -239,6 +256,6 @@ document.addEventListener('DOMContentLoaded', async function() {
             
     document.getElementById('recoveryForm').addEventListener('submit', async function(e) {
         e.preventDefault(); const em = document.getElementById('recoveryEmail').value; const re = document.getElementById('recoveryResponse'); const sb = this.querySelector('button[type="submit"]');
-        try { sb.disabled = true; sb.textContent = 'Отправка...'; const r = await fetch('/recover-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; setTimeout(() => { document.getElementById('recoveryModal').style.display = 'none'; this.reset(); re.className = 'response-message'; }, 3000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Восстановить пароль'; }
+        try { sb.disabled = true; sb.textContent = 'Отправка...'; const r = await fetch('/recover-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; setTimeout(() => { document.getElementById('recoveryModal').style.display = 'none'; this.reset(); re.className = 'response-message'; }, 3000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Отправить ссылку'; }
     });
 });

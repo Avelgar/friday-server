@@ -11,16 +11,33 @@ function showNotification(msg, type = 'success') {
 
 function openRegisterModal() { document.getElementById('registerModal').style.display = 'flex'; document.body.style.overflow = 'hidden'; }
 function openLoginModal() { document.getElementById('loginModal').style.display = 'flex'; document.body.style.overflow = 'hidden'; }
-function closeModals() { document.getElementById('registerModal').style.display = 'none'; document.getElementById('loginModal').style.display = 'none'; document.getElementById('recoveryModal').style.display = 'none'; document.body.style.overflow = 'auto'; }
+function closeModals() { document.getElementById('registerModal').style.display = 'none'; document.getElementById('loginModal').style.display = 'none'; document.getElementById('recoveryModal').style.display = 'none'; document.body.style.overflow = ''; }
+
+const EMPTY_CHAT_MARKUP = `
+    <div class="empty-chat">
+        <div class="empty-logo"><img src="logo.svg" alt=""></div>
+        <h2>Что нужно сделать?</h2>
+        <p>Напишите задачу или включите микрофон — «Пятница» ответит в этом диалоге.</p>
+        <div class="prompt-suggestions" aria-label="Примеры запросов">
+            <button type="button" class="prompt-suggestion" data-prompt="Что ты умеешь?">Что ты умеешь?</button>
+            <button type="button" class="prompt-suggestion" data-prompt="Как подключить компьютер?">Как подключить компьютер?</button>
+            <button type="button" class="prompt-suggestion" data-prompt="Помоги разобраться с задачей">Помоги с задачей</button>
+        </div>
+    </div>`;
+
+function renderEmptyChat() {
+    const chatMessages = document.getElementById('chatMessages');
+    if (chatMessages) chatMessages.innerHTML = EMPTY_CHAT_MARKUP;
+}
 
 function updateAuthUI() {
     const ab = document.querySelector('.auth-buttons'); if (!ab) return;
     if (userLogin) { 
-        ab.innerHTML = `<div class="user-info"><span class="user-login">${userLogin}</span><button class="auth-btn logout-btn">Выйти</button></div>`; 
+        ab.innerHTML = `<div class="user-info"><span class="user-login">${userLogin}</span><button class="auth-btn logout-btn" type="button">Выйти</button></div>`;
         document.querySelector('.logout-btn').addEventListener('click', logout); 
         document.getElementById('clear-history').style.display = 'none'; 
     } else { 
-        ab.innerHTML = `<button class="auth-btn register-btn">Регистрация</button><button class="auth-btn login-btn">Вход</button>`; 
+        ab.innerHTML = `<button class="auth-btn register-btn" type="button">Регистрация</button><button class="auth-btn login-btn" type="button">Войти</button>`;
         document.querySelector('.register-btn').addEventListener('click', openRegisterModal); 
         document.querySelector('.login-btn').addEventListener('click', openLoginModal); 
         document.getElementById('clear-history').style.display = 'flex'; 
@@ -29,7 +46,7 @@ function updateAuthUI() {
 
 async function loadDialogs() {
     const token = localStorage.getItem('token');
-    if (!token) { document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local">Гостевой диалог</div>'; return; }
+    if (!token) { document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local"><span>Гостевой диалог</span></div>'; return; }
     try {
         const response = await fetch('/api/get_dialogs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) });
         const data = await response.json();
@@ -46,14 +63,11 @@ function renderDialogs(dialogs) {
         const div = document.createElement('div');
         div.className = `dialog-item ${d.id === currentDialogId ? 'active' : ''}`;
         div.dataset.id = d.id;
-        div.style.display = 'flex'; div.style.justifyContent = 'space-between'; div.style.alignItems = 'center';
-        
         const nameSpan = document.createElement('span');
-        nameSpan.textContent = d.name; nameSpan.style.flex = '1'; nameSpan.style.overflow = 'hidden'; nameSpan.style.textOverflow = 'ellipsis';
+        nameSpan.textContent = d.name;
         nameSpan.onclick = () => selectDialog(d.id);
         
-        const delBtn = document.createElement('i'); delBtn.className = 'fas fa-trash'; delBtn.style.color = '#aaa'; delBtn.style.cursor = 'pointer'; delBtn.style.marginLeft = '10px'; delBtn.title = "Удалить чат";
-        delBtn.onmouseover = () => delBtn.style.color = '#e74c3c'; delBtn.onmouseout = () => delBtn.style.color = '#aaa';
+        const delBtn = document.createElement('i'); delBtn.className = 'fas fa-trash dialog-delete'; delBtn.title = "Удалить чат";
         delBtn.onclick = (e) => { e.stopPropagation(); if(confirm('Удалить диалог?')) deleteDialog(d.id); };
         
         div.appendChild(nameSpan); div.appendChild(delBtn); list.appendChild(div);
@@ -81,13 +95,15 @@ async function selectDialog(dialogId) {
                     if (displayText.trim()) addMessage('assistant', displayText.trim(), true, msg.id);
                 }
             });
+            if (data.history.length === 0) renderEmptyChat();
         }
-    } catch (e) {}
+        if (!document.querySelector('#chatMessages .message')) renderEmptyChat();
+    } catch (e) { renderEmptyChat(); }
 }
 
 function createNewDialog() {
     if (!localStorage.getItem('token')) { openLoginModal(); return; }
-    currentDialogId = null; document.getElementById('chatMessages').innerHTML = '';
+    currentDialogId = null; renderEmptyChat();
     document.querySelectorAll('.dialog-item').forEach(el => el.classList.remove('active'));
 }
 
@@ -97,7 +113,7 @@ async function deleteDialog(dialogId) {
         const response = await fetch('/api/delete_dialog', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token, dialog_id: dialogId }) });
         const data = await response.json();
         if (data.status === 'success') {
-            if (currentDialogId === dialogId) { currentDialogId = null; document.getElementById('chatMessages').innerHTML = ''; }
+            if (currentDialogId === dialogId) { currentDialogId = null; renderEmptyChat(); }
             await loadDialogs();
         } else { showNotification(data.message, 'error'); }
     } catch (e) { }
@@ -119,10 +135,13 @@ window.deleteMessage = async function(msgId) {
     const token = localStorage.getItem('token');
     if (token) { try { const resp = await fetch('/delete_message', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token, msg_id: msgId }) }); if (resp.ok) bubble.remove(); } catch (e) { } } 
     else { const text = bubble.querySelector('div:first-child').textContent; messageHistory = messageHistory.filter(m => m.content !== text); localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory)); bubble.remove(); }
+    if (!document.querySelector('#chatMessages .message')) renderEmptyChat();
 }
 
 function addMessage(role, content, skipHistory = false, msgId = null) {
     const chatMessages = document.getElementById('chatMessages');
+    const emptyChat = chatMessages.querySelector('.empty-chat');
+    if (emptyChat) emptyChat.remove();
     const messageElement = document.createElement('div');
     messageElement.classList.add('message', role === 'user' ? 'user-message' : 'bot-message');
     const actualMsgId = msgId || (Date.now().toString() + Math.floor(Math.random()*1000).toString());
@@ -232,7 +251,7 @@ function handleIncomingStreamData(data) {
 
 document.getElementById('clear-history').addEventListener('click', clearHistory);
 async function clearHistory(){
-    document.getElementById('chatMessages').innerHTML = '';
+    renderEmptyChat();
     const token = localStorage.getItem('token');
     if (token) {
         try { 

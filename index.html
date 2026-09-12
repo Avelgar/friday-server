@@ -3,119 +3,205 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Friday Assistant - Ваш персональный ИИ-помощник</title>
-    <meta name="description" content="Friday Assistant — персональный AI-помощник на базе Gemini для управления компьютером и телефоном с помощью голосовых команд.">
-    <meta name="theme-color" content="#6A3D8B">
-    <link rel="icon" type="image/x-icon" href="images/f.png">
+    <meta name="description" content="Веб-клиент голосового помощника «Пятница» — общайтесь голосом, подключайте компьютер и управляйте задачами из браузера.">
+    <meta name="theme-color" content="#F2F8FD">
+    <title>Пятница — веб-клиент</title>
+
+    <link rel="icon" type="image/svg+xml" href="logo.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="header-left">
-                <button class="menu-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')">
-                    <i class="fas fa-bars"></i>
+    <div class="app-frame">
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="menu-toggle icon-button" type="button" aria-label="Открыть список диалогов" onclick="document.getElementById('sidebar').classList.toggle('open')">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
                 </button>
-                <div class="logo">
-                    <h1>Friday Assistant</h1>
-                    <p class="tagline">Ваш AI-помощник</p>
-                </div>
+                <a href="/landing" class="brand" aria-label="Перейти на страницу проекта «Пятница»">
+                    <img src="logo.svg" alt="">
+                    <span class="brand-copy"><strong>Пятница</strong><small>веб-клиент</small></span>
+                </a>
             </div>
-            <div class="header-right">
-                <div class="header-downloads">
-                    <a href="/download-windows" class="dl-icon" title="Скачать для Windows"><i class="fab fa-windows"></i></a>
-                    <a href="/download-android" class="dl-icon" title="Скачать для Android"><i class="fab fa-android"></i></a>
+
+            <div class="topbar-actions">
+                <a href="/landing" class="topbar-link">О проекте</a>
+                <div class="header-downloads" aria-label="Скачать приложение">
+                    <a href="/download-windows" class="icon-button download-button" title="Скачать для Windows" aria-label="Скачать для Windows">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="fill-icon" d="M3 5.4 10.5 4v7.3H3V5.4Zm8.6-1.6L21 2v9.3h-9.4V3.8ZM3 12.5h7.5v7.3L3 18.5v-6Zm8.6 0H21V22l-9.4-1.7v-7.8Z"/></svg>
+                    </a>
+                    <a href="/download-android" class="icon-button" title="Скачать для Android" aria-label="Скачать для Android">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5 6.5 2.5M16 5l1.5-2.5M6.5 8.5h11v8h-11v-8ZM8.5 16.5V21M15.5 16.5V21M4 9v6M20 9v6"/><circle cx="9" cy="11" r=".7" class="fill-icon"/><circle cx="15" cy="11" r=".7" class="fill-icon"/></svg>
+                    </a>
                 </div>
                 <div class="auth-buttons">
-                    <button class="auth-btn register-btn">Регистрация</button>
-                    <button class="auth-btn login-btn">Вход</button>
+                    <button class="auth-btn register-btn" type="button">Регистрация</button>
+                    <button class="auth-btn login-btn" type="button">Войти</button>
                 </div>
             </div>
         </header>
 
-        <div class="app-layout">
-            <aside class="sidebar card" id="sidebar">
-                <button class="new-chat-btn" id="newChatBtn">
-                    <i class="fas fa-plus"></i> Новый чат
+        <div class="workspace">
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <div><span class="sidebar-label">История</span><h2>Диалоги</h2></div>
+                    <button class="sidebar-close icon-button" type="button" aria-label="Закрыть список диалогов" onclick="document.getElementById('sidebar').classList.remove('open')">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+                    </button>
+                </div>
+
+                <button class="new-chat-btn" id="newChatBtn" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    Новый диалог
                 </button>
+
                 <div class="dialog-list" id="dialogList">
-                    <div class="dialog-item active" data-id="local">Гостевой диалог</div>
+                    <div class="dialog-item active" data-id="local">
+                        <span>Гостевой диалог</span>
+                    </div>
+                </div>
+
+                <div class="sidebar-footer">
+                    <span class="sidebar-footer-icon">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9M12 3a9 9 0 0 1 9 9M3 12h18M12 3c2.2 2.5 3.4 5.5 3.4 9S14.2 18.5 12 21M12 3C9.8 5.5 8.6 8.5 8.6 12s1.2 6.5 3.4 9"/></svg>
+                    </span>
+                    <div><strong>Веб-версия</strong><small>Работает прямо в браузере</small></div>
+                    <span class="online-dot" title="Сервис доступен"></span>
                 </div>
             </aside>
 
-            <main class="card chat-section">
-                <div class="chat-header">
-                    <i class="fas fa-robot"></i>
-                    <h2>Чат с ассистентом</h2>
-                </div>
-                
-                <div class="chat-controls">
-                    <div class="control-group">
-                        <label for="voice-type">Голос:</label>
-                        <select id="voice-type">
-                            <option value="Aoede" selected>Aoede (Женский)</option>
-                            <option value="Puck">Puck (Мужской)</option>
-                            <option value="Kore">Kore (Строгий)</option>
-                            <option value="Charon">Charon (Эксперт)</option>
-                        </select>
+            <button class="sidebar-backdrop" type="button" aria-label="Закрыть список диалогов" onclick="document.getElementById('sidebar').classList.remove('open')"></button>
+
+            <main class="chat-panel">
+                <header class="chat-header">
+                    <div class="assistant-identity">
+                        <span class="assistant-avatar"><img src="logo.svg" alt=""></span>
+                        <div><h1>Чат с «Пятницей»</h1><p><span></span> Готова помочь</p></div>
                     </div>
-                    <button id="camera-btn" class="microphone-btn" title="Трансляция камеры">
-                        <i class="fas fa-video"></i>
-                    </button>
-                    <button id="screen-btn" class="microphone-btn" title="Трансляция экрана">
-                        <i class="fas fa-desktop"></i>
-                    </button>
-                    <button id="microphone-btn" class="microphone-btn">
-                        <i class="fas fa-microphone"></i>
-                        <span>Включить микрофон</span>
-                    </button>
-                    <button id="clear-history" class="microphone-btn" style="background: var(--warning);">
-                        <i class="fas fa-trash"></i>
-                        <span>Очистить историю</span>
+                    <div class="chat-header-note">Говорите или напишите задачу</div>
+                </header>
+
+                <div class="chat-controls" aria-label="Настройки чата">
+                    <label class="voice-control" for="voice-type">
+                        <span class="control-icon">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3ZM5 12a7 7 0 0 0 14 0M12 19v3M9 22h6"/></svg>
+                        </span>
+                        <span class="voice-copy"><small>Голос ответа</small><select id="voice-type">
+                            <option value="Aoede" selected>Aoede · женский</option>
+                            <option value="Puck">Puck · мужской</option>
+                            <option value="Kore">Kore · строгий</option>
+                            <option value="Charon">Charon · эксперт</option>
+                        </select></span>
+                    </label>
+
+                    <div class="media-controls">
+                        <button id="camera-btn" class="tool-button" type="button" title="Поделиться камерой" aria-label="Поделиться камерой">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10 5-3v10l-5-3"/></svg>
+                            <span class="tool-label">Камера</span>
+                        </button>
+                        <button id="screen-btn" class="tool-button" type="button" title="Поделиться экраном" aria-label="Поделиться экраном">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                            <span class="tool-label">Экран</span>
+                        </button>
+                        <button id="microphone-btn" class="tool-button microphone-btn" type="button" title="Включить микрофон">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3ZM5 12a7 7 0 0 0 14 0M12 19v3M9 22h6"/></svg>
+                            <span>Включить микрофон</span>
+                        </button>
+                        <button id="clear-history" class="tool-button clear-button" type="button" title="Очистить историю">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg>
+                            <span class="tool-label">Очистить</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="video-preview-container" class="video-preview-container">
+                    <video id="live-video" autoplay playsinline muted></video>
+                    <div class="video-label"><span></span> Трансляция активна</div>
+                    <button id="close-video-btn" class="video-close" type="button" title="Скрыть трансляцию" aria-label="Скрыть трансляцию">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
                     </button>
                 </div>
-                
-                <div class="chat-messages" id="chatMessages"></div>
-                <div id="video-preview-container" style="display: none; position: relative; justify-content: center; align-items: center; background: #1a1a1a; padding: 10px; border-radius: 8px 8px 0 0; margin-top: 10px; border-bottom: 1px solid #333;">
-                    <video id="live-video" style="max-height: 200px; max-width: 100%; border-radius: 8px; object-fit: contain; transition: transform 0.3s ease;" autoplay playsinline muted></video>
-                    
-                    <!-- Кнопка закрытия -->
-                    <button id="close-video-btn" style="position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.6); color: white; border: none; border-radius: 50%; width: 30px; height: 30px; cursor: pointer; font-size: 18px; display: flex; justify-content: center; align-items: center;" title="Остановить трансляцию">&times;</button>
-                </div>
-                
-                <div class="chat-input" style="border-radius: 0 0 8px 8px;">
-                    <div class="chat-input-wrapper">
+
+                <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
+
+                <div class="composer">
+                    <div class="image-preview-container" id="imagePreviewContainer"></div>
+                    <div class="chat-input">
                         <div class="file-input-wrapper">
-                            <input type="file" id="file-upload" accept=".png,.jpg,.jpeg">
-                            <button class="attach-btn" title="Прикрепить файл">
-                                <i class="fas fa-paperclip"></i>
+                            <input type="file" id="file-upload" accept=".png,.jpg,.jpeg" aria-label="Прикрепить изображение">
+                            <button class="attach-btn" type="button" title="Прикрепить изображение" aria-label="Прикрепить изображение">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.5 11.5-8.9 8.9a5 5 0 0 1-7.1-7.1l9.6-9.6a3.5 3.5 0 0 1 5 5l-9.6 9.6a2 2 0 0 1-2.8-2.8l8.8-8.8"/></svg>
                             </button>
                         </div>
-                        <textarea id="messageInput" placeholder="Введите ваше сообщение..." rows="1"></textarea>
-                        <span class="hint">Shift+Enter для переноса строки</span>
+                        <textarea id="messageInput" placeholder="Напишите, что нужно сделать…" rows="1" aria-label="Сообщение для Пятницы"></textarea>
+                        <button id="sendMessage" type="button" title="Отправить сообщение" aria-label="Отправить сообщение">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>
+                        </button>
                     </div>
-                    <div class="image-preview-container" id="imagePreviewContainer" style="display: none;"></div>
-                    <button id="sendMessage">
-                        <i class="fas fa-paper-plane"></i>
-                    </button>
+                    <div class="composer-meta"><span>Enter — отправить</span><span>Shift + Enter — новая строка</span></div>
                 </div>
             </main>
         </div>
-        <footer><p>© 2026 Friday Assistant. Все права защищены.</p></footer>
     </div>
 
-    <!-- Скрытый канвас для захвата кадров -->
-    <canvas id="hidden-canvas" style="display:none;"></canvas>
+    <canvas id="hidden-canvas" hidden></canvas>
 
-    <div class="notification" id="notification"><i class="fas fa-check-circle"></i><span id="notification-text"></span></div>
-    
-    <!-- Модалки (Регистрация, Вход, Восстановление) -->
-    <div id="registerModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Регистрация</h2><span class="modal-close">&times;</span></div><form id="registerForm"><div class="form-group"><label for="regEmail">Email:</label><input type="email" id="regEmail" required></div><div class="form-group"><label for="regLogin">Логин:</label><input type="text" id="regLogin" required></div><div class="form-group"><label for="regPassword">Пароль:</label><input type="password" id="regPassword" required></div><div class="form-group"><label for="regPasswordConfirm">Подтвердите пароль:</label><input type="password" id="regPasswordConfirm" required></div><button type="submit" class="modal-btn">Зарегистрироваться</button><div id="registerResponse" class="response-message"></div></form></div></div>
-    <div id="loginModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Вход</h2><span class="modal-close">&times;</span></div><form id="loginForm"><div class="form-group"><label for="loginEmail">Email или логин:</label><input type="text" id="loginEmail" required></div><div class="form-group"><label for="loginPassword">Пароль:</label><input type="password" id="loginPassword" required></div><button type="submit" class="modal-btn">Войти</button><div class="recovery-link"><a href="#" id="forgotPassword">Забыли пароль?</a></div><div id="loginResponse" class="response-message"></div></form></div></div>
-    <div id="recoveryModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Восстановление пароля</h2><span class="recovery-close">&times;</span></div><form id="recoveryForm"><div class="form-group"><label for="recoveryEmail">Email:</label><input type="email" id="recoveryEmail" required></div><button type="submit" class="modal-btn">Восстановить пароль</button><div id="recoveryResponse" class="response-message"></div></form></div></div>
+    <div class="notification" id="notification" role="status" aria-live="polite">
+        <span class="notification-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></span>
+        <span id="notification-text"></span>
+    </div>
 
-    <!-- Подключаем скрипты по частям -->
+    <div id="registerModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="registerTitle">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div><span>Новый аккаунт</span><h2 id="registerTitle">Регистрация</h2></div>
+                <button class="modal-close icon-button" type="button" aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+            </div>
+            <form id="registerForm">
+                <div class="form-group"><label for="regEmail">Электронная почта</label><input type="email" id="regEmail" autocomplete="email" placeholder="name@example.com" required></div>
+                <div class="form-group"><label for="regLogin">Логин</label><input type="text" id="regLogin" autocomplete="username" placeholder="Ваш логин" required></div>
+                <div class="form-group"><label for="regPassword">Пароль</label><input type="password" id="regPassword" autocomplete="new-password" placeholder="Не менее 8 символов" required></div>
+                <div class="form-group"><label for="regPasswordConfirm">Повторите пароль</label><input type="password" id="regPasswordConfirm" autocomplete="new-password" placeholder="Введите пароль ещё раз" required></div>
+                <button type="submit" class="modal-btn">Создать аккаунт</button>
+                <div id="registerResponse" class="response-message"></div>
+            </form>
+        </div>
+    </div>
+
+    <div id="loginModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div><span>С возвращением</span><h2 id="loginTitle">Вход</h2></div>
+                <button class="modal-close icon-button" type="button" aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+            </div>
+            <form id="loginForm">
+                <div class="form-group"><label for="loginEmail">Почта или логин</label><input type="text" id="loginEmail" autocomplete="username" placeholder="Введите почту или логин" required></div>
+                <div class="form-group"><label for="loginPassword">Пароль</label><input type="password" id="loginPassword" autocomplete="current-password" placeholder="Введите пароль" required></div>
+                <button type="submit" class="modal-btn">Войти</button>
+                <div class="recovery-link"><a href="#" id="forgotPassword">Забыли пароль?</a></div>
+                <div id="loginResponse" class="response-message"></div>
+            </form>
+        </div>
+    </div>
+
+    <div id="recoveryModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="recoveryTitle">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div><span>Восстановление доступа</span><h2 id="recoveryTitle">Новый пароль</h2></div>
+                <button class="recovery-close icon-button" type="button" aria-label="Закрыть"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+            </div>
+            <form id="recoveryForm">
+                <p class="form-hint">Укажите почту, с которой вы регистрировались. Мы отправим ссылку для восстановления.</p>
+                <div class="form-group"><label for="recoveryEmail">Электронная почта</label><input type="email" id="recoveryEmail" autocomplete="email" placeholder="name@example.com" required></div>
+                <button type="submit" class="modal-btn">Отправить ссылку</button>
+                <div id="recoveryResponse" class="response-message"></div>
+            </form>
+        </div>
+    </div>
+
     <script src="app.js"></script>
     <script src="ui.js"></script>
     <script src="media.js"></script>
