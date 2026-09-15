@@ -19,6 +19,15 @@ try:
 except ImportError:
     GEMINI_KEYS = []
 
+MAX_PROMPT_LENGTH = int(os.getenv("GEMINI_MAX_PROMPT_LENGTH", "1000000"))
+
+GEMINI_SYSTEM_PROMPT = """
+Работай исключительно с законодательством из кэша.
+Не используй знания из памяти и интернет.
+Верни только JSON с точными источниками и дословными цитатами.
+Если ответа нет: {"matches":[]}
+""".strip()
+
 class DeviceAction(BaseModel):
     action_type: str = Field(description="Тип действия.")
     action_value: str = Field(description="Параметр действия.")
@@ -825,5 +834,86 @@ class AIService:
                 
         logger.warning(f"[HEAVY BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
         return text_result.strip()
+
+    # ==============================================================================
+    # 5. РАБОТА С КОНТЕКСТНЫМ КЭШЕМ (ДЛЯ БОЛЬШИХ ФАЙЛОВ)
+    # ==============================================================================
+    def create_context_cache(self, database_text: str, model_id: str = "gemini-3.5-flash-lite"):
+        import json
+        attempts = 0
+        last_err = ""
+        
+        while attempts < len(self.api_keys):
+            client = self._get_client()
+            try:
+                cached_content = client.caches.create(
+                    model=model_id.strip(),
+                    config=types.CreateCachedContentConfig(
+                        contents=database_text,
+                        system_instruction=GEMINI_SYSTEM_PROMPT,
+                        display_name="law-database",
+                        ttl="86400s", # Кэш живет 24 часа
+                    ),
+                )
+                
+                exp_time = cached_content.expire_time
+                expires_at = exp_time.isoformat().replace("+00:00", "Z") if hasattr(exp_time, "isoformat") else str(exp_time)
+                
+                return {"cache_id": cached_content.name, "expires_at": expires_at}
+                
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"[Cache Create] Ошибка на ключе {self.current_key_index}: {last_err}")
+                self._rotate_key()
+                attempts += 1
+                
+        raise Exception(f"Не удалось создать кэш. Ошибка: {last_err}")
+
+    def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
+        import json
+        if len(prompt) > MAX_PROMPT_LENGTH:
+            raise ValueError(f"Prompt is too large (maximum {MAX_PROMPT_LENGTH} characters)")
+
+        attempts = 0
+        last_err = ""
+        
+        while attempts < len(self.api_keys):
+            client = self._get_client()
+            try:
+                response = client.models.generate_content(
+                    model=model_id.strip(),
+                    contents=prompt.strip(),
+                    config=types.GenerateContentConfig(
+                        cached_content=cache_id,
+                        temperature=0,
+                        max_output_tokens=1200,
+                        response_mime_type="application/json",
+                        thinking_config=types.ThinkingConfig(thinking_level="low"),
+                    ),
+                )
+                return json.loads(response.text)
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"[Cache Generate] Ошибка на ключе {self.current_key_index}: {last_err}")
+                self._rotate_key()
+                attempts += 1
+                
+        raise Exception(f"Gemini is temporarily unavailable. Error: {last_err}")
+
+    def delete_context_cache(self, cache_id: str):
+        attempts = 0
+        last_err = ""
+        while attempts < len(self.api_keys):
+            client = self._get_client()
+            try:
+                client.caches.delete(name=cache_id)
+                return True
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"[Cache Delete] Ошибка на ключе {self.current_key_index}: {last_err}")
+                self._rotate_key()
+                attempts += 1
+                
+        raise Exception(f"Не удалось удалить кэш. Ошибка: {last_err}")
 
 ai_instance = AIService()

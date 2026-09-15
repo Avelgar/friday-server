@@ -8,61 +8,13 @@ import bcrypt
 import jwt
 import hashlib
 import logging
-from datetime import datetime, timedelta
-from google.genai import types
+from datetime import datetime, timedeltaч
 from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 from app.utils.email_sender import send_email
 
 logger = logging.getLogger("HTTP_Server")
-
-MAX_PROMPT_LENGTH = int(os.getenv("GEMINI_MAX_PROMPT_LENGTH", "1000000"))
-
-GEMINI_SYSTEM_PROMPT = """
-Работай исключительно с законодательством из кэша.
-Не используй знания из памяти и интернет.
-Верни только JSON с точными источниками и дословными цитатами.
-Если ответа нет: {"matches":[]}
-""".strip()
-
-
-class GeminiEndpointError(RuntimeError):
-    pass
-
-
-def _call_gemini(operation):
-    if not ai_instance.api_keys:
-        raise GeminiEndpointError("Gemini API keys are not configured")
-
-    last_error = None
-    for attempt in range(len(ai_instance.api_keys)):
-        client = None
-        try:
-            client = ai_instance._get_client()
-            return operation(client)
-        except Exception as exc:
-            last_error = exc
-            logger.warning("[Gemini endpoint] request failed: %s", exc)
-        finally:
-            if client:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-
-        if attempt + 1 < len(ai_instance.api_keys):
-            ai_instance._rotate_key()
-
-    raise GeminiEndpointError("Gemini is temporarily unavailable") from last_error
-
-
-def _format_timestamp(value):
-    if value is None:
-        return None
-    if hasattr(value, "isoformat"):
-        return value.isoformat().replace("+00:00", "Z")
-    return str(value)
 
 CAP_WEB = "смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
 ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
@@ -97,66 +49,47 @@ def do_POST(self):
                 return self.send_json(400, {"status": "error", "message": "Field 'model' must be a non-empty string"})
 
             try:
-                cached_content = _call_gemini(lambda client: client.caches.create(
-                    model=model.strip(),
-                    config=types.CreateCachedContentConfig(
-                        contents=database,
-                        system_instruction=GEMINI_SYSTEM_PROMPT,
-                        display_name="law-database",
-                        ttl="86400s",
-                    ),
-                ))
-            except GeminiEndpointError:
+                # Дергаем чистый метод из ai_service
+                result = ai_instance.create_context_cache(database, model)
+                return self.send_json(200, {
+                    "status": "success",
+                    "cache_id": result["cache_id"],
+                    "expires_at": result["expires_at"],
+                })
+            except Exception as e:
+                logger.error(f"Cache create error: {e}")
                 return self.send_json(502, {"status": "error", "message": "Gemini cache is temporarily unavailable"})
-
-            return self.send_json(200, {
-                "status": "success",
-                "cache_id": cached_content.name,
-                "expires_at": _format_timestamp(cached_content.expire_time),
-            })
 
         if self.path == '/api/gemini':
             if not isinstance(data, dict):
                 return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
 
             prompt = data.get('prompt')
-            if not isinstance(prompt, str) or not prompt.strip():
-                return self.send_json(400, {"status": "error", "message": "Field 'prompt' must be a non-empty string"})
-            if len(prompt) > MAX_PROMPT_LENGTH:
-                return self.send_json(413, {
-                    "status": "error",
-                    "message": f"Prompt is too large (maximum {MAX_PROMPT_LENGTH} characters)",
-                })
-
             model = data.get('model', 'gemini-3.5-flash-lite')
             cache_id = data.get('cache_id')
+            
+            if not isinstance(prompt, str) or not prompt.strip():
+                return self.send_json(400, {"status": "error", "message": "Field 'prompt' must be a non-empty string"})
             if not isinstance(model, str) or not model.strip():
                 return self.send_json(400, {"status": "error", "message": "Field 'model' must be a non-empty string"})
             if not isinstance(cache_id, str) or not cache_id.startswith('cachedContents/'):
                 return self.send_json(400, {"status": "error", "message": "Field 'cache_id' must be a valid cachedContents resource name"})
 
             try:
-                response = _call_gemini(lambda client: client.models.generate_content(
-                    model=model.strip(),
-                    contents=prompt.strip(),
-                    config=types.GenerateContentConfig(
-                        cached_content=cache_id,
-                        temperature=0,
-                        max_output_tokens=1200,
-                        response_mime_type="application/json",
-                        thinking_config=types.ThinkingConfig(thinking_level="low"),
-                    ),
-                ))
-                answer = json.loads(response.text)
-            except (GeminiEndpointError, json.JSONDecodeError, TypeError):
+                # Дергаем генерацию с использованием правильной ротации
+                answer = ai_instance.generate_from_cache(prompt, cache_id, model)
+                return self.send_json(200, {
+                    "status": "success",
+                    "response": answer,
+                    "model": model.strip(),
+                    "cache_id": cache_id,
+                })
+            except ValueError as ve:
+                # Отлавливаем ошибку превышения лимита символов
+                return self.send_json(413, {"status": "error", "message": str(ve)})
+            except Exception as e:
+                logger.error(f"Cache generate error: {e}")
                 return self.send_json(502, {"status": "error", "message": "Gemini is temporarily unavailable"})
-
-            return self.send_json(200, {
-                "status": "success",
-                "response": answer,
-                "model": model.strip(),
-                "cache_id": cache_id,
-            })
 
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True, buffered=True)
@@ -580,8 +513,9 @@ def do_DELETE(self):
         return self.send_json(400, {"status": "error", "message": "Field 'cache_id' must be a valid cachedContents resource name"})
 
     try:
-        _call_gemini(lambda client: client.caches.delete(name=cache_id))
-    except GeminiEndpointError:
+        # Дергаем удаление из ai_service
+        ai_instance.delete_context_cache(cache_id)
+        return self.send_json(200, {"status": "success", "cache_id": cache_id})
+    except Exception as e:
+        logger.error(f"Cache delete error: {e}")
         return self.send_json(502, {"status": "error", "message": "Gemini cache is temporarily unavailable"})
-
-    return self.send_json(200, {"status": "success", "cache_id": cache_id})
