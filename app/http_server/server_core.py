@@ -7,7 +7,7 @@ from socketserver import ThreadingMixIn
 logger = logging.getLogger("HTTP_Server")
 
 from app.http_server.routes_get import do_GET
-from app.http_server.routes_post import do_POST
+from app.http_server.routes_post import do_DELETE, do_POST
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     pass
@@ -17,6 +17,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     
     do_GET = do_GET
     do_POST = do_POST
+    do_DELETE = do_DELETE
 
     def send_json(self, status_code, data):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')

@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import base64
 import asyncio
@@ -8,12 +9,60 @@ import jwt
 import hashlib
 import logging
 from datetime import datetime, timedelta
+from google.genai import types
 from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 from app.utils.email_sender import send_email
 
 logger = logging.getLogger("HTTP_Server")
+
+MAX_PROMPT_LENGTH = int(os.getenv("GEMINI_MAX_PROMPT_LENGTH", "1000000"))
+
+GEMINI_SYSTEM_PROMPT = """
+Работай исключительно с законодательством из кэша.
+Не используй знания из памяти и интернет.
+Верни только JSON с точными источниками и дословными цитатами.
+Если ответа нет: {"matches":[]}
+""".strip()
+
+
+class GeminiEndpointError(RuntimeError):
+    pass
+
+
+def _call_gemini(operation):
+    if not ai_instance.api_keys:
+        raise GeminiEndpointError("Gemini API keys are not configured")
+
+    last_error = None
+    for attempt in range(len(ai_instance.api_keys)):
+        client = None
+        try:
+            client = ai_instance._get_client()
+            return operation(client)
+        except Exception as exc:
+            last_error = exc
+            logger.warning("[Gemini endpoint] request failed: %s", exc)
+        finally:
+            if client:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+        if attempt + 1 < len(ai_instance.api_keys):
+            ai_instance._rotate_key()
+
+    raise GeminiEndpointError("Gemini is temporarily unavailable") from last_error
+
+
+def _format_timestamp(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat().replace("+00:00", "Z")
+    return str(value)
 
 CAP_WEB = "смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
 ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
@@ -32,10 +81,86 @@ def do_POST(self):
         except:
             return self.send_error(400, "Invalid JSON")
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True, buffered=True)
-    
+    conn = None
+    cursor = None
+
     try:
+        if self.path == '/api/gemini/cache':
+            if not isinstance(data, dict):
+                return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
+
+            database = data.get('database')
+            model = data.get('model', 'gemini-3.5-flash-lite')
+            if not isinstance(database, str) or not database.strip():
+                return self.send_json(400, {"status": "error", "message": "Field 'database' must be a non-empty string"})
+            if not isinstance(model, str) or not model.strip():
+                return self.send_json(400, {"status": "error", "message": "Field 'model' must be a non-empty string"})
+
+            try:
+                cached_content = _call_gemini(lambda client: client.caches.create(
+                    model=model.strip(),
+                    config=types.CreateCachedContentConfig(
+                        contents=database,
+                        system_instruction=GEMINI_SYSTEM_PROMPT,
+                        display_name="law-database",
+                        ttl="86400s",
+                    ),
+                ))
+            except GeminiEndpointError:
+                return self.send_json(502, {"status": "error", "message": "Gemini cache is temporarily unavailable"})
+
+            return self.send_json(200, {
+                "status": "success",
+                "cache_id": cached_content.name,
+                "expires_at": _format_timestamp(cached_content.expire_time),
+            })
+
+        if self.path == '/api/gemini':
+            if not isinstance(data, dict):
+                return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
+
+            prompt = data.get('prompt')
+            if not isinstance(prompt, str) or not prompt.strip():
+                return self.send_json(400, {"status": "error", "message": "Field 'prompt' must be a non-empty string"})
+            if len(prompt) > MAX_PROMPT_LENGTH:
+                return self.send_json(413, {
+                    "status": "error",
+                    "message": f"Prompt is too large (maximum {MAX_PROMPT_LENGTH} characters)",
+                })
+
+            model = data.get('model', 'gemini-3.5-flash-lite')
+            cache_id = data.get('cache_id')
+            if not isinstance(model, str) or not model.strip():
+                return self.send_json(400, {"status": "error", "message": "Field 'model' must be a non-empty string"})
+            if not isinstance(cache_id, str) or not cache_id.startswith('cachedContents/'):
+                return self.send_json(400, {"status": "error", "message": "Field 'cache_id' must be a valid cachedContents resource name"})
+
+            try:
+                response = _call_gemini(lambda client: client.models.generate_content(
+                    model=model.strip(),
+                    contents=prompt.strip(),
+                    config=types.GenerateContentConfig(
+                        cached_content=cache_id,
+                        temperature=0,
+                        max_output_tokens=1200,
+                        response_mime_type="application/json",
+                        thinking_config=types.ThinkingConfig(thinking_level="low"),
+                    ),
+                ))
+                answer = json.loads(response.text)
+            except (GeminiEndpointError, json.JSONDecodeError, TypeError):
+                return self.send_json(502, {"status": "error", "message": "Gemini is temporarily unavailable"})
+
+            return self.send_json(200, {
+                "status": "success",
+                "response": answer,
+                "model": model.strip(),
+                "cache_id": cache_id,
+            })
+
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True, buffered=True)
+
         if self.path == '/generate':
             prompt = data.get('prompt', '')
             audio_base64 = data.get('audio_base64')
@@ -434,3 +559,29 @@ def do_POST(self):
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
+
+
+def do_DELETE(self):
+    if self.path != '/api/gemini/cache':
+        return self.send_error(404)
+
+    try:
+        content_length = int(self.headers.get('Content-Length', 0))
+        raw_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
+        data = json.loads(raw_data.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return self.send_json(400, {"status": "error", "message": "Invalid JSON"})
+
+    if not isinstance(data, dict):
+        return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
+
+    cache_id = data.get('cache_id')
+    if not isinstance(cache_id, str) or not cache_id.startswith('cachedContents/'):
+        return self.send_json(400, {"status": "error", "message": "Field 'cache_id' must be a valid cachedContents resource name"})
+
+    try:
+        _call_gemini(lambda client: client.caches.delete(name=cache_id))
+    except GeminiEndpointError:
+        return self.send_json(502, {"status": "error", "message": "Gemini cache is temporarily unavailable"})
+
+    return self.send_json(200, {"status": "success", "cache_id": cache_id})
