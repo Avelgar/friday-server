@@ -10,6 +10,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 import requests
 import urllib.parse
+import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AI_Service")

@@ -8,7 +8,7 @@ import bcrypt
 import jwt
 import hashlib
 import logging
-from datetime import datetime, timedeltaч
+from datetime import datetime, timedelta
 from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
