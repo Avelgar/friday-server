@@ -837,43 +837,48 @@ class AIService:
         return text_result.strip()
 
     # ==============================================================================
-    # 5. РАБОТА С КОНТЕКСТНЫМ КЭШЕМ (ДЛЯ БОЛЬШИХ ФАЙЛОВ)
+    # 5. ЛОКАЛЬНЫЙ КОНТЕКСТНЫЙ КЭШ (ОБХОД ПЛАТНОГО API GOOGLE)
     # ==============================================================================
+    
+    # Глобальный словарь для хранения баз данных в оперативке сервера
+    LOCAL_LAW_CACHE = {}
+
     def create_context_cache(self, database_text: str, model_id: str = "gemini-3.5-flash-lite"):
-        import json
-        attempts = 0
-        last_err = ""
+        import uuid
+        from datetime import datetime, timedelta
         
-        while attempts < len(self.api_keys):
-            client = self._get_client()
-            try:
-                cached_content = client.caches.create(
-                    model=model_id.strip(),
-                    config=types.CreateCachedContentConfig(
-                        contents=database_text,
-                        system_instruction=GEMINI_SYSTEM_PROMPT,
-                        display_name="law-database",
-                        ttl="86400s", # Кэш живет 24 часа
-                    ),
-                )
-                
-                exp_time = cached_content.expire_time
-                expires_at = exp_time.isoformat().replace("+00:00", "Z") if hasattr(exp_time, "isoformat") else str(exp_time)
-                
-                return {"cache_id": cached_content.name, "expires_at": expires_at}
-                
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"[Cache Create] Ошибка на ключе {self.current_key_index}: {last_err}")
-                self._rotate_key()
-                attempts += 1
-                
-        raise Exception(f"Не удалось создать кэш. Ошибка: {last_err}")
+        # Генерируем фейковый ID, который проходит проверки роутера
+        cache_id = f"cachedContents/local-{uuid.uuid4().hex[:12]}"
+        
+        # Сохраняем базу в оперативную память сервера на 24 часа
+        self.LOCAL_LAW_CACHE[cache_id] = {
+            "text": database_text,
+            "expires": datetime.now() + timedelta(days=1)
+        }
+        
+        # Чистим старый мусор, чтобы оперативка не забивалась
+        expired = [k for k, v in self.LOCAL_LAW_CACHE.items() if v["expires"] < datetime.now()]
+        for k in expired:
+            self.LOCAL_LAW_CACHE.pop(k, None)
+            
+        expires_at = self.LOCAL_LAW_CACHE[cache_id]["expires"].isoformat() + "Z"
+        
+        logger.info(f"[Local Cache] Создан локальный кэш {cache_id} размером {len(database_text)} символов.")
+        return {"cache_id": cache_id, "expires_at": expires_at}
 
     def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
         import json
-        if len(prompt) > MAX_PROMPT_LENGTH:
-            raise ValueError(f"Prompt is too large (maximum {MAX_PROMPT_LENGTH} characters)")
+        
+        if cache_id not in self.LOCAL_LAW_CACHE:
+            raise Exception("Кэш устарел или не найден (возможно сервер перезагружался). Создайте новый.")
+            
+        database_text = self.LOCAL_LAW_CACHE[cache_id]["text"]
+        
+        # СКЛЕИВАЕМ: Системный промпт + Огромная база + Вопрос юзера
+        full_prompt = f"{GEMINI_SYSTEM_PROMPT}\n\n=== БАЗА ДАННЫХ ===\n{database_text}\n\n=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n{prompt}"
+        
+        if len(full_prompt) > MAX_PROMPT_LENGTH:
+            raise ValueError(f"Текст слишком большой! Максимум {MAX_PROMPT_LENGTH} символов.")
 
         attempts = 0
         last_err = ""
@@ -881,40 +886,29 @@ class AIService:
         while attempts < len(self.api_keys):
             client = self._get_client()
             try:
+                # Отправляем как ОБЫЧНЫЙ запрос! Никакого платного кэша.
                 response = client.models.generate_content(
                     model=model_id.strip(),
-                    contents=prompt.strip(),
+                    contents=full_prompt, 
                     config=types.GenerateContentConfig(
-                        cached_content=cache_id,
                         temperature=0,
                         max_output_tokens=1200,
                         response_mime_type="application/json",
-                        thinking_config=types.ThinkingConfig(thinking_level="low"),
                     ),
                 )
                 return json.loads(response.text)
             except Exception as e:
                 last_err = str(e)
-                logger.warning(f"[Cache Generate] Ошибка на ключе {self.current_key_index}: {last_err}")
+                logger.warning(f"[Local Cache Generate] Ошибка на ключе {self.current_key_index}: {last_err}")
                 self._rotate_key()
                 attempts += 1
                 
         raise Exception(f"Gemini is temporarily unavailable. Error: {last_err}")
 
     def delete_context_cache(self, cache_id: str):
-        attempts = 0
-        last_err = ""
-        while attempts < len(self.api_keys):
-            client = self._get_client()
-            try:
-                client.caches.delete(name=cache_id)
-                return True
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"[Cache Delete] Ошибка на ключе {self.current_key_index}: {last_err}")
-                self._rotate_key()
-                attempts += 1
-                
-        raise Exception(f"Не удалось удалить кэш. Ошибка: {last_err}")
-
+        if cache_id in self.LOCAL_LAW_CACHE:
+            self.LOCAL_LAW_CACHE.pop(cache_id, None)
+            logger.info(f"[Local Cache] Удален локальный кэш {cache_id}")
+        return True
+        
 ai_instance = AIService()
