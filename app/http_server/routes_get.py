@@ -19,6 +19,7 @@ def do_GET(self):
     elif path == '/ui.js': self.serve_file('ui.js', 'application/javascript; charset=utf-8') 
     elif path == '/media.js': self.serve_file('media.js', 'application/javascript; charset=utf-8') 
     elif path == '/image': self.serve_file('image.html', 'text/html; charset=utf-8')
+    elif path == '/tester': self.serve_file('tester.html', 'text/html; charset=utf-8')
     elif path == '/images/f.png': self.serve_file('images/f.png', 'image/png')
     elif path == '/download-windows':
         self.send_response(302); self.send_header('Location', 'https://disk.yandex.ru/d/ye8Rn1WFa1C-Lg'); self.end_headers()

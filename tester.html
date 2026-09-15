@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тест Gemini Context Cache</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1e1e2e; color: #cdd6f4; max-width: 800px; margin: 0 auto; padding: 20px; }
+        h1, h2 { color: #89b4fa; }
+        .card { background: #313244; padding: 20px; border-radius: 10px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        textarea, input[type="text"] { width: 100%; padding: 10px; margin-top: 5px; border-radius: 5px; border: 1px solid #45475a; background: #181825; color: #cdd6f4; box-sizing: border-box; }
+        textarea { height: 150px; resize: vertical; }
+        button { background: #89b4fa; color: #11111b; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 10px; transition: 0.2s; }
+        button:hover { background: #b4befe; }
+        button.danger { background: #f38ba8; }
+        button.danger:hover { background: #eba0ac; }
+        pre { background: #11111b; padding: 15px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; color: #a6e3a1; }
+        .loading { display: none; color: #f9e2af; font-weight: bold; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>Gemini Cache Tester 🚀</h1>
+
+    <!-- БЛОК 1: СОЗДАНИЕ КЭША -->
+    <div class="card">
+        <h2>1. Загрузка базы данных (УК)</h2>
+        <p>Вставь сюда огромный текст (например, весь Уголовный Кодекс штата). Он будет загружен в кэш Google.</p>
+        <textarea id="db_text">Статья 1. Убийство наказывается 5 звездами розыска.
+Статья 2. Угон автомобиля наказывается 3 звездами розыска.
+Статья 3. Незаконное хранение оружия наказывается 4 звездами розыска и изъятием лицензии.</textarea>
+        <button onclick="createCache()">Создать кэш</button>
+        <div id="loading_cache" class="loading">⏳ Загрузка в Google... Это может занять пару секунд.</div>
+        
+        <div style="margin-top: 15px;">
+            <label>ID созданного кэша:</label>
+            <input type="text" id="cache_id" placeholder="Здесь появится ID кэша..." readonly>
+        </div>
+    </div>
+
+    <!-- БЛОК 2: ВОПРОСЫ К ИИ -->
+    <div class="card">
+        <h2>2. Задать вопрос по базе</h2>
+        <p>Задавай короткие вопросы. ИИ будет искать ответы только в загруженном выше тексте.</p>
+        <input type="text" id="prompt_text" placeholder="Например: Сколько звезд дадут за угон тачки?">
+        <button onclick="askQuestion()">Спросить ИИ</button>
+        <div id="loading_ask" class="loading">⏳ ИИ думает...</div>
+        
+        <h3>Ответ от Пятницы:</h3>
+        <pre id="answer_box">Здесь будет ответ...</pre>
+    </div>
+
+    <!-- БЛОК 3: УДАЛЕНИЕ -->
+    <div class="card">
+        <h2>3. Очистка кэша</h2>
+        <p>Удалить кэш, чтобы не тратить лимиты (иначе он удалится сам через 24 часа).</p>
+        <button class="danger" onclick="deleteCache()">Удалить кэш досрочно</button>
+    </div>
+
+    <script>
+        const API_URL = "https://friday-assistant.ru/api/gemini";
+        const MODEL = "gemini-3.5-flash"; // Можно поставить gemini-2.5-flash
+
+        // 1. Создание кэша
+        async function createCache() {
+            const dbText = document.getElementById("db_text").value;
+            const loader = document.getElementById("loading_cache");
+            const cacheInput = document.getElementById("cache_id");
+
+            if (!dbText.trim()) return alert("Введите текст базы!");
+            
+            loader.style.display = "block";
+            cacheInput.value = "";
+
+            try {
+                const response = await fetch(`${API_URL}/cache`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        database: dbText,
+                        model: MODEL
+                    })
+                });
+                
+                const data = await response.json();
+                if (data.status === "success") {
+                    cacheInput.value = data.cache_id;
+                    alert("Кэш успешно создан! Действует до: " + data.expires_at);
+                } else {
+                    alert("Ошибка: " + data.message);
+                }
+            } catch (error) {
+                alert("Сетевая ошибка: " + error);
+            } finally {
+                loader.style.display = "none";
+            }
+        }
+
+        // 2. Вопрос к ИИ
+        async function askQuestion() {
+            const prompt = document.getElementById("prompt_text").value;
+            const cacheId = document.getElementById("cache_id").value;
+            const loader = document.getElementById("loading_ask");
+            const answerBox = document.getElementById("answer_box");
+
+            if (!cacheId) return alert("Сначала создайте кэш (Шаг 1)!");
+            if (!prompt.trim()) return alert("Введите вопрос!");
+
+            loader.style.display = "block";
+            answerBox.innerText = "";
+
+            try {
+                const response = await fetch(`${API_URL}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        prompt: prompt,
+                        cache_id: cacheId,
+                        model: MODEL
+                    })
+                });
+
+                const data = await response.json();
+                if (data.status === "success") {
+                    // Парсим JSON, так как мы просили ИИ отдавать JSON
+                    answerBox.innerText = JSON.stringify(data.response, null, 2);
+                } else {
+                    answerBox.innerText = "Ошибка: " + data.message;
+                }
+            } catch (error) {
+                answerBox.innerText = "Сетевая ошибка: " + error;
+            } finally {
+                loader.style.display = "none";
+            }
+        }
+
+        // 3. Удаление кэша
+        async function deleteCache() {
+            const cacheId = document.getElementById("cache_id").value;
+            
+            if (!cacheId) return alert("Нет активного кэша для удаления!");
+
+            try {
+                const response = await fetch(`${API_URL}/cache`, {
+                    method: "DELETE",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        cache_id: cacheId
+                    })
+                });
+
+                const data = await response.json();
+                if (data.status === "success") {
+                    document.getElementById("cache_id").value = "";
+                    alert("Кэш успешно удален!");
+                } else {
+                    alert("Ошибка: " + data.message);
+                }
+            } catch (error) {
+                alert("Сетевая ошибка: " + error);
+            }
+        }
+    </script>
+</body>
+</html>
