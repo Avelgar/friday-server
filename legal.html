@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Правовые документы Friday Assistant">
+    <meta name="theme-color" content="#F2F8FD">
+    <title>Документы — Пятница</title>
+
+    <link rel="icon" type="image/svg+xml" href="/logo.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Montserrat:wght@700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/legal.css">
+</head>
+<body>
+    <header class="legal-header">
+        <div class="legal-container header-content">
+            <a href="/landing" class="brand" aria-label="Пятница — на главную">
+                <img src="/logo.svg" alt="">
+                <span>Пятница</span>
+            </a>
+            <a href="/landing" class="back-link"><span aria-hidden="true">←</span> Вернуться на сайт</a>
+        </div>
+    </header>
+
+    <main class="legal-main">
+        <div class="legal-glow legal-glow-blue" aria-hidden="true"></div>
+        <div class="legal-glow legal-glow-purple" aria-hidden="true"></div>
+        <div class="legal-container legal-layout">
+            <aside class="document-nav" aria-label="Правовые документы">
+                <span class="nav-label">Документы</span>
+                <a href="/documents/privacy-policy" data-document="privacy-policy">Политика обработки персональных данных</a>
+                <a href="/documents/personal-data-consent" data-document="personal-data-consent">Согласие на обработку персональных данных</a>
+                <a href="/documents/cookie-policy" data-document="cookie-policy">Политика использования Cookies</a>
+                <a href="/documents/user-agreement" data-document="user-agreement">Пользовательское соглашение</a>
+            </aside>
+
+            <article class="document-card">
+                <div class="document-heading">
+                    <p>Friday Assistant · Правовая информация</p>
+                    <h1 id="documentTitle">Документ</h1>
+                </div>
+                <div id="documentContent" class="document-content" aria-live="polite">
+                    <p class="document-status">Загружаем документ…</p>
+                </div>
+            </article>
+        </div>
+    </main>
+
+    <footer class="legal-footer">
+        <div class="legal-container">
+            <span>© Friday Assistant</span>
+            <a href="mailto:kirill.tsyganov@gmail.com">kirill.tsyganov@gmail.com</a>
+        </div>
+    </footer>
+
+    <script src="/legal.js"></script>
+</body>
+</html>

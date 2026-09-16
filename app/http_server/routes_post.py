@@ -268,6 +268,8 @@ def do_POST(self):
         elif self.path == '/register':
             email = data.get('email'); login = data.get('login'); password = data.get('password')
             if not all([email, login, password]): return self.send_json(400, {"status": "error", "message": "Все поля обязательны"})
+            if data.get('terms_accepted') is not True or data.get('personal_data_consent') is not True:
+                return self.send_json(400, {"status": "error", "message": "Необходимо принять соглашение и дать согласие на обработку данных"})
             cursor.execute("SELECT email, login FROM users WHERE email = %s OR login = %s", (email, login))
             existing = cursor.fetchall()
             if existing:

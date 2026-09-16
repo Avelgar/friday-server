@@ -165,7 +165,22 @@
                 <div class="form-group"><label for="regLogin">Логин</label><input type="text" id="regLogin" autocomplete="username" placeholder="Ваш логин" required></div>
                 <div class="form-group"><label for="regPassword">Пароль</label><input type="password" id="regPassword" autocomplete="new-password" placeholder="Не менее 8 символов" required></div>
                 <div class="form-group"><label for="regPasswordConfirm">Повторите пароль</label><input type="password" id="regPasswordConfirm" autocomplete="new-password" placeholder="Введите пароль ещё раз" required></div>
-                <button type="submit" class="modal-btn">Создать аккаунт</button>
+                <fieldset class="consent-list">
+                    <legend class="sr-only">Обязательные согласия</legend>
+                    <label class="consent-check" for="regTerms">
+                        <input type="checkbox" id="regTerms" required>
+                        <span>Я принимаю <a href="/documents/user-agreement" target="_blank" rel="noopener">Пользовательское соглашение</a></span>
+                    </label>
+                    <label class="consent-check" for="regPersonalData">
+                        <input type="checkbox" id="regPersonalData" required>
+                        <span>Я даю <a href="/documents/personal-data-consent" target="_blank" rel="noopener">согласие на обработку персональных данных</a></span>
+                    </label>
+                </fieldset>
+                <button type="submit" class="modal-btn">Зарегистрироваться</button>
+                <nav class="registration-legal-links" aria-label="Дополнительные правовые документы">
+                    <a href="/documents/privacy-policy" target="_blank" rel="noopener">Политика обработки персональных данных</a>
+                    <a href="/documents/cookie-policy" target="_blank" rel="noopener">Политика использования Cookies</a>
+                </nav>
                 <div id="registerResponse" class="response-message"></div>
             </form>
         </div>

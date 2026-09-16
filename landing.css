@@ -1763,6 +1763,11 @@ a:focus-visible {
 
 .footer-content {
     display: grid;
+    gap: 24px;
+}
+
+.footer-primary {
+    display: grid;
     grid-template-columns: 1fr auto 1fr;
     align-items: center;
     gap: 20px;
@@ -1777,7 +1782,7 @@ a:focus-visible {
     height: 31px;
 }
 
-.footer-content > p {
+.footer-primary > p {
     color: var(--muted);
     font-size: 12px;
 }
@@ -1796,6 +1801,35 @@ a:focus-visible {
 }
 
 .footer-links a:hover {
+    color: var(--brand-blue-dark);
+}
+
+.footer-legal {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    align-items: center;
+    padding-top: 22px;
+    border-top: 1px solid var(--border);
+}
+
+.footer-legal span {
+    color: var(--graphite);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.footer-legal a {
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: color 180ms ease;
+}
+
+.footer-legal a:hover {
     color: var(--brand-blue-dark);
 }
 
@@ -1926,11 +1960,11 @@ a:focus-visible {
         justify-self: start;
     }
 
-    .footer-content {
+    .footer-primary {
         grid-template-columns: auto 1fr;
     }
 
-    .footer-content > p {
+    .footer-primary > p {
         display: none;
     }
 }
@@ -2119,7 +2153,7 @@ a:focus-visible {
         grid-column: auto;
     }
 
-    .footer-content {
+    .footer-primary {
         grid-template-columns: 1fr;
         justify-items: center;
     }
@@ -2130,6 +2164,11 @@ a:focus-visible {
 
     .footer-links {
         justify-self: center;
+    }
+
+    .footer-legal {
+        justify-content: center;
+        text-align: center;
     }
 }
 
