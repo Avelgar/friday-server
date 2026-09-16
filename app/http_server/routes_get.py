@@ -15,6 +15,7 @@ def do_GET(self):
     elif path == '/logo.svg' : self.serve_file('logo.svg', 'image/svg+xml')
     elif path == '/landing.css': self.serve_file('landing.css', 'text/css; charset=utf-8')
     elif path == '/landing': self.serve_file('landing.html', 'text/html; charset=utf-8')
+    elif path == '/yandex_c41dc5a59f033293.html': self.serve_file('yandex_c41dc5a59f033293.html', 'text/html; charset=utf-8')
     elif path == '/app.js': self.serve_file('app.js', 'application/javascript; charset=utf-8')
     elif path == '/ui.js': self.serve_file('ui.js', 'application/javascript; charset=utf-8') 
     elif path == '/media.js': self.serve_file('media.js', 'application/javascript; charset=utf-8') 
