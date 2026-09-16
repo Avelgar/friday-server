@@ -34,7 +34,7 @@
         
         <div style="margin-top: 15px;">
             <label>ID созданного кэша:</label>
-            <input type="text" id="cache_id" placeholder="Здесь появится ID кэша..." readonly>
+            <input type="text" id="cache_id" placeholder="Здесь появится ID кэша... или вставь свой">
         </div>
     </div>
 
@@ -59,7 +59,15 @@
 
     <script>
         const API_URL = "https://friday-assistant.ru/api/gemini";
-        const MODEL = "gemini-2.5-flash";// Можно поставить gemini-2.5-flash
+        const MODEL = "gemini-3.5-flash"; // Или gemini-2.5-flash
+
+        // При загрузке страницы достаем ID из памяти браузера
+        window.onload = () => {
+            const savedId = localStorage.getItem("saved_cache_id");
+            if (savedId) {
+                document.getElementById("cache_id").value = savedId;
+            }
+        };
 
         // 1. Создание кэша
         async function createCache() {
@@ -76,15 +84,14 @@
                 const response = await fetch(`${API_URL}/cache`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        database: dbText,
-                        model: MODEL
-                    })
+                    body: JSON.stringify({ database: dbText, model: MODEL })
                 });
                 
                 const data = await response.json();
                 if (data.status === "success") {
                     cacheInput.value = data.cache_id;
+                    // Сохраняем ID в память браузера!
+                    localStorage.setItem("saved_cache_id", data.cache_id);
                     alert("Кэш успешно создан! Действует до: " + data.expires_at);
                 } else {
                     alert("Ошибка: " + data.message);
@@ -103,7 +110,7 @@
             const loader = document.getElementById("loading_ask");
             const answerBox = document.getElementById("answer_box");
 
-            if (!cacheId) return alert("Сначала создайте кэш (Шаг 1)!");
+            if (!cacheId) return alert("Сначала создайте кэш или вставьте ID!");
             if (!prompt.trim()) return alert("Введите вопрос!");
 
             loader.style.display = "block";
@@ -113,16 +120,11 @@
                 const response = await fetch(`${API_URL}`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        prompt: prompt,
-                        cache_id: cacheId,
-                        model: MODEL
-                    })
+                    body: JSON.stringify({ prompt: prompt, cache_id: cacheId, model: MODEL })
                 });
 
                 const data = await response.json();
                 if (data.status === "success") {
-                    // Парсим JSON, так как мы просили ИИ отдавать JSON
                     answerBox.innerText = JSON.stringify(data.response, null, 2);
                 } else {
                     answerBox.innerText = "Ошибка: " + data.message;
@@ -137,21 +139,20 @@
         // 3. Удаление кэша
         async function deleteCache() {
             const cacheId = document.getElementById("cache_id").value;
-            
             if (!cacheId) return alert("Нет активного кэша для удаления!");
 
             try {
                 const response = await fetch(`${API_URL}/cache`, {
                     method: "DELETE",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        cache_id: cacheId
-                    })
+                    body: JSON.stringify({ cache_id: cacheId })
                 });
 
                 const data = await response.json();
                 if (data.status === "success") {
                     document.getElementById("cache_id").value = "";
+                    // Удаляем из памяти браузера
+                    localStorage.removeItem("saved_cache_id");
                     alert("Кэш успешно удален!");
                 } else {
                     alert("Ошибка: " + data.message);
