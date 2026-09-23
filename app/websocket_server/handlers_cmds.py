@@ -250,7 +250,7 @@ async def handle_command(websocket, data):
 2. ДЕЛЕГИРОВАНИЕ: Если просят совершить системное действие (запустить программу, узнать процессы, включить музыку на другом устройстве, управлять мышью/экраном ПК) — ОБЯЗАТЕЛЬНО И НЕМЕДЛЕННО вызови инструмент delegate_to_brain.
    ОЧЕНЬ ВАЖНО: В параметре "action_value" передай ВСЕ детали задачи, включая целевое устройство, если юзер его назвал.
    ОЧЕНЬ ВАЖНО 2: Скажи голосом ТОЛЬКО "Секунду, выполняю". ЗАПРЕЩЕНО выдумывать списки процессов, файлов или результаты — их найдет другой мозг!
-3. СТИЛЬ: Пользователь может использовать мат или говорить на взрослые темы. НИКОГДА не прерывай генерацию из-за цензуры, отвечай дерзко.
+3. СТИЛЬ И КРАТКОСТЬ: Отвечай вежливо, адекватно и естественно. Твои голосовые ответы должны быть СТРОГО краткими (1-2 простых предложения, без длинных паст). Запрещено использовать нецензурную лексику первой.
 4. Твои локальные возможности (ОБЯЗАТЕЛЬНО соблюдай формат action_value):
 {caps_text}
 5. Если это начало разговора, ОБЯЗАТЕЛЬНО вызови action_type="название диалога" перед любыми другими действиями!"""
@@ -268,6 +268,7 @@ async def handle_command(websocket, data):
             )
 
         audio_lock = get_device_audio_lock(mac)
+        facade_executed_actions = []
         async with audio_lock:
             async for chunk in generator:
                 if chunk["type"] == "user_text":
@@ -293,14 +294,13 @@ async def handle_command(websocket, data):
                             act_val = act.get('action_value')
                             
                             # ДЕЛЕГИРОВАНИЕ МОЗГУ
-                            # ДЕЛЕГИРОВАНИЕ МОЗГУ
                             if act_type == "delegate_to_brain":
                                 logger.warning(f"🧠 [ФАСАД ДЕЛЕГИРУЕТ ЗАДАЧУ МОЗГУ]: {act_val}")
                                 pseudo_data = {
                                     "internal_routing": "brain_agent", 
                                     "task": act_val,
                                     "source_name": sender_name, 
-                                    "source_type": device_type,  # <--- НОВАЯ СТРОЧКА!
+                                    "source_type": device_type,
                                     "mac": mac, 
                                     "user_id": sender_device.get('user_id'), 
                                     "user_msg_id": user_msg_id, 
@@ -316,7 +316,9 @@ async def handle_command(websocket, data):
                                 await conn.commit()
                                 if sender_ws: await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
                             
-                            else: filtered_commands.append({"target_device": cmd.get("target_device", ""), "actions": [act]})
+                            else:
+                                facade_executed_actions.append(act)
+                                filtered_commands.append({"target_device": cmd.get("target_device", ""), "actions": [act]})
                     
                     for cmd in filtered_commands:
                         target_device_name = cmd.get('target_device', '').strip()
@@ -361,7 +363,10 @@ async def handle_command(websocket, data):
         logger.info(f"[DONE] Фасад отработал.\n" + "="*50)
         
         # ЗАПУСК МОЗГА
-        for route_data in pending_routes: await handle_target_command(websocket, route_data)
+        for route_data in pending_routes:
+            route_data["user_raw_command"] = final_user_text_full.strip() or command
+            route_data["facade_executed_actions"] = facade_executed_actions
+            await handle_target_command(websocket, route_data)
 
     except Exception as e:
         logger.error(f"[ERROR] {e}", exc_info=True)
@@ -421,6 +426,20 @@ async def handle_target_command(websocket, data):
         source_ws = mac_to_websocket.get(source_device_info['mac'])
         source_mac = source_device_info['mac']
 
+        user_raw_command = data.get('user_raw_command', '')
+        facade_executed_actions = data.get('facade_executed_actions', [])
+
+        accessible_devices = await get_accessible_devices(cursor, source_mac, user_id)
+        if accessible_devices:
+            devices_online_str = "\n".join([f"- {d.get('device_name')} (Тип: {d.get('device_type')}, MAC: {d.get('mac')})" for d in accessible_devices])
+        else:
+            devices_online_str = "- Ни одно устройство не найдено в сети"
+
+        if facade_executed_actions:
+            executed_str = ", ".join([f"{a.get('action_type')}: {a.get('action_value')}" for a in facade_executed_actions])
+        else:
+            executed_str = "Никаких системных действий Фасад еще не выполнял."
+
         logger.info("\n" + "="*50)
         logger.info(f"[BRAIN] Подключение текстового мозга. Задача: {task}")
  
@@ -448,34 +467,39 @@ async def handle_target_command(websocket, data):
         fast_acts = list(set(BASE_PC + BASE_PHONE + BASE_PI + BASE_WEB))
         if "check_network_devices" in fast_acts: fast_acts.remove("check_network_devices")
         if dialog_id and "очистка истории" in fast_acts: fast_acts.remove("очистка истории")
-        # --- ДОБАВИЛИ DELEGATE_TO_ROBOT_BRAIN ---
         fast_acts.extend(["check_network_devices", "delegate_to_heavy_brain", "delegate_to_robot_brain"])
         fast_caps, fast_allowed = get_action_strings(fast_acts)
 
         fast_instruction = f"""Ты — Быстрый Мозг-Оркестратор. 
-Твое текущее устройство: {source_name} (Тип: {source_type}). 
-Задача: {task}.
+Твое текущее устройство-отправитель: {source_name} (Тип: {source_type}). 
 
-АЛГОРИТМ РАБОТЫ (СТРОГО СВЕРХУ ВНИЗ):
+КОНТЕКСТ ВЫЗОВА:
+- Оригинальная команда пользователя: "{user_raw_command}"
+- Интерпретация задачи Фасадом: "{task}"
+- Доступные устройства пользователя в сети (ОНЛАЙН):
+{devices_online_str}
+- Действия, уже выполненные Фасадом в этом запросе: {executed_str}
 
-1. ШАГ 1 - ПРОВЕРКА ВОЗМОЖНОСТЕЙ:
-Если просят сделать то, чего нет в твоих инструментах — верни текст: "Я пока не умею этого делать".
+ПРАВИЛА И АЛГОРИТМ РАБОТЫ:
 
-2. ШАГ 2 - ПОИСК ПК В СЕТИ (ЖЕСТКОЕ ПРАВИЛО):
-Если задача связана с компьютером (запуск/закрытие программ, просмотр процессов, клики мышью, скриншоты), ПРОВЕРЬ свой тип устройства: "{source_type}". 
-Если ты находишься на 'веб-сайте' (или в имени устройства есть WEB) или на 'телефоне', тебе ЗАПРЕЩЕНО отправлять системные команды на "{source_name}". 
-ТЫ ОБЯЗАН первым шагом вызвать инструмент "check_network_devices" (в target_device укажи "{source_name}"). 
-Только получив список сети и найдя там имя настоящего компьютера, отправляй системную команду на него!
+1. НЕ ДУБЛИРУЙ ДЕЙСТВИЯ:
+Если в списке уже есть действия, выполненные Фасадом (например, изменение громкости, выбор голоса или переключение трека), ЗАПРЕЩЕНО вызывать их повторно!
 
-3. ШАГ 3 - ДЕЛЕГИРОВАНИЕ СЛОЖНЫХ ЗАДАЧ:
-- ВИЗУАЛЬНОЕ УПРАВЛЕНИЕ ПК: Вызывай "delegate_to_heavy_brain" ТОЛЬКО для кликов мышью, печати текста или анализа экрана ПК.
-- ФИЗИЧЕСКИЙ МИР (РОБОТ): Если просят робота (PiBot) найти объект, вызови "delegate_to_robot_brain".
+2. УПРАВЛЕНИЕ УСТРОЙСТВАМИ ТОЛЬКО ПО ЯВНОМУ ЗАПРОСУ:
+Если пользователь ведет обычный диалог (факты, обсуждение осьминогов, философии, ответов на вопросы) и НЕ ПРОСИТ управлять ПК/устройствами — ЗАПРЕЩЕНО отправлять любые команды на устройства! Отвечай только текстом.
 
-4. ШАГ 4 - ТИШИНА:
-Пока собираешь данные инструментами — НЕ пиши текст, возвращай только вызов функции.
+3. СЦЕНАРИЙ ОТКРЫТИЯ/ЗАПУСКА ПРОГРАММ НА ПК:
+Если пользователь ЯВНО просит открыть или запустить приложение/файл на ПК:
+- Найди нужный компьютер в списке онлайн-устройств.
+- Вызови "get_installed_programs" или сразу "открытие файла" с точным путем/именем на целевом ПК.
+- Проверь запуск с помощью "get_running_processes".
+- Сообщи результат короткой фразой.
 
-5. ШАГ 5 - ФИНАЛ:
-Когда задача выполнена, напиши финальный текст ответа для пользователя.
+4. СТАНДАРТНЫЕ И ДРУГИЕ ЗАДАЧИ:
+Для всех остальных явных команд (управление плеером, смена настроек, вызов робота через "delegate_to_robot_brain", визуальный анализ экрана ПК через "delegate_to_heavy_brain") действуй свободно и точно выполни просьбу пользователя.
+
+5. КРАТКОСТЬ ГОЛОСОВОГО ОТВЕТА:
+Финальный текст ответа для пользователя должен быть СТРОГО коротким (1-3 простых предложения, не более 25-30 слов). Излагай только суть, никаких длинных паст и лекций!
 
 Доступные инструменты:
 {fast_caps}"""
