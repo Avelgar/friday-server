@@ -271,11 +271,15 @@ class AIService:
                 sender_task = None
                 
                 try:
-                    session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
+                    session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
                     
                     if formatted_history:
-                        logger.info(f"[HISTORY] Отправка контекста из {len(formatted_history)} сообщений.")
-                        await session.send_client_content(turns=formatted_history, turn_complete=True)
+                        history_to_send = formatted_history[-10:]
+                        logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
+                        try:
+                            await session.send_client_content(turns=history_to_send, turn_complete=True)
+                        except Exception as hex:
+                            logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live API: {hex}")
                     
                     async def send_input_task():
                         try:
@@ -309,7 +313,7 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=35.0)
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=10.0)
                         
                         sc = response.server_content
                         if sc:
@@ -343,6 +347,35 @@ class AIService:
                             await session.send_tool_response(function_responses=function_responses)
                             
                 except (asyncio.TimeoutError, TimeoutError):
+                    if has_yielded_data: return 
+                    logger.warning("[API] Таймаут получения данных от Gemini (receive)")
+                    total_keys_tried += 1
+                    if total_keys_tried >= min(3, len(self.api_keys)):
+                        logger.error("[API] Превышен лимит попыток ключей для Live API.")
+                        break
+                    await asyncio.sleep(0.5)
+                except StopAsyncIteration: pass
+                finally:
+                    if sender_task:
+                        sender_task.cancel()
+                        try: await sender_task
+                        except asyncio.CancelledError: pass
+                        except Exception: pass
+                    if session:
+                        try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                        except: pass
+                
+                return 
+
+            except Exception as e:
+                logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
+                
+                if has_yielded_data: return
+                total_keys_tried += 1
+                if total_keys_tried < min(3, len(self.api_keys)): await asyncio.sleep(0.5)
+                else: break
+
+        raise Exception("AI Live Service Unavailable")syncio.TimeoutError, TimeoutError):
                     if has_yielded_data: return 
                     raise Exception("Таймаут получения данных от Gemini (receive)")
                 except StopAsyncIteration: pass
@@ -441,11 +474,15 @@ class AIService:
                 sender_task = None
                 
                 try:
-                    session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
+                    session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
                     
                     if formatted_history:
-                        logger.info(f"[HISTORY] Отправка контекста из {len(formatted_history)} сообщений.")
-                        await session.send_client_content(turns=formatted_history, turn_complete=True)
+                        history_to_send = formatted_history[-10:]
+                        logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
+                        try:
+                            await session.send_client_content(turns=history_to_send, turn_complete=True)
+                        except Exception as hex:
+                            logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live Realtime API: {hex}")
                     
                     async def send_input_task():
                         nonlocal session_audio_cache, last_video_frame, has_reached_stream_end
@@ -469,7 +506,7 @@ class AIService:
                             else:
                                 while True:
                                     try:
-                                        item = await asyncio.wait_for(media_queue.get(), timeout=3.0)
+                                        item = await asyncio.wait_for(media_queue.get(), timeout=2.5)
                                         if item is None:
                                             has_reached_stream_end = True
                                             if has_sent_activity_start:
@@ -501,7 +538,7 @@ class AIService:
 
                     receive_iterator = session.receive().__aiter__()
                     while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=8.0)
                         
                         sc = response.server_content
                         if sc:
@@ -541,7 +578,11 @@ class AIService:
                 except (asyncio.TimeoutError, TimeoutError):
                     logger.warning("[API] Таймаут получения данных от Gemini (receive)")
                     if has_yielded_data: return 
-                    raise Exception("Таймаут получения данных от Gemini (receive)")
+                    total_keys_tried += 1
+                    if total_keys_tried >= min(3, len(self.api_keys)):
+                        logger.error("[API] Превышен лимит попыток ключей для Live API.")
+                        break
+                    await asyncio.sleep(0.5)
                 except StopAsyncIteration: pass
                 finally:
                     if sender_task:
@@ -559,7 +600,7 @@ class AIService:
                 logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
                 if has_yielded_data: return
                 total_keys_tried += 1
-                if total_keys_tried < len(self.api_keys): await asyncio.sleep(1)
+                if total_keys_tried < min(3, len(self.api_keys)): await asyncio.sleep(0.5)
                 else: break
 
         raise Exception("AI Live Service Unavailable")
