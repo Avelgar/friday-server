@@ -431,7 +431,7 @@ async def handle_target_command(websocket, data):
 
         accessible_devices = await get_accessible_devices(cursor, source_mac, user_id)
         if accessible_devices:
-            devices_online_str = "\n".join([f"- {d.get('device_name')} (Тип: {d.get('device_type')}, MAC: {d.get('mac')})" for d in accessible_devices])
+            devices_online_str = "\n".join([f"- {dev}" for dev in accessible_devices])
         else:
             devices_online_str = "- Ни одно устройство не найдено в сети"
 
