@@ -147,7 +147,7 @@ class AIService:
         )
         audio_data = bytearray()
         
-        cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+        cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
@@ -183,7 +183,7 @@ class AIService:
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
         )
         
-        cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+        cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
@@ -266,7 +266,7 @@ class AIService:
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
                 
-                cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+                cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
                 session = None
                 sender_task = None
                 
@@ -445,7 +445,7 @@ class AIService:
 
                 logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, ключ {self.current_key_index})...")
                 
-                cm = client.aio.live.connect(model="models/gemini-3.1-flash-live-preview", config=config)
+                cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
                 session = None
                 sender_task = None
                 
