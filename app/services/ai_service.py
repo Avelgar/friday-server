@@ -44,6 +44,11 @@ class AIService:
     def _get_client(self):
         return genai.Client(http_options={"api_version": "v1beta"}, api_key=self.api_keys[self.current_key_index])
 
+    def _get_live_client(self):
+        # Для Live API используем постоянный стабильный ключ без ротации
+        live_key = self.api_keys[0] if self.api_keys else None
+        return genai.Client(http_options={"api_version": "v1beta"}, api_key=live_key)
+
     def _rotate_key(self):
         if len(self.api_keys) <= 1: return False
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
@@ -130,12 +135,11 @@ class AIService:
         raise Exception(f"AI Image Service недоступен после перебора всех ключей. Последняя ошибка: {last_error_msg}")
 
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
-        self._rotate_key()
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
-        client = self._get_client()
+        client = self._get_live_client()
         
         # ЖЕСТКИЙ ПРОМПТ ДЛЯ УБИЙСТВА ОТСЕБЯТИНЫ
         sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст. ЗАПРЕЩЕНО добавлять слова от себя, здороваться, прощаться или задавать вопросы вроде 'Что-то еще?'."
@@ -169,12 +173,11 @@ class AIService:
 
     async def generate_static_audio_stream(self, text, voice_name="Aoede", assistant_name="Пятница"):
         """Потоковая версия TTS. Мгновенно отдает чанки аудио через yield."""
-        self._rotate_key()
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
-        client = self._get_client()
+        client = self._get_live_client()
         sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст. ЗАПРЕЩЕНО добавлять слова от себя, здороваться, прощаться или задавать вопросы."
         
         config = types.LiveConnectConfig(
@@ -210,172 +213,159 @@ class AIService:
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
 
-        total_keys_tried = 0
-        while total_keys_tried < len(self.api_keys):
-            self._rotate_key()
-            has_yielded_data = False 
+        has_yielded_data = False 
+        
+        try:
+            client = self._get_live_client()
+            
+            device_control_tool = types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="send_device_commands",
+                        description="Отправляет команды на устройства пользователя.",
+                        parameters=types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
+                                "actions": types.Schema(
+                                    type=types.Type.ARRAY,
+                                    items=types.Schema(
+                                        type=types.Type.OBJECT,
+                                        properties={
+                                            "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
+                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение")
+                                        },
+                                        required=["action_type", "action_value"]
+                                    )
+                                )
+                            },
+                            required=["target_device", "actions"]
+                        )
+                    )
+                ]
+            )
+
+            config_kwargs = dict(
+                response_modalities=["AUDIO"], 
+                system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
+                tools=[device_control_tool],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                ),
+                input_audio_transcription={},
+                output_audio_transcription={},
+                realtime_input_config=types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+                )
+            )
+            
+            if formatted_history:
+                config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
+
+            config = types.LiveConnectConfig(**config_kwargs)
+
+            logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, единый ключ)...")
+            
+            cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
+            session = None
+            sender_task = None
             
             try:
-                client = self._get_client()
-                
-                device_control_tool = types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name="send_device_commands",
-                            description="Отправляет команды на устройства пользователя.",
-                            parameters=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
-                                    "actions": types.Schema(
-                                        type=types.Type.ARRAY,
-                                        items=types.Schema(
-                                            type=types.Type.OBJECT,
-                                            properties={
-                                                "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение")
-                                            },
-                                            required=["action_type", "action_value"]
-                                        )
-                                    )
-                                },
-                                required=["target_device", "actions"]
-                            )
-                        )
-                    ]
-                )
-
-                config_kwargs = dict(
-                    response_modalities=["AUDIO"], 
-                    system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
-                    tools=[device_control_tool],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
-                    ),
-                    input_audio_transcription={},
-                    output_audio_transcription={},
-                    realtime_input_config=types.RealtimeInputConfig(
-                        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
-                    )
-                )
+                session = await asyncio.wait_for(cm.__aenter__(), timeout=12.0)
                 
                 if formatted_history:
-                    config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
-
-                config = types.LiveConnectConfig(**config_kwargs)
-
-                logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, ключ {self.current_key_index})...")
+                    history_to_send = formatted_history[-10:]
+                    logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
+                    try:
+                        await session.send_client_content(turns=history_to_send, turn_complete=True)
+                    except Exception as hex:
+                        logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live API: {hex}")
                 
-                cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
-                session = None
-                sender_task = None
-                
-                try:
-                    session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
+                async def send_input_task():
+                    try:
+                        if prompt_text:
+                            await session.send_realtime_input(text=prompt_text)
+                        if image_bytes:
+                            await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
+
+                        if media_queue:
+                            while True:
+                                item = await media_queue.get()
+                                if item is None:
+                                    await session.send_realtime_input(audio_stream_end=True)
+                                    break
+                                    
+                                if item["type"] == "audio" and len(item["data"]) > 0:
+                                    await session.send_realtime_input(audio=types.Blob(data=item["data"], mime_type="audio/pcm;rate=16000"))
+                                elif item["type"] == "video" and len(item["data"]) > 0:
+                                    await session.send_realtime_input(video=types.Blob(data=item["data"], mime_type="image/jpeg"))
+                                    
+                        elif audio_bytes:
+                            pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
+                            await session.send_realtime_input(activity_start=types.ActivityStart())
+                            await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
+                            await session.send_realtime_input(activity_end=types.ActivityEnd())
+
+                    except Exception as e:
+                        logger.error(f"[API STREAM ERROR] {e}")
+
+                sender_task = asyncio.create_task(send_input_task())
+
+                receive_iterator = session.receive().__aiter__()
+                while True:
+                    response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=25.0)
                     
-                    if formatted_history:
-                        history_to_send = formatted_history[-10:]
-                        logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
-                        try:
-                            await session.send_client_content(turns=history_to_send, turn_complete=True)
-                        except Exception as hex:
-                            logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live API: {hex}")
+                    sc = response.server_content
+                    if sc:
+                        if sc.input_transcription:
+                            yield {"type": "user_text", "text": sc.input_transcription.text}
+                        if sc.output_transcription:
+                            has_yielded_data = True
+                            yield {"type": "bot_text", "text": sc.output_transcription.text}
+                        if sc.model_turn:
+                            for part in sc.model_turn.parts:
+                                if part.inline_data:
+                                    has_yielded_data = True
+                                    yield {"type": "audio", "data": part.inline_data.data}
+                        if sc.turn_complete:
+                            logger.info("[API] Модель завершила реплику.")
+                            break
                     
-                    async def send_input_task():
-                        try:
-                            if prompt_text:
-                                await session.send_realtime_input(text=prompt_text)
-                            if image_bytes:
-                                await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
-
-                            if media_queue:
-                                while True:
-                                    item = await media_queue.get()
-                                    if item is None:
-                                        await session.send_realtime_input(audio_stream_end=True)
-                                        break
-                                        
-                                    if item["type"] == "audio" and len(item["data"]) > 0:
-                                        await session.send_realtime_input(audio=types.Blob(data=item["data"], mime_type="audio/pcm;rate=16000"))
-                                    elif item["type"] == "video" and len(item["data"]) > 0:
-                                        await session.send_realtime_input(video=types.Blob(data=item["data"], mime_type="image/jpeg"))
-                                        
-                            elif audio_bytes:
-                                pcm_data = audio_bytes[44:] if audio_bytes.startswith(b'RIFF') else audio_bytes
-                                await session.send_realtime_input(activity_start=types.ActivityStart())
-                                await session.send_realtime_input(audio=types.Blob(data=pcm_data, mime_type="audio/pcm;rate=16000"))
-                                await session.send_realtime_input(activity_end=types.ActivityEnd())
-
-                        except Exception as e:
-                            logger.error(f"[API STREAM ERROR] {e}")
-
-                    sender_task = asyncio.create_task(send_input_task())
-
-                    receive_iterator = session.receive().__aiter__()
-                    while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=10.0)
+                    if response.tool_call:
+                        extracted_commands = []
+                        function_responses = []
+                        for fc in response.tool_call.function_calls:
+                            args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                            if isinstance(args_dict, dict) and "actions" in args_dict:
+                                extracted_commands.append(args_dict)
+                            function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
                         
-                        sc = response.server_content
-                        if sc:
-                            if sc.input_transcription:
-                                yield {"type": "user_text", "text": sc.input_transcription.text}
-                            if sc.output_transcription:
-                                has_yielded_data = True
-                                yield {"type": "bot_text", "text": sc.output_transcription.text}
-                            if sc.model_turn:
-                                for part in sc.model_turn.parts:
-                                    if part.inline_data:
-                                        has_yielded_data = True
-                                        yield {"type": "audio", "data": part.inline_data.data}
-                            if sc.turn_complete:
-                                logger.info("[API] Модель завершила реплику.")
-                                break
+                        if extracted_commands:
+                            has_yielded_data = True
+                            yield {"type": "commands", "commands": extracted_commands}
                         
-                        if response.tool_call:
-                            extracted_commands = []
-                            function_responses = []
-                            for fc in response.tool_call.function_calls:
-                                args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                                if isinstance(args_dict, dict) and "actions" in args_dict:
-                                    extracted_commands.append(args_dict)
-                                function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
-                            
-                            if extracted_commands:
-                                has_yielded_data = True
-                                yield {"type": "commands", "commands": extracted_commands}
-                            
-                            await session.send_tool_response(function_responses=function_responses)
-                            
-                except (asyncio.TimeoutError, TimeoutError):
-                    if has_yielded_data: return 
-                    logger.warning("[API] Таймаут получения данных от Gemini (receive)")
-                    total_keys_tried += 1
-                    if total_keys_tried >= min(3, len(self.api_keys)):
-                        logger.error("[API] Превышен лимит попыток ключей для Live API.")
-                        break
-                    await asyncio.sleep(0.5)
-                except StopAsyncIteration: pass
-                finally:
-                    if sender_task:
-                        sender_task.cancel()
-                        try: await sender_task
-                        except asyncio.CancelledError: pass
-                        except Exception: pass
-                    if session:
-                        try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
-                        except: pass
-                
-                return 
+                        await session.send_tool_response(function_responses=function_responses)
+                        
+            except (asyncio.TimeoutError, TimeoutError):
+                if has_yielded_data: return 
+                logger.warning("[API] Таймаут ожидания данных от Gemini Live (receive)")
+            except StopAsyncIteration: pass
+            finally:
+                if sender_task:
+                    sender_task.cancel()
+                    try: await sender_task
+                    except asyncio.CancelledError: pass
+                    except Exception: pass
+                if session:
+                    try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                    except: pass
+            
+            return 
 
-            except Exception as e:
-                logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                
-                if has_yielded_data: return
-                total_keys_tried += 1
-                if total_keys_tried < min(3, len(self.api_keys)): await asyncio.sleep(0.5)
-                else: break
-
-        raise Exception("AI Live Service Unavailable")
+        except Exception as e:
+            logger.error(f"[API ERROR] Ошибка Live API: {e}")
+            if has_yielded_data: return
+            raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
     # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С БУФЕРИЗАЦИЕЙ ПАДЕНИЙ КЛЮЧЕЙ (ФАСАД)
@@ -388,198 +378,185 @@ class AIService:
         session_audio_cache = bytearray()
         last_video_frame = None
         has_reached_stream_end = False
+        has_yielded_data = False 
+        
+        try:
+            client = self._get_live_client()
+            
+            device_control_tool = types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="send_device_commands",
+                        description="Отправляет команды на устройства пользователя.",
+                        parameters=types.Schema(
+                            type=types.Type.OBJECT,
+                            properties={
+                                "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
+                                "actions": types.Schema(
+                                    type=types.Type.ARRAY,
+                                    items=types.Schema(
+                                        type=types.Type.OBJECT,
+                                        properties={
+                                            "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
+                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение")
+                                        },
+                                        required=["action_type", "action_value"]
+                                    )
+                                )
+                            },
+                            required=["target_device", "actions"]
+                        )
+                    )
+                ]
+            )
 
-        total_keys_tried = 0
-        while total_keys_tried < len(self.api_keys):
-            self._rotate_key()
-            has_yielded_data = False 
+            config_kwargs = dict(
+                response_modalities=["AUDIO"], 
+                system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
+                tools=[device_control_tool],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                ),
+                input_audio_transcription={},
+                output_audio_transcription={},
+                realtime_input_config=types.RealtimeInputConfig(
+                    automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
+                )
+            )
+            
+            if formatted_history:
+                config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
+
+            config = types.LiveConnectConfig(**config_kwargs)
+
+            logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, единый ключ)...")
+            
+            cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
+            session = None
+            sender_task = None
             
             try:
-                client = self._get_client()
-                
-                device_control_tool = types.Tool(
-                    function_declarations=[
-                        types.FunctionDeclaration(
-                            name="send_device_commands",
-                            description="Отправляет команды на устройства пользователя.",
-                            parameters=types.Schema(
-                                type=types.Type.OBJECT,
-                                properties={
-                                    "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
-                                    "actions": types.Schema(
-                                        type=types.Type.ARRAY,
-                                        items=types.Schema(
-                                            type=types.Type.OBJECT,
-                                            properties={
-                                                "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                                "action_value": types.Schema(type=types.Type.STRING, description="Значение")
-                                            },
-                                            required=["action_type", "action_value"]
-                                        )
-                                    )
-                                },
-                                required=["target_device", "actions"]
-                            )
-                        )
-                    ]
-                )
-
-                config_kwargs = dict(
-                    response_modalities=["AUDIO"], 
-                    system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
-                    tools=[device_control_tool],
-                    speech_config=types.SpeechConfig(
-                        voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
-                    ),
-                    input_audio_transcription={},
-                    output_audio_transcription={},
-                    realtime_input_config=types.RealtimeInputConfig(
-                        automatic_activity_detection=types.AutomaticActivityDetection(disabled=True)
-                    )
-                )
+                session = await asyncio.wait_for(cm.__aenter__(), timeout=12.0)
                 
                 if formatted_history:
-                    config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
-
-                config = types.LiveConnectConfig(**config_kwargs)
-
-                logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, ключ {self.current_key_index})...")
+                    history_to_send = formatted_history[-10:]
+                    logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
+                    try:
+                        await session.send_client_content(turns=history_to_send, turn_complete=True)
+                    except Exception as hex:
+                        logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live Realtime API: {hex}")
                 
-                cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
-                session = None
-                sender_task = None
-                
-                try:
-                    session = await asyncio.wait_for(cm.__aenter__(), timeout=8.0)
-                    
-                    if formatted_history:
-                        history_to_send = formatted_history[-10:]
-                        logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
-                        try:
-                            await session.send_client_content(turns=history_to_send, turn_complete=True)
-                        except Exception as hex:
-                            logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live Realtime API: {hex}")
-                    
-                    async def send_input_task():
-                        nonlocal session_audio_cache, last_video_frame, has_reached_stream_end
-                        has_sent_activity_start = False
+                async def send_input_task():
+                    nonlocal session_audio_cache, last_video_frame, has_reached_stream_end
+                    has_sent_activity_start = False
 
-                        try:
-                            if prompt_text:
-                                await session.send_realtime_input(text=prompt_text)
+                    try:
+                        if prompt_text:
+                            await session.send_realtime_input(text=prompt_text)
 
-                            if session_audio_cache:
-                                await session.send_realtime_input(activity_start=types.ActivityStart())
-                                has_sent_activity_start = True
-                                await session.send_realtime_input(audio=types.Blob(data=bytes(session_audio_cache), mime_type="audio/pcm;rate=16000"))
+                        if session_audio_cache:
+                            await session.send_realtime_input(activity_start=types.ActivityStart())
+                            has_sent_activity_start = True
+                            await session.send_realtime_input(audio=types.Blob(data=bytes(session_audio_cache), mime_type="audio/pcm;rate=16000"))
 
-                            if last_video_frame:
-                                await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
+                        if last_video_frame:
+                            await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
 
-                            if has_reached_stream_end:
-                                if has_sent_activity_start:
-                                    await session.send_realtime_input(activity_end=types.ActivityEnd())
-                            else:
-                                while True:
-                                    try:
-                                        item = await asyncio.wait_for(media_queue.get(), timeout=2.5)
-                                        if item is None:
-                                            has_reached_stream_end = True
-                                            if has_sent_activity_start:
-                                                await session.send_realtime_input(activity_end=types.ActivityEnd())
-                                            break
-                                            
-                                        if item["type"] == "audio" and len(item["data"]) > 0:
-                                            chunk = item["data"]
-                                            session_audio_cache.extend(chunk)
-
-                                            if not has_sent_activity_start:
-                                                await session.send_realtime_input(activity_start=types.ActivityStart())
-                                                has_sent_activity_start = True
-
-                                            await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
-                                            
-                                        elif item["type"] == "video" and len(item["data"]) > 0:
-                                            last_video_frame = item["data"]
-                                            await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
-                                            
-                                    except asyncio.TimeoutError:
+                        if has_reached_stream_end:
+                            if has_sent_activity_start:
+                                await session.send_realtime_input(activity_end=types.ActivityEnd())
+                        else:
+                            while True:
+                                try:
+                                    item = await asyncio.wait_for(media_queue.get(), timeout=2.5)
+                                    if item is None:
+                                        has_reached_stream_end = True
                                         if has_sent_activity_start:
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
-                        except Exception as e:
-                            logger.error(f"[API STREAM ERROR] {e}")
-
-                    sender_task = asyncio.create_task(send_input_task())
-
-                    receive_iterator = session.receive().__aiter__()
-                    while True:
-                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=8.0)
-                        
-                        sc = response.server_content
-                        if sc:
-                            if sc.input_transcription:
-                                has_yielded_data = True
-                                yield {"type": "user_text", "text": sc.input_transcription.text}
-                            
-                            if sc.output_transcription:
-                                has_yielded_data = True
-                                yield {"type": "bot_text", "text": sc.output_transcription.text}
-                                
-                            if sc.model_turn:
-                                for part in sc.model_turn.parts:
-                                    if part.inline_data:
-                                        has_yielded_data = True
-                                        yield {"type": "audio", "data": part.inline_data.data}
                                         
-                            if sc.turn_complete:
-                                logger.info("[API] Модель завершила реплику.")
-                                break
+                                    if item["type"] == "audio" and len(item["data"]) > 0:
+                                        chunk = item["data"]
+                                        session_audio_cache.extend(chunk)
+
+                                        if not has_sent_activity_start:
+                                            await session.send_realtime_input(activity_start=types.ActivityStart())
+                                            has_sent_activity_start = True
+
+                                        await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
+                                        
+                                    elif item["type"] == "video" and len(item["data"]) > 0:
+                                        last_video_frame = item["data"]
+                                        await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
+                                        
+                                except asyncio.TimeoutError:
+                                    if has_sent_activity_start:
+                                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+                                    break
+                    except Exception as e:
+                        logger.error(f"[API STREAM ERROR] {e}")
+
+                sender_task = asyncio.create_task(send_input_task())
+
+                receive_iterator = session.receive().__aiter__()
+                while True:
+                    response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
+                    
+                    sc = response.server_content
+                    if sc:
+                        if sc.input_transcription:
+                            has_yielded_data = True
+                            yield {"type": "user_text", "text": sc.input_transcription.text}
                         
-                        if response.tool_call:
-                            extracted_commands = []
-                            function_responses = []
-                            for fc in response.tool_call.function_calls:
-                                args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                                if isinstance(args_dict, dict) and "actions" in args_dict:
-                                    extracted_commands.append(args_dict)
-                                function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                        if sc.output_transcription:
+                            has_yielded_data = True
+                            yield {"type": "bot_text", "text": sc.output_transcription.text}
                             
-                            if extracted_commands:
-                                has_yielded_data = True
-                                yield {"type": "commands", "commands": extracted_commands}
-                            
-                            await session.send_tool_response(function_responses=function_responses)
-                            
-                except (asyncio.TimeoutError, TimeoutError):
-                    logger.warning("[API] Таймаут получения данных от Gemini (receive)")
-                    if has_yielded_data: return 
-                    total_keys_tried += 1
-                    if total_keys_tried >= min(3, len(self.api_keys)):
-                        logger.error("[API] Превышен лимит попыток ключей для Live API.")
-                        break
-                    await asyncio.sleep(0.5)
-                except StopAsyncIteration: pass
-                finally:
-                    if sender_task:
-                        sender_task.cancel()
-                        try: await sender_task
-                        except asyncio.CancelledError: pass
-                        except Exception: pass
-                    if session:
-                        try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
-                        except: pass
-                
-                return 
+                        if sc.model_turn:
+                            for part in sc.model_turn.parts:
+                                if part.inline_data:
+                                    has_yielded_data = True
+                                    yield {"type": "audio", "data": part.inline_data.data}
+                                    
+                        if sc.turn_complete:
+                            logger.info("[API] Модель завершила реплику.")
+                            break
+                    
+                    if response.tool_call:
+                        extracted_commands = []
+                        function_responses = []
+                        for fc in response.tool_call.function_calls:
+                            args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                            if isinstance(args_dict, dict) and "actions" in args_dict:
+                                extracted_commands.append(args_dict)
+                            function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                        
+                        if extracted_commands:
+                            has_yielded_data = True
+                            yield {"type": "commands", "commands": extracted_commands}
+                        
+                        await session.send_tool_response(function_responses=function_responses)
+                        
+            except (asyncio.TimeoutError, TimeoutError):
+                if has_yielded_data: return 
+                logger.warning("[API] Таймаут получения данных от Gemini Live (receive)")
+            except StopAsyncIteration: pass
+            finally:
+                if sender_task:
+                    sender_task.cancel()
+                    try: await sender_task
+                    except asyncio.CancelledError: pass
+                    except Exception: pass
+                if session:
+                    try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
+                    except: pass
+            
+            return 
 
-            except Exception as e:
-                logger.error(f"[API ERROR] Ошибка на ключе {self.current_key_index}: {e}")
-                if has_yielded_data: return
-                total_keys_tried += 1
-                if total_keys_tried < min(3, len(self.api_keys)): await asyncio.sleep(0.5)
-                else: break
-
-        raise Exception("AI Live Service Unavailable")
+        except Exception as e:
+            logger.error(f"[API ERROR] Ошибка Live API: {e}")
+            if has_yielded_data: return
+            raise Exception("AI Live Service Unavailable")
 
 
     # ==============================================================================
