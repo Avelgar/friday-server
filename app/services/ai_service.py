@@ -327,19 +327,22 @@ class AIService:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
+                            # Возвращаем стандартный технический ответ
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
-                                response={
-                                    "result": "Успешно выполнено! ОБЯЗАТЕЛЬНО скажи короткое подтверждение пользователю голосом прямо сейчас."
-                                }
+                                response={"result": "OK"}
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
+                        # Отправляем технический результат выполнения
                         await session.send_tool_response(function_responses=function_responses)
+                        
+                        # ВОТ ГЛАВНЫЙ ФИКС: Принудительно пинаем модель текстом, чтобы она заговорила
+                        await session.send_realtime_input(text="[Система]: Действие успешно выполнено. Теперь обязательно скажи короткое подтверждение пользователю голосом.")
 
                     sc = response.server_content
                     # 2. ЗАТЕМ обрабатываем контент и завершение хода
@@ -523,6 +526,7 @@ class AIService:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     
                     # 1. ОБРАБОТКА ФУНКЦИЙ СТАВИТСЯ В НАЧАЛО
+                    # 1. СНАЧАЛА проверяем инструмент, чтобы установить флаг
                     if response.tool_call:
                         is_tool_call_turn = True
                         extracted_commands = []
@@ -531,19 +535,22 @@ class AIService:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
+                            # Возвращаем стандартный технический ответ
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
-                                response={
-                                    "result": "Успешно выполнено! ОБЯЗАТЕЛЬНО скажи короткое подтверждение пользователю голосом прямо сейчас."
-                                }
+                                response={"result": "OK"}
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
+                        # Отправляем технический результат выполнения
                         await session.send_tool_response(function_responses=function_responses)
+                        
+                        # ВОТ ГЛАВНЫЙ ФИКС: Принудительно пинаем модель текстом, чтобы она заговорила
+                        await session.send_realtime_input(text="[Система]: Действие успешно выполнено. Теперь обязательно скажи короткое подтверждение пользователю голосом.")
                         
                     sc = response.server_content
                     # 2. ОБРАБОТКА КОНТЕНТА
