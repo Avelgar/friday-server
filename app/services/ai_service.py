@@ -333,12 +333,11 @@ class AIService:
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
                             
-                            # СТРОГИЙ ФОРМАТ 3.8 LIVE! 
-                            # Если отправить просто "OK", модель зависнет и промолчит.
+                            # Возвращаем технический статус по стандарту 3.8
                             result_data = {
                                 "status": "ok",
                                 "retryable": False,
-                                "message": "Действие успешно выполнено. Кратко подтверди это пользователю голосом."
+                                "message": "Успешно."
                             }
                             
                             function_responses.append(types.FunctionResponse(
@@ -353,7 +352,15 @@ class AIService:
                         
                         logger.info(f"[API TOOL] 📤 Отправляем send_tool_response строго в формате 3.8 Live...")
                         await session.send_tool_response(function_responses=function_responses)
-                        logger.info(f"[API TOOL] ✅ Ответ отправлен. Ждем аудио-генерацию от модели...")
+                        
+                        # === МАГИЧЕСКИЙ ПИНОК ===
+                        # Создаем новую фейковую "активность" пользователя, чтобы заставить модель ответить
+                        logger.info(f"[API TOOL] 🥾 Пинаем модель новым событием Activity, чтобы она заговорила...")
+                        await session.send_realtime_input(activity_start=types.ActivityStart())
+                        await session.send_realtime_input(text="[Системное уведомление]: Инструмент отработал. Кратко подтверди это вслух.")
+                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+                        
+                        logger.info(f"[API TOOL] ✅ Ответ и пинок отправлены. Ждем аудио-генерацию от модели...")
                         
                     sc = response.server_content
                     # 2. ЗАТЕМ обрабатываем контент и завершение хода
@@ -551,12 +558,11 @@ class AIService:
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
                             
-                            # СТРОГИЙ ФОРМАТ 3.8 LIVE! 
-                            # Если отправить просто "OK", модель зависнет и промолчит.
+                            # Возвращаем технический статус по стандарту 3.8
                             result_data = {
                                 "status": "ok",
                                 "retryable": False,
-                                "message": "Действие успешно выполнено. Кратко подтверди это пользователю голосом."
+                                "message": "Успешно."
                             }
                             
                             function_responses.append(types.FunctionResponse(
@@ -571,7 +577,15 @@ class AIService:
                         
                         logger.info(f"[API TOOL] 📤 Отправляем send_tool_response строго в формате 3.8 Live...")
                         await session.send_tool_response(function_responses=function_responses)
-                        logger.info(f"[API TOOL] ✅ Ответ отправлен. Ждем аудио-генерацию от модели...")
+                        
+                        # === МАГИЧЕСКИЙ ПИНОК ===
+                        # Создаем новую фейковую "активность" пользователя, чтобы заставить модель ответить
+                        logger.info(f"[API TOOL] 🥾 Пинаем модель новым событием Activity, чтобы она заговорила...")
+                        await session.send_realtime_input(activity_start=types.ActivityStart())
+                        await session.send_realtime_input(text="[Системное уведомление]: Инструмент отработал. Кратко подтверди это вслух.")
+                        await session.send_realtime_input(activity_end=types.ActivityEnd())
+                        
+                        logger.info(f"[API TOOL] ✅ Ответ и пинок отправлены. Ждем аудио-генерацию от модели...")
                         
                     sc = response.server_content
                     # 2. ОБРАБОТКА КОНТЕНТА
