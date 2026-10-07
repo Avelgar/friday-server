@@ -323,35 +323,38 @@ class AIService:
                         is_tool_call_turn = True
                         extracted_commands = []
                         function_responses = []
+                        
+                        logger.info(f"[API TOOL] ⚡ Получен запрос на вызов инструментов: {len(response.tool_call.function_calls)} шт.")
+                        
                         for fc in response.tool_call.function_calls:
+                            logger.info(f"[API TOOL] Обработка функции '{fc.name}' (ID: {fc.id})")
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                            
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                            # Возвращаем стандартный технический ответ
+                            
+                            # СТРОГИЙ ФОРМАТ 3.8 LIVE! 
+                            # Если отправить просто "OK", модель зависнет и промолчит.
+                            result_data = {
+                                "status": "ok",
+                                "retryable": False,
+                                "message": "Действие успешно выполнено. Кратко подтверди это пользователю голосом."
+                            }
+                            
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
-                                response={"result": "OK"}
+                                response=result_data
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
-                        # Отправляем технический результат выполнения функции
+                        logger.info(f"[API TOOL] 📤 Отправляем send_tool_response строго в формате 3.8 Live...")
                         await session.send_tool_response(function_responses=function_responses)
+                        logger.info(f"[API TOOL] ✅ Ответ отправлен. Ждем аудио-генерацию от модели...")
                         
-                        # ВОТ ГЛАВНЫЙ ФИКС: Явно передаем ход модели, чтобы она заговорила!
-                        await session.send_client_content(
-                            turns=[
-                                types.Content(
-                                    role="user", 
-                                    parts=[types.Part.from_text(text="Действие успешно выполнено. Обязательно скажи короткое подтверждение пользователю голосом.")]
-                                )
-                            ],
-                            turn_complete=True
-                        )
-
                     sc = response.server_content
                     # 2. ЗАТЕМ обрабатываем контент и завершение хода
                     if sc:
@@ -538,34 +541,37 @@ class AIService:
                         is_tool_call_turn = True
                         extracted_commands = []
                         function_responses = []
+                        
+                        logger.info(f"[API TOOL] ⚡ Получен запрос на вызов инструментов: {len(response.tool_call.function_calls)} шт.")
+                        
                         for fc in response.tool_call.function_calls:
+                            logger.info(f"[API TOOL] Обработка функции '{fc.name}' (ID: {fc.id})")
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                            
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                            # Возвращаем стандартный технический ответ
+                            
+                            # СТРОГИЙ ФОРМАТ 3.8 LIVE! 
+                            # Если отправить просто "OK", модель зависнет и промолчит.
+                            result_data = {
+                                "status": "ok",
+                                "retryable": False,
+                                "message": "Действие успешно выполнено. Кратко подтверди это пользователю голосом."
+                            }
+                            
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
-                                response={"result": "OK"}
+                                response=result_data
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
-                        # Отправляем технический результат выполнения функции
+                        logger.info(f"[API TOOL] 📤 Отправляем send_tool_response строго в формате 3.8 Live...")
                         await session.send_tool_response(function_responses=function_responses)
-                        
-                        # ВОТ ГЛАВНЫЙ ФИКС: Явно передаем ход модели, чтобы она заговорила!
-                        await session.send_client_content(
-                            turns=[
-                                types.Content(
-                                    role="user", 
-                                    parts=[types.Part.from_text(text="Действие успешно выполнено. Обязательно скажи короткое подтверждение пользователю голосом.")]
-                                )
-                            ],
-                            turn_complete=True
-                        )
+                        logger.info(f"[API TOOL] ✅ Ответ отправлен. Ждем аудио-генерацию от модели...")
                         
                     sc = response.server_content
                     # 2. ОБРАБОТКА КОНТЕНТА
