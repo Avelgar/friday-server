@@ -316,73 +316,54 @@ class AIService:
 
                 receive_iterator = session.receive().__aiter__()
                 while True:
-                    response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=25.0)
+                    response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     
-                    # 1. СНАЧАЛА проверяем инструмент, чтобы установить флаг
+                    # 1. ОБРАБОТКА ВЫЗОВА ФУНКЦИЙ
                     if response.tool_call:
-                        is_tool_call_turn = True
                         extracted_commands = []
                         function_responses = []
-                        
-                        logger.info(f"[API TOOL] ⚡ Получен запрос на вызов инструментов: {len(response.tool_call.function_calls)} шт.")
+                        logger.info(f"[API TOOL] ⚡ Вызов инструментов: {len(response.tool_call.function_calls)} шт.")
                         
                         for fc in response.tool_call.function_calls:
-                            logger.info(f"[API TOOL] Обработка функции '{fc.name}' (ID: {fc.id})")
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                            
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                            
-                            # Возвращаем технический статус по стандарту 3.8
-                            result_data = {
-                                "status": "ok",
-                                "retryable": False,
-                                "message": "Успешно."
-                            }
-                            
+                                
+                            # Возвращаем строгий формат 3.8 Live
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
-                                response=result_data
+                                response={"status": "ok", "retryable": False, "message": "Success"}
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
-                        logger.info(f"[API TOOL] 📤 Отправляем send_tool_response строго в формате 3.8 Live...")
                         await session.send_tool_response(function_responses=function_responses)
+                        logger.info(f"[API TOOL] ✅ Ответ отправлен.")
                         
-                        # === МАГИЧЕСКИЙ ПИНОК ===
-                        # Создаем новую фейковую "активность" пользователя, чтобы заставить модель ответить
-                        logger.info(f"[API TOOL] 🥾 Пинаем модель новым событием Activity, чтобы она заговорила...")
-                        await session.send_realtime_input(activity_start=types.ActivityStart())
-                        await session.send_realtime_input(text="[Системное уведомление]: Инструмент отработал. Кратко подтверди это вслух.")
-                        await session.send_realtime_input(activity_end=types.ActivityEnd())
-                        
-                        logger.info(f"[API TOOL] ✅ Ответ и пинок отправлены. Ждем аудио-генерацию от модели...")
-                        
+                    # 2. ОБРАБОТКА ТЕКСТА, АУДИО И ЗАВЕРШЕНИЯ ХОДА
                     sc = response.server_content
-                    # 2. ЗАТЕМ обрабатываем контент и завершение хода
                     if sc:
                         if sc.input_transcription:
+                            has_yielded_data = True
                             yield {"type": "user_text", "text": sc.input_transcription.text}
+                        
                         if sc.output_transcription:
                             has_yielded_data = True
                             yield {"type": "bot_text", "text": sc.output_transcription.text}
+                            
                         if sc.model_turn:
                             for part in sc.model_turn.parts:
                                 if part.inline_data:
                                     has_yielded_data = True
                                     yield {"type": "audio", "data": part.inline_data.data}
+                                    
+                        # Когда модель говорит, что закончила ход — мы ЧЕСТНО выходим из цикла!
                         if sc.turn_complete:
-                            # ДОБАВЛЕНО: Запрещаем закрывать соединение, если это был ход вызова функции
-                            if is_tool_call_turn:
-                                logger.info("[API] Ход с вызовом функции завершен. Ожидаем голосовой ответ...")
-                                is_tool_call_turn = False
-                            else:
-                                logger.info("[API] Модель завершила реплику.")
-                                break
+                            logger.info("[API] Модель завершила реплику (turn_complete).")
+                            break
                         
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
@@ -412,6 +393,9 @@ class AIService:
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
+
+        # === ДОБАВЬ ЭТУ СТРОКУ ===
+        system_instruction += "\n\nCRITICAL RULE: You MUST speak a short voice confirmation (like 'Секунду', 'Готово') BEFORE calling any tools. Never call a tool silently!"
 
         session_audio_cache = bytearray()
         last_video_frame = None
@@ -543,52 +527,33 @@ class AIService:
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     
-                    # 1. СНАЧАЛА проверяем инструмент, чтобы установить флаг
+                    # 1. ОБРАБОТКА ВЫЗОВА ФУНКЦИЙ
                     if response.tool_call:
-                        is_tool_call_turn = True
                         extracted_commands = []
                         function_responses = []
-                        
-                        logger.info(f"[API TOOL] ⚡ Получен запрос на вызов инструментов: {len(response.tool_call.function_calls)} шт.")
+                        logger.info(f"[API TOOL] ⚡ Вызов инструментов: {len(response.tool_call.function_calls)} шт.")
                         
                         for fc in response.tool_call.function_calls:
-                            logger.info(f"[API TOOL] Обработка функции '{fc.name}' (ID: {fc.id})")
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                            
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                            
-                            # Возвращаем технический статус по стандарту 3.8
-                            result_data = {
-                                "status": "ok",
-                                "retryable": False,
-                                "message": "Успешно."
-                            }
-                            
+                                
+                            # Возвращаем строгий формат 3.8 Live
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
-                                response=result_data
+                                response={"status": "ok", "retryable": False, "message": "Success"}
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
-                        logger.info(f"[API TOOL] 📤 Отправляем send_tool_response строго в формате 3.8 Live...")
                         await session.send_tool_response(function_responses=function_responses)
+                        logger.info(f"[API TOOL] ✅ Ответ отправлен.")
                         
-                        # === МАГИЧЕСКИЙ ПИНОК ===
-                        # Создаем новую фейковую "активность" пользователя, чтобы заставить модель ответить
-                        logger.info(f"[API TOOL] 🥾 Пинаем модель новым событием Activity, чтобы она заговорила...")
-                        await session.send_realtime_input(activity_start=types.ActivityStart())
-                        await session.send_realtime_input(text="[Системное уведомление]: Инструмент отработал. Кратко подтверди это вслух.")
-                        await session.send_realtime_input(activity_end=types.ActivityEnd())
-                        
-                        logger.info(f"[API TOOL] ✅ Ответ и пинок отправлены. Ждем аудио-генерацию от модели...")
-                        
+                    # 2. ОБРАБОТКА ТЕКСТА, АУДИО И ЗАВЕРШЕНИЯ ХОДА
                     sc = response.server_content
-                    # 2. ОБРАБОТКА КОНТЕНТА
                     if sc:
                         if sc.input_transcription:
                             has_yielded_data = True
@@ -604,14 +569,10 @@ class AIService:
                                     has_yielded_data = True
                                     yield {"type": "audio", "data": part.inline_data.data}
                                     
+                        # Когда модель говорит, что закончила ход — мы ЧЕСТНО выходим из цикла!
                         if sc.turn_complete:
-                            # ДОБАВЛЕНО: Удержание соединения
-                            if is_tool_call_turn:
-                                logger.info("[API] Ход с вызовом функции завершен. Ожидаем голосовой ответ...")
-                                is_tool_call_turn = False
-                            else:
-                                logger.info("[API] Модель завершила реплику.")
-                                break
+                            logger.info("[API] Модель завершила реплику (turn_complete).")
+                            break
                         
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
