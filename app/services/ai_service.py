@@ -327,7 +327,13 @@ class AIService:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                            function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                            function_responses.append(types.FunctionResponse(
+                                name=fc.name, 
+                                id=fc.id, 
+                                response={
+                                    "result": "Успешно выполнено! ОБЯЗАТЕЛЬНО скажи короткое подтверждение пользователю голосом прямо сейчас."
+                                }
+                            ))
                         
                         if extracted_commands:
                             has_yielded_data = True
@@ -525,7 +531,13 @@ class AIService:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                            function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                            function_responses.append(types.FunctionResponse(
+                                name=fc.name, 
+                                id=fc.id, 
+                                response={
+                                    "result": "Успешно выполнено! ОБЯЗАТЕЛЬНО скажи короткое подтверждение пользователю голосом прямо сейчас."
+                                }
+                            ))
                         
                         if extracted_commands:
                             has_yielded_data = True
