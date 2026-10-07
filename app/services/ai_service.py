@@ -311,27 +311,16 @@ class AIService:
 
                 sender_task = asyncio.create_task(send_input_task())
 
+                # ДОБАВЛЕНО: Флаг для ожидания голосового ответа после вызова функции
+                is_tool_call_turn = False
+
                 receive_iterator = session.receive().__aiter__()
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=25.0)
                     
-                    sc = response.server_content
-                    if sc:
-                        if sc.input_transcription:
-                            yield {"type": "user_text", "text": sc.input_transcription.text}
-                        if sc.output_transcription:
-                            has_yielded_data = True
-                            yield {"type": "bot_text", "text": sc.output_transcription.text}
-                        if sc.model_turn:
-                            for part in sc.model_turn.parts:
-                                if part.inline_data:
-                                    has_yielded_data = True
-                                    yield {"type": "audio", "data": part.inline_data.data}
-                        if sc.turn_complete:
-                            logger.info("[API] Модель завершила реплику.")
-                            break
-                    
+                    # 1. СНАЧАЛА проверяем инструмент, чтобы установить флаг
                     if response.tool_call:
+                        is_tool_call_turn = True
                         extracted_commands = []
                         function_responses = []
                         for fc in response.tool_call.function_calls:
@@ -345,6 +334,28 @@ class AIService:
                             yield {"type": "commands", "commands": extracted_commands}
                         
                         await session.send_tool_response(function_responses=function_responses)
+
+                    sc = response.server_content
+                    # 2. ЗАТЕМ обрабатываем контент и завершение хода
+                    if sc:
+                        if sc.input_transcription:
+                            yield {"type": "user_text", "text": sc.input_transcription.text}
+                        if sc.output_transcription:
+                            has_yielded_data = True
+                            yield {"type": "bot_text", "text": sc.output_transcription.text}
+                        if sc.model_turn:
+                            for part in sc.model_turn.parts:
+                                if part.inline_data:
+                                    has_yielded_data = True
+                                    yield {"type": "audio", "data": part.inline_data.data}
+                        if sc.turn_complete:
+                            # ДОБАВЛЕНО: Запрещаем закрывать соединение, если это был ход вызова функции
+                            if is_tool_call_turn:
+                                logger.info("[API] Ход с вызовом функции завершен. Ожидаем голосовой ответ...")
+                                is_tool_call_turn = False
+                            else:
+                                logger.info("[API] Модель завершила реплику.")
+                                break
                         
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
@@ -497,12 +508,33 @@ class AIService:
                         logger.error(f"[API STREAM ERROR] {e}")
 
                 sender_task = asyncio.create_task(send_input_task())
+                
+                # ДОБАВЛЕНО: Флаг для ожидания голосового ответа
+                is_tool_call_turn = False
 
                 receive_iterator = session.receive().__aiter__()
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     
+                    # 1. ОБРАБОТКА ФУНКЦИЙ СТАВИТСЯ В НАЧАЛО
+                    if response.tool_call:
+                        is_tool_call_turn = True
+                        extracted_commands = []
+                        function_responses = []
+                        for fc in response.tool_call.function_calls:
+                            args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
+                            if isinstance(args_dict, dict) and "actions" in args_dict:
+                                extracted_commands.append(args_dict)
+                            function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
+                        
+                        if extracted_commands:
+                            has_yielded_data = True
+                            yield {"type": "commands", "commands": extracted_commands}
+                        
+                        await session.send_tool_response(function_responses=function_responses)
+                        
                     sc = response.server_content
+                    # 2. ОБРАБОТКА КОНТЕНТА
                     if sc:
                         if sc.input_transcription:
                             has_yielded_data = True
@@ -519,23 +551,13 @@ class AIService:
                                     yield {"type": "audio", "data": part.inline_data.data}
                                     
                         if sc.turn_complete:
-                            logger.info("[API] Модель завершила реплику.")
-                            break
-                    
-                    if response.tool_call:
-                        extracted_commands = []
-                        function_responses = []
-                        for fc in response.tool_call.function_calls:
-                            args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                            if isinstance(args_dict, dict) and "actions" in args_dict:
-                                extracted_commands.append(args_dict)
-                            function_responses.append(types.FunctionResponse(name=fc.name, id=fc.id, response={"result": "OK"}))
-                        
-                        if extracted_commands:
-                            has_yielded_data = True
-                            yield {"type": "commands", "commands": extracted_commands}
-                        
-                        await session.send_tool_response(function_responses=function_responses)
+                            # ДОБАВЛЕНО: Удержание соединения
+                            if is_tool_call_turn:
+                                logger.info("[API] Ход с вызовом функции завершен. Ожидаем голосовой ответ...")
+                                is_tool_call_turn = False
+                            else:
+                                logger.info("[API] Модель завершила реплику.")
+                                break
                         
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
