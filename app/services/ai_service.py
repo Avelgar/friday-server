@@ -338,11 +338,19 @@ class AIService:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
-                        # Отправляем технический результат выполнения
+                        # Отправляем технический результат выполнения функции
                         await session.send_tool_response(function_responses=function_responses)
                         
-                        # ВОТ ГЛАВНЫЙ ФИКС: Принудительно пинаем модель текстом, чтобы она заговорила
-                        await session.send_realtime_input(text="[Система]: Действие успешно выполнено. Теперь обязательно скажи короткое подтверждение пользователю голосом.")
+                        # ВОТ ГЛАВНЫЙ ФИКС: Явно передаем ход модели, чтобы она заговорила!
+                        await session.send_client_content(
+                            turns=[
+                                types.Content(
+                                    role="user", 
+                                    parts=[types.Part.from_text(text="Действие успешно выполнено. Обязательно скажи короткое подтверждение пользователю голосом.")]
+                                )
+                            ],
+                            turn_complete=True
+                        )
 
                     sc = response.server_content
                     # 2. ЗАТЕМ обрабатываем контент и завершение хода
@@ -525,7 +533,6 @@ class AIService:
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     
-                    # 1. ОБРАБОТКА ФУНКЦИЙ СТАВИТСЯ В НАЧАЛО
                     # 1. СНАЧАЛА проверяем инструмент, чтобы установить флаг
                     if response.tool_call:
                         is_tool_call_turn = True
@@ -546,11 +553,19 @@ class AIService:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         
-                        # Отправляем технический результат выполнения
+                        # Отправляем технический результат выполнения функции
                         await session.send_tool_response(function_responses=function_responses)
                         
-                        # ВОТ ГЛАВНЫЙ ФИКС: Принудительно пинаем модель текстом, чтобы она заговорила
-                        await session.send_realtime_input(text="[Система]: Действие успешно выполнено. Теперь обязательно скажи короткое подтверждение пользователю голосом.")
+                        # ВОТ ГЛАВНЫЙ ФИКС: Явно передаем ход модели, чтобы она заговорила!
+                        await session.send_client_content(
+                            turns=[
+                                types.Content(
+                                    role="user", 
+                                    parts=[types.Part.from_text(text="Действие успешно выполнено. Обязательно скажи короткое подтверждение пользователю голосом.")]
+                                )
+                            ],
+                            turn_complete=True
+                        )
                         
                     sc = response.server_content
                     # 2. ОБРАБОТКА КОНТЕНТА
