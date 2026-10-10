@@ -254,7 +254,7 @@ class AIService:
                 ),
                 # ВОТ ЭТО ОБЯЗАТЕЛЬНО ДЛЯ EXTENDED THINKING:
                 thinking_config=types.ThinkingConfig(
-                    thinking_budget=1024  # или thinking_level="low" / "medium" в зависимости от версии SDK
+                    thinking_level="LOW"  # или thinking_level="low" / "medium" в зависимости от версии SDK
                 ),
                 input_audio_transcription={},
                 output_audio_transcription={},
@@ -445,7 +445,7 @@ class AIService:
                 ),
                 # ВОТ ЭТО ОБЯЗАТЕЛЬНО ДЛЯ EXTENDED THINKING:
                 thinking_config=types.ThinkingConfig(
-                    thinking_budget=1024  # или thinking_level="low" / "medium" в зависимости от версии SDK
+                    thinking_level="LOW"  # или thinking_level="low" / "medium" в зависимости от версии SDK
                 ),
                 input_audio_transcription={},
                 output_audio_transcription={},
