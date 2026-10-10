@@ -151,7 +151,7 @@ class AIService:
         )
         audio_data = bytearray()
         
-        cm = client.aio.live.connect(model="models/gemini-3.8-live-extended-thinking", config=config)
+        cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
@@ -186,7 +186,7 @@ class AIService:
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
         )
         
-        cm = client.aio.live.connect(model="models/gemini-3.8-live-extended-thinking", config=config)
+        cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
@@ -246,11 +246,15 @@ class AIService:
             )
 
             config_kwargs = dict(
-                response_modalities=["AUDIO"], 
+                response_modalities=["AUDIO"],
                 system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                 tools=[device_control_tool],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                ),
+                # ВОТ ЭТО ОБЯЗАТЕЛЬНО ДЛЯ EXTENDED THINKING:
+                thinking_config=types.ThinkingConfig(
+                    thinking_budget=1024  # или thinking_level="low" / "medium" в зависимости от версии SDK
                 ),
                 input_audio_transcription={},
                 output_audio_transcription={},
@@ -433,11 +437,15 @@ class AIService:
             )
 
             config_kwargs = dict(
-                response_modalities=["AUDIO"], 
+                response_modalities=["AUDIO"],
                 system_instruction=types.Content(parts=[types.Part.from_text(text=system_instruction)]),
                 tools=[device_control_tool],
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
+                ),
+                # ВОТ ЭТО ОБЯЗАТЕЛЬНО ДЛЯ EXTENDED THINKING:
+                thinking_config=types.ThinkingConfig(
+                    thinking_budget=1024  # или thinking_level="low" / "medium" в зависимости от версии SDK
                 ),
                 input_audio_transcription={},
                 output_audio_transcription={},
