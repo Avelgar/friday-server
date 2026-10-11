@@ -270,7 +270,7 @@ class AIService:
 
             logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, единый ключ)...")
             
-            cm = client.aio.live.connect(model="models/gemini-3.8-live-extended-thinking", config=config)
+            cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
             session = None
             sender_task = None
             
@@ -461,7 +461,7 @@ class AIService:
 
             logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, единый ключ)...")
             
-            cm = client.aio.live.connect(model="models/gemini-3.8-live-extended-thinking", config=config)
+            cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
             session = None
             sender_task = None
             
@@ -751,7 +751,7 @@ class AIService:
     # ==============================================================================
     # 4. ТЯЖЕЛЫЙ МОЗГ (НА БАЗЕ СВЕРХБЫСТРОГО 3.5 FLASH)
     # ==============================================================================
-    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash"):
+    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.8-flash"):
         logger.info(f"[HEAVY BRAIN] Запуск тяжелого агента на базе {model_id}...")
 
         safety_settings = [
