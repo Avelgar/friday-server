@@ -897,6 +897,87 @@ class AIService:
         logger.info(f"[Local Cache] Создан локальный кэш {cache_id} размером {len(database_text)} символов.")
         return {"cache_id": cache_id, "expires_at": expires_at}
 
+    # ==============================================================================
+    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Gemini 3.8 Flash + Cloud Sandbox)
+    # ==============================================================================
+    async def run_antigravity_agent(self, prompt_text: str, status_callback=None, target_files: list = None):
+        """
+        Запуск автономной сессии Antigravity с автоматической ротацией 60 ключей.
+        status_callback — асинхронная функция для отправки промежуточных статусов в WS.
+        """
+        attempts = 0
+        total_keys = len(self.api_keys)
+        last_err = ""
+
+        while attempts < total_keys:
+            client = self._get_client()
+            logger.info(f"[Antigravity] Попытка запуска на ключе #{self.current_key_index}...")
+
+            try:
+                # 1. Создаем взаимодействие в удаленной песочнице
+                interaction = client.interactions.create(
+                    agent="antigravity-preview-09-2026",
+                    input=prompt_text,
+                    background=True,
+                    environment="remote"
+                )
+                logger.info(f"[Antigravity] Сессия создана: {interaction.id}")
+                if status_callback:
+                    await status_callback({"status": "started", "interaction_id": interaction.id})
+
+                # 2. Опрашиваем статус выполнения
+                while True:
+                    await asyncio.sleep(5)
+                    interaction = client.interactions.get(id=interaction.id)
+                    logger.info(f"[Antigravity {interaction.id[:8]}] Статус: {interaction.status}")
+                    
+                    if status_callback:
+                        await status_callback({"status": interaction.status})
+
+                    if interaction.status in ("completed", "failed"):
+                        break
+
+                if interaction.status == "failed":
+                    raise Exception(f"Задача внутри песочницы завершилась ошибкой: {interaction.error}")
+
+                # 3. Успешно! Забираем список созданных файлов
+                env_id = interaction.environment_id
+                downloaded_files = {}
+
+                try:
+                    file_list_resp = client.environments.files.list(environment=env_id, path="")
+                    available_files = [f.name for f in file_list_resp.files if f.name not in ("usr", "workspace", ".", "..")]
+                    logger.info(f"[Antigravity] Файлы в контейнере: {available_files}")
+
+                    # Скачиваем либо запрошенные файлы, либо всё, что агент создал нового
+                    files_to_download = target_files if target_files else available_files
+                    for fname in files_to_download:
+                        if fname in available_files:
+                            file_data = client.environments.files.download(environment=env_id, path=fname)
+                            content = file_data.read() if hasattr(file_data, "read") else file_data
+                            if hasattr(content, "content"):
+                                content = content.content
+                            # Кодируем файл в base64 для отправки по сокету
+                            downloaded_files[fname] = base64.b64encode(content).decode('utf-8')
+                            logger.info(f"[Antigravity] Файл {fname} успешно выкачан ({len(content)} байт)")
+                except Exception as fe:
+                    logger.warning(f"[Antigravity] Ошибка при чтении файлов песочницы: {fe}")
+
+                return {
+                    "text": interaction.output_text,
+                    "files": downloaded_files,
+                    "environment_id": env_id
+                }
+
+            except Exception as e:
+                last_err = str(e)
+                logger.warning(f"[Antigravity Key {self.current_key_index}] Ошибка: {last_err}")
+                self._rotate_key()
+                attempts += 1
+                await asyncio.sleep(1)
+
+        raise Exception(f"Antigravity недоступен после перебора всех ключей. Последняя ошибка: {last_err}")
+    
     def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
         import json
         

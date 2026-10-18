@@ -53,7 +53,10 @@ async def websocket_handler(websocket):
                 
                 if data.get("type") == "ping": 
                     continue
-                if "DeviceName" in data: 
+                elif data.get("type") == "antigravity_task":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_task
+                    asyncio.create_task(handle_antigravity_task(websocket, data))
+                elif "DeviceName" in data: 
                     await handle_device_registration(websocket, data)
                 elif "command" in data: 
                     asyncio.create_task(handle_command(websocket, data))
