@@ -900,26 +900,36 @@ class AIService:
     # ==============================================================================
     # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Gemini 3.8 Flash + Cloud Sandbox)
     # ==============================================================================
-    async def run_antigravity_agent(self, prompt_text: str, status_callback=None, target_files: list = None):
+    async def run_antigravity_agent(self, prompt_text: str, status_callback=None, target_files: list = None, input_files: dict = None):
         """
-        Запуск автономной сессии Antigravity с автоматической ротацией 60 ключей.
-        status_callback — асинхронная функция для отправки промежуточных статусов в WS.
+        input_files: словарь {"123.py": "код файла..."} для монтирования в песочницу
         """
         attempts = 0
         total_keys = len(self.api_keys)
         last_err = ""
 
+        # Формируем монтирование файлов, если клиент их передал
+        env_config = {"type": "remote"}
+        if input_files:
+            sources = []
+            for fname, content in input_files.items():
+                sources.append({
+                    "type": "inline",
+                    "target": fname,
+                    "content": content
+                })
+            env_config["sources"] = sources
+
         while attempts < total_keys:
             client = self._get_client()
-            logger.info(f"[Antigravity] Попытка запуска на ключе #{self.current_key_index}...")
+            logger.info(f"[Antigravity] Запуск на ключе #{self.current_key_index} (смонтировано файлов: {len(input_files or {})})...")
 
             try:
-                # 1. Создаем взаимодействие в удаленной песочнице
                 interaction = client.interactions.create(
                     agent="antigravity-preview-09-2026",
                     input=prompt_text,
                     background=True,
-                    environment="remote"
+                    environment=env_config  # <-- Передаем монтирование файлов!
                 )
                 logger.info(f"[Antigravity] Сессия создана: {interaction.id}")
                 if status_callback:

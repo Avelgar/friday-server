@@ -667,19 +667,18 @@ async def handle_target_command(websocket, data):
         if conn: conn.close()
 
 async def handle_antigravity_task(websocket, data):
-    """Обработчик агентских задач Antigravity, прилетающих по веб-сокету."""
     prompt = data.get("prompt", "")
     target_files = data.get("target_files", [])
+    input_files = data.get("input_files", {})  # <--- ДОБАВИЛИ ЭТУ СТРОКУ
     ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
 
     if not prompt:
         await async_send(websocket, {"type": "antigravity_error", "error": "Пустой промпт", "ui_msg_id": ui_msg_id})
         return
 
-    logger.info(f"[WS Antigravity] Принята задача: '{prompt[:80]}...'")
+    logger.info(f"[WS Antigravity] Принята задача: '{prompt[:80]}...' (файлов на вход: {len(input_files)})")
 
     async def send_status_update(status_payload):
-        # Отправляем живой статус в веб-сокет (started, in_progress и т.д.)
         await async_send(websocket, {
             "type": "antigravity_status",
             "ui_msg_id": ui_msg_id,
@@ -690,18 +689,18 @@ async def handle_antigravity_task(websocket, data):
         result = await ai_instance.run_antigravity_agent(
             prompt_text=prompt,
             status_callback=send_status_update,
-            target_files=target_files
+            target_files=target_files,
+            input_files=input_files  # <--- ПЕРЕДАЕМ СЮДА
         )
 
-        # Отправляем финальный результат с текстом и готовыми файлами
         await async_send(websocket, {
             "type": "antigravity_result",
             "ui_msg_id": ui_msg_id,
             "text": result["text"],
-            "files": result["files"], # словарь вида {"presentation.pptx": "base64_данные..."}
+            "files": result["files"],
             "environment_id": result["environment_id"]
         })
-        logger.info(f"[WS Antigravity] Задача {ui_msg_id} успешно отправлена клиенту.")
+        logger.info(f"[WS Antigravity] Задача {ui_msg_id} успешно завершена.")
 
     except Exception as e:
         logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
