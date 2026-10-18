@@ -9,6 +9,7 @@ from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
 from app.websocket_server.state import mac_to_websocket, ws_to_mac
 from app.websocket_server.utils import async_send, get_device_type, get_accessible_devices
+import time
 
 logger = logging.getLogger("WS_Server")
 
