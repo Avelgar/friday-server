@@ -899,7 +899,7 @@ class AIService:
 
 
     # ==============================================================================
-    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Multi-turn + Tag Protocol)
+    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Unified Sandbox + On-Demand Sync)
     # ==============================================================================
     async def run_antigravity_agent(
         self, 
@@ -914,20 +914,19 @@ class AIService:
         total_keys = len(self.api_keys)
         last_err = ""
 
-        agent_system_instruction = """Ты — автономный Senior разработчик. Ты работаешь с проектом на компьютере пользователя.
-Твое общение строится через специальные теги:
+        agent_system_instruction = """Ты — автономный Senior разработчик.
+Все файлы проекта (код, верстку, скрипты, презы, 3D-модели) ты создаешь, изменяешь и тестируешь прямо в своем окружении Linux.
 
-1. [GET_TREE] — запросить структуру папок и файлов проекта.
-2. [GET_FILES: путь1, путь2] — прочитать конкретные текстовые файлы с компьютера.
-3. [WRITE_FILE: путь]
-тут полный исправленный код
-[END_WRITE_FILE] — создать или обновить файл на компьютере.
-4. [RUN_COMMAND: команда] — выполнить команду в терминале на компьютере пользователя (например запуск тестов, сборка gradle, pip install, запуск скрипта). Ты получишь результат выполнения в следующем сообщении.
+Твое взаимодействие с компьютером пользователя строится через теги:
+1. [GET_TREE] — запросить дерево проекта у пользователя.
+2. [GET_FILES: путь1, путь2] — запросить содержимое файлов с компьютера пользователя.
+3. [SYNC: относительный_путь] — синхронизировать созданный или измененный тобой файл на компьютер пользователя. 
+   Сначала создай/отредактируй файл в своей файловой системе, протестируй его запуск, а затем укажи [SYNC: путь]. Ты можешь указать несколько тегов [SYNC: ...] подряд.
+4. [RUN_COMMAND: команда] — выполнить системную команду на компьютере пользователя (например, сборка Android через Gradle, adb, запуск локального dev-сервера).
 
 ПРАВИЛА:
-- Если пользователь просто общается — отвечай текстом без тегов.
-- Ты можешь создавать тяжелые бинарные файлы (pptx, docx, 3D stl) прямо в своем облачном окружении — клиент автоматически выгрузит их.
-- Если нужно собрать проект или запустить тест на компьютере пользователя — используй [RUN_COMMAND: ...].
+- На простые вопросы отвечай текстом без тегов.
+- ЗАПРЕЩЕНО выводить полные тексты файлов в чат! Создавай файлы в файловой системе и используй [SYNC: путь]. В чате пиши только краткий отчет о проделанной работе.
 """
 
         while attempts < total_keys:
@@ -966,25 +965,35 @@ class AIService:
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
                 env_id = interaction.environment_id
+                output_text = interaction.output_text or ""
                 downloaded_files = {}
 
-                # Автоматически выкачиваем готовые бинарные артефакты из облачной песочницы Google
-                try:
-                    file_list_resp = client.environments.files.list(environment=env_id, path="")
-                    for f in file_list_resp.files:
-                        ext = os.path.splitext(f.name)[1].lower()
-                        # Если агент сгенерировал презу, док, картинку или 3D-модель
-                        if ext in (".pptx", ".docx", ".xlsx", ".pdf", ".stl", ".obj", ".png", ".zip"):
-                            file_data = client.environments.files.download(environment=env_id, path=f.name)
+                # 1. Ищем файлы, которые агент явно пометил для синхронизации: [SYNC: путь]
+                import re
+                sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
+
+                for sync_path in sync_matches:
+                    clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
+                    try:
+                        logger.info(f"[Antigravity Sync] Выкачиваем {clean_path} из песочницы...")
+                        file_data = client.environments.files.download(environment=env_id, path=clean_path)
+                        content = file_data.read() if hasattr(file_data, "read") else file_data
+                        if hasattr(content, "content"): content = content.content
+
+                        downloaded_files[clean_path] = base64.b64encode(content).decode('utf-8')
+                        logger.info(f"[Antigravity Sync] Файл {clean_path} успешно выкачан ({len(content)} байт)")
+                    except Exception as fe:
+                        # Пробуем поискать в workspace/ если путь был относительным
+                        try:
+                            file_data = client.environments.files.download(environment=env_id, path=f"workspace/{clean_path}")
                             content = file_data.read() if hasattr(file_data, "read") else file_data
                             if hasattr(content, "content"): content = content.content
-                            downloaded_files[f.name] = base64.b64encode(content).decode('utf-8')
-                            logger.info(f"[Antigravity Artifact] Скачан бинарный файл: {f.name} ({len(content)} байт)")
-                except Exception as e:
-                    logger.warning(f"[Antigravity Artifact] Ошибка проверки файлов: {e}")
+                            downloaded_files[clean_path] = base64.b64encode(content).decode('utf-8')
+                        except Exception:
+                            logger.warning(f"[Antigravity Sync] Не удалось скачать {clean_path}: {fe}")
 
                 return {
-                    "text": interaction.output_text,
+                    "text": output_text,
                     "files": downloaded_files,
                     "environment_id": env_id,
                     "interaction_id": interaction.id
