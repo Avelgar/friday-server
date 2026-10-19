@@ -914,27 +914,25 @@ class AIService:
         total_keys = len(self.api_keys)
         last_err = ""
 
-        # Системная инструкция для работы с файлами на компьютере пользователя
-        agent_system_instruction = """Ты — автономный Senior разработчик. Ты работаешь с локальным проектом на компьютере пользователя.
-У тебя изначально НЕТ файлов проекта. Твое общение строится через специальные теги:
+        agent_system_instruction = """Ты — автономный Senior разработчик. Ты работаешь с проектом на компьютере пользователя.
+Твое общение строится через специальные теги:
 
-1. [GET_TREE] — используй этот тег, если тебе нужно узнать структуру папок и файлов проекта.
-2. [GET_FILES: путь1, путь2] — используй этот тег, чтобы запросить содержимое конкретных файлов с компьютера пользователя.
-3. Чтобы создать или перезаписать файл на компьютере пользователя, строго используй блок:
-[WRITE_FILE: относительный_путь]
-тут полный исправленный код файла
-[END_WRITE_FILE]
+1. [GET_TREE] — запросить структуру папок и файлов проекта.
+2. [GET_FILES: путь1, путь2] — прочитать конкретные текстовые файлы с компьютера.
+3. [WRITE_FILE: путь]
+тут полный исправленный код
+[END_WRITE_FILE] — создать или обновить файл на компьютере.
+4. [RUN_COMMAND: команда] — выполнить команду в терминале на компьютере пользователя (например запуск тестов, сборка gradle, pip install, запуск скрипта). Ты получишь результат выполнения в следующем сообщении.
 
 ПРАВИЛА:
-- Если пользователь просто общается ("Привет", "Как дела?", теория) — ОТВЕЧАЙ ТЕКСТОМ, НЕ ИСПОЛЬЗУЙ ТЕГИ!
-- Не придумывай код файлов из головы. Если файл нужен для задачи — запроси его через [GET_FILES: путь].
-- Ты можешь запросить несколько файлов сразу: [GET_FILES: app/main.py, config.json].
-- Ты можешь вернуть несколько измененных файлов, указав несколько блоков [WRITE_FILE: ...]...[END_WRITE_FILE].
+- Если пользователь просто общается — отвечай текстом без тегов.
+- Ты можешь создавать тяжелые бинарные файлы (pptx, docx, 3D stl) прямо в своем облачном окружении — клиент автоматически выгрузит их.
+- Если нужно собрать проект или запустить тест на компьютере пользователя — используй [RUN_COMMAND: ...].
 """
 
         while attempts < total_keys:
             client = self._get_client()
-            logger.info(f"[Antigravity] Сессия (prev_id={previous_interaction_id}, env={environment_id}) на ключе #{self.current_key_index}...")
+            logger.info(f"[Antigravity] Сессия (prev_id={previous_interaction_id}) на ключе #{self.current_key_index}...")
 
             try:
                 kwargs = {
@@ -943,7 +941,6 @@ class AIService:
                     "background": True,
                 }
 
-                # Подтягиваем контекст диалога или создаем с нуля
                 if previous_interaction_id:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
@@ -952,7 +949,6 @@ class AIService:
                     kwargs["environment"] = "remote"
 
                 interaction = client.interactions.create(**kwargs)
-                logger.info(f"[Antigravity] Interaction создан: {interaction.id}")
 
                 if status_callback:
                     await status_callback({"status": "started", "interaction_id": interaction.id})
@@ -970,10 +966,26 @@ class AIService:
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
                 env_id = interaction.environment_id
+                downloaded_files = {}
+
+                # Автоматически выкачиваем готовые бинарные артефакты из облачной песочницы Google
+                try:
+                    file_list_resp = client.environments.files.list(environment=env_id, path="")
+                    for f in file_list_resp.files:
+                        ext = os.path.splitext(f.name)[1].lower()
+                        # Если агент сгенерировал презу, док, картинку или 3D-модель
+                        if ext in (".pptx", ".docx", ".xlsx", ".pdf", ".stl", ".obj", ".png", ".zip"):
+                            file_data = client.environments.files.download(environment=env_id, path=f.name)
+                            content = file_data.read() if hasattr(file_data, "read") else file_data
+                            if hasattr(content, "content"): content = content.content
+                            downloaded_files[f.name] = base64.b64encode(content).decode('utf-8')
+                            logger.info(f"[Antigravity Artifact] Скачан бинарный файл: {f.name} ({len(content)} байт)")
+                except Exception as e:
+                    logger.warning(f"[Antigravity Artifact] Ошибка проверки файлов: {e}")
 
                 return {
                     "text": interaction.output_text,
-                    "files": {},
+                    "files": downloaded_files,
                     "environment_id": env_id,
                     "interaction_id": interaction.id
                 }
@@ -985,7 +997,7 @@ class AIService:
                 attempts += 1
                 await asyncio.sleep(1)
 
-        raise Exception(f"Antigravity недоступен после перебора всех ключей. Ошибка: {last_err}")
+        raise Exception(f"Antigravity недоступен. Ошибка: {last_err}")
     
     def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
         import json
