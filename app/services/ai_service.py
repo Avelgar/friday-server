@@ -897,50 +897,69 @@ class AIService:
         logger.info(f"[Local Cache] Создан локальный кэш {cache_id} размером {len(database_text)} символов.")
         return {"cache_id": cache_id, "expires_at": expires_at}
 
+
     # ==============================================================================
-    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Gemini 3.8 Flash + Cloud Sandbox)
+    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Multi-turn + Tag Protocol)
     # ==============================================================================
-    async def run_antigravity_agent(self, prompt_text: str, status_callback=None, target_files: list = None, input_files: dict = None):
-        """
-        input_files: словарь {"123.py": "код файла..."} для монтирования в песочницу
-        """
+    async def run_antigravity_agent(
+        self, 
+        prompt_text: str, 
+        status_callback=None, 
+        target_files: list = None, 
+        input_files: dict = None,
+        previous_interaction_id: str = None,
+        environment_id: str = None
+    ):
         attempts = 0
         total_keys = len(self.api_keys)
         last_err = ""
 
-        # Формируем монтирование файлов, если клиент их передал
-        env_config = {"type": "remote"}
-        if input_files:
-            sources = []
-            for fname, content in input_files.items():
-                sources.append({
-                    "type": "inline",
-                    "target": fname,
-                    "content": content
-                })
-            env_config["sources"] = sources
+        # Системная инструкция для работы с файлами на компьютере пользователя
+        agent_system_instruction = """Ты — автономный Senior разработчик. Ты работаешь с локальным проектом на компьютере пользователя.
+У тебя изначально НЕТ файлов проекта. Твое общение строится через специальные теги:
+
+1. [GET_TREE] — используй этот тег, если тебе нужно узнать структуру папок и файлов проекта.
+2. [GET_FILES: путь1, путь2] — используй этот тег, чтобы запросить содержимое конкретных файлов с компьютера пользователя.
+3. Чтобы создать или перезаписать файл на компьютере пользователя, строго используй блок:
+[WRITE_FILE: относительный_путь]
+тут полный исправленный код файла
+[END_WRITE_FILE]
+
+ПРАВИЛА:
+- Если пользователь просто общается ("Привет", "Как дела?", теория) — ОТВЕЧАЙ ТЕКСТОМ, НЕ ИСПОЛЬЗУЙ ТЕГИ!
+- Не придумывай код файлов из головы. Если файл нужен для задачи — запроси его через [GET_FILES: путь].
+- Ты можешь запросить несколько файлов сразу: [GET_FILES: app/main.py, config.json].
+- Ты можешь вернуть несколько измененных файлов, указав несколько блоков [WRITE_FILE: ...]...[END_WRITE_FILE].
+"""
 
         while attempts < total_keys:
             client = self._get_client()
-            logger.info(f"[Antigravity] Запуск на ключе #{self.current_key_index} (смонтировано файлов: {len(input_files or {})})...")
+            logger.info(f"[Antigravity] Сессия (prev_id={previous_interaction_id}, env={environment_id}) на ключе #{self.current_key_index}...")
 
             try:
-                interaction = client.interactions.create(
-                    agent="antigravity-preview-09-2026",
-                    input=prompt_text,
-                    background=True,
-                    environment=env_config  # <-- Передаем монтирование файлов!
-                )
-                logger.info(f"[Antigravity] Сессия создана: {interaction.id}")
+                kwargs = {
+                    "agent": "antigravity-preview-09-2026",
+                    "input": prompt_text,
+                    "background": True,
+                }
+
+                # Подтягиваем контекст диалога или создаем с нуля
+                if previous_interaction_id:
+                    kwargs["previous_interaction_id"] = previous_interaction_id
+                    kwargs["environment"] = environment_id
+                else:
+                    kwargs["system_instruction"] = agent_system_instruction
+                    kwargs["environment"] = "remote"
+
+                interaction = client.interactions.create(**kwargs)
+                logger.info(f"[Antigravity] Interaction создан: {interaction.id}")
+
                 if status_callback:
                     await status_callback({"status": "started", "interaction_id": interaction.id})
 
-                # 2. Опрашиваем статус выполнения
                 while True:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(4)
                     interaction = client.interactions.get(id=interaction.id)
-                    logger.info(f"[Antigravity {interaction.id[:8]}] Статус: {interaction.status}")
-                    
                     if status_callback:
                         await status_callback({"status": interaction.status})
 
@@ -948,35 +967,15 @@ class AIService:
                         break
 
                 if interaction.status == "failed":
-                    raise Exception(f"Задача внутри песочницы завершилась ошибкой: {interaction.error}")
+                    raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
-                # 3. Успешно! Забираем список созданных файлов
                 env_id = interaction.environment_id
-                downloaded_files = {}
-
-                try:
-                    file_list_resp = client.environments.files.list(environment=env_id, path="")
-                    available_files = [f.name for f in file_list_resp.files if f.name not in ("usr", "workspace", ".", "..")]
-                    logger.info(f"[Antigravity] Файлы в контейнере: {available_files}")
-
-                    # Скачиваем либо запрошенные файлы, либо всё, что агент создал нового
-                    files_to_download = target_files if target_files else available_files
-                    for fname in files_to_download:
-                        if fname in available_files:
-                            file_data = client.environments.files.download(environment=env_id, path=fname)
-                            content = file_data.read() if hasattr(file_data, "read") else file_data
-                            if hasattr(content, "content"):
-                                content = content.content
-                            # Кодируем файл в base64 для отправки по сокету
-                            downloaded_files[fname] = base64.b64encode(content).decode('utf-8')
-                            logger.info(f"[Antigravity] Файл {fname} успешно выкачан ({len(content)} байт)")
-                except Exception as fe:
-                    logger.warning(f"[Antigravity] Ошибка при чтении файлов песочницы: {fe}")
 
                 return {
                     "text": interaction.output_text,
-                    "files": downloaded_files,
-                    "environment_id": env_id
+                    "files": {},
+                    "environment_id": env_id,
+                    "interaction_id": interaction.id
                 }
 
             except Exception as e:
@@ -986,7 +985,7 @@ class AIService:
                 attempts += 1
                 await asyncio.sleep(1)
 
-        raise Exception(f"Antigravity недоступен после перебора всех ключей. Последняя ошибка: {last_err}")
+        raise Exception(f"Antigravity недоступен после перебора всех ключей. Ошибка: {last_err}")
     
     def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
         import json

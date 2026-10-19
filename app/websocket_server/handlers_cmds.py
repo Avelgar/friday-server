@@ -669,14 +669,16 @@ async def handle_target_command(websocket, data):
 async def handle_antigravity_task(websocket, data):
     prompt = data.get("prompt", "")
     target_files = data.get("target_files", [])
-    input_files = data.get("input_files", {})  # <--- ДОБАВИЛИ ЭТУ СТРОКУ
+    input_files = data.get("input_files", {})
+    prev_interaction_id = data.get("previous_interaction_id")
+    environment_id = data.get("environment_id")
     ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
 
     if not prompt:
         await async_send(websocket, {"type": "antigravity_error", "error": "Пустой промпт", "ui_msg_id": ui_msg_id})
         return
 
-    logger.info(f"[WS Antigravity] Принята задача: '{prompt[:80]}...' (файлов на вход: {len(input_files)})")
+    logger.info(f"[WS Antigravity] Принята задача: '{prompt[:80]}...' (цепочка: {bool(prev_interaction_id)})")
 
     async def send_status_update(status_payload):
         await async_send(websocket, {
@@ -690,7 +692,9 @@ async def handle_antigravity_task(websocket, data):
             prompt_text=prompt,
             status_callback=send_status_update,
             target_files=target_files,
-            input_files=input_files  # <--- ПЕРЕДАЕМ СЮДА
+            input_files=input_files,
+            previous_interaction_id=prev_interaction_id,
+            environment_id=environment_id
         )
 
         await async_send(websocket, {
@@ -698,9 +702,10 @@ async def handle_antigravity_task(websocket, data):
             "ui_msg_id": ui_msg_id,
             "text": result["text"],
             "files": result["files"],
-            "environment_id": result["environment_id"]
+            "environment_id": result["environment_id"],
+            "interaction_id": result["interaction_id"]  # Отдаем ID клиенту для следующего шага
         })
-        logger.info(f"[WS Antigravity] Задача {ui_msg_id} успешно завершена.")
+        logger.info(f"[WS Antigravity] Успешно завершено: {result['interaction_id']}")
 
     except Exception as e:
         logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
