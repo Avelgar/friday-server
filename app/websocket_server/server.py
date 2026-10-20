@@ -109,6 +109,7 @@ async def check_pings():
 
 async def start_ws_server():
     asyncio.create_task(check_pings())
-    async with websockets.serve(websocket_handler, "0.0.0.0", 8114, ping_interval=None, max_size=10 * 1024 * 1024):
-        logger.info("WebSocket Server started on 8114")
+    # Ставим 100 МБ, чтобы 13 МБ файлы спокойно пролетали!
+    async with websockets.serve(websocket_handler, "0.0.0.0", 8114, ping_interval=None, max_size=100 * 1024 * 1024):
+        logger.info("WebSocket Server started on 8114 (100MB limit)")
         await asyncio.Future()
