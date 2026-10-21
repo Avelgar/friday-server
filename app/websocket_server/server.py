@@ -53,6 +53,20 @@ async def websocket_handler(websocket):
                 
                 if data.get("type") == "ping": 
                     continue
+                # --- CRUD АНТИГРАВИТИ ---
+                elif data.get("type") == "get_chats":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_get_chats
+                    asyncio.create_task(handle_antigravity_get_chats(websocket, data))
+                elif data.get("type") == "get_chat_history":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_get_messages
+                    asyncio.create_task(handle_antigravity_get_messages(websocket, data))
+                elif data.get("type") == "create_chat":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_create_chat
+                    asyncio.create_task(handle_antigravity_create_chat(websocket, data))
+                elif data.get("type") == "delete_chat":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_delete_chat
+                    asyncio.create_task(handle_antigravity_delete_chat(websocket, data))
+                # ------------------------
                 elif data.get("type") == "antigravity_task":
                     from app.websocket_server.handlers_cmds import handle_antigravity_task
                     asyncio.create_task(handle_antigravity_task(websocket, data))

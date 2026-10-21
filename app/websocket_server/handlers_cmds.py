@@ -790,3 +790,122 @@ async def handle_antigravity_task(websocket, data):
             "ui_msg_id": ui_msg_id,
             "error": str(e)
         })
+
+# ==============================================================================
+# CRUD ДИАЛОГОВ И СООБЩЕНИЙ ANTIGRAVITY (MySQL)
+# ==============================================================================
+
+async def handle_antigravity_get_chats(websocket, data):
+    """Отдать клиенту список всех чатов из базы."""
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute(
+            "SELECT chat_uid, title, key_index, last_interaction_id, environment_id, updated_at "
+            "FROM antigravity_chats ORDER BY updated_at DESC"
+        )
+        chats = await cursor.fetchall()
+        # Преобразуем datetime в строки для json
+        for c in chats:
+            if c.get("updated_at"):
+                c["updated_at"] = str(c["updated_at"])
+
+        await async_send(websocket, {
+            "type": "antigravity_chats_list",
+            "chats": chats or []
+        })
+    except Exception as e:
+        logger.error(f"[DB get_chats error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_get_messages(websocket, data):
+    """Отдать историю сообщений конкретного чата."""
+    chat_uid = data.get("chat_uid")
+    if not chat_uid: return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute(
+            "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
+            (chat_uid,)
+        )
+        msgs = await cursor.fetchall()
+        for m in msgs:
+            if m.get("created_at"):
+                m["created_at"] = str(m["created_at"])
+
+        await async_send(websocket, {
+            "type": "antigravity_chat_history",
+            "chat_uid": chat_uid,
+            "messages": msgs or []
+        })
+    except Exception as e:
+        logger.error(f"[DB get_messages error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_create_chat(websocket, data):
+    """Создать новый чат в базе с ротацией ключа."""
+    chat_uid = data.get("chat_uid") or f"chat_{int(time.time() * 1000)}"
+    title = data.get("title") or "Новый диалог"
+    conn = None; cursor = None
+    try:
+        # Ротируем ключ для нового чата
+        ai_instance._rotate_key()
+        assigned_key = ai_instance.current_key_index
+
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute(
+            "INSERT INTO antigravity_chats (chat_uid, title, key_index) VALUES (%s, %s, %s)",
+            (chat_uid, title, assigned_key)
+        )
+        await conn.commit()
+
+        await async_send(websocket, {
+            "type": "antigravity_chat_created",
+            "chat": {
+                "chat_uid": chat_uid,
+                "title": title,
+                "key_index": assigned_key,
+                "last_interaction_id": None,
+                "environment_id": None
+            }
+        })
+        logger.info(f"[DB] Создан чат {chat_uid} на ключе #{assigned_key}")
+    except Exception as e:
+        logger.error(f"[DB create_chat error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_delete_chat(websocket, data):
+    """Удалить чат и все его сообщения из базы."""
+    chat_uid = data.get("chat_uid")
+    if not chat_uid: return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor()
+        await cursor.execute("DELETE FROM antigravity_messages WHERE chat_uid = %s", (chat_uid,))
+        await cursor.execute("DELETE FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        await conn.commit()
+
+        await async_send(websocket, {
+            "type": "antigravity_chat_deleted",
+            "chat_uid": chat_uid
+        })
+        logger.info(f"[DB] Чат {chat_uid} и все его сообщения удалены из базы.")
+    except Exception as e:
+        logger.error(f"[DB delete_chat error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
