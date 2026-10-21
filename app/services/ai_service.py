@@ -905,9 +905,6 @@ class AIService:
     # ==============================================================================
     # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Unified Sandbox + On-Demand Sync)
     # ==============================================================================
-    # ==============================================================================
-    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Умная ротация без 404 и защита от 429)
-    # ==============================================================================
     async def run_antigravity_agent(
         self, 
         prompt_text: str, 
@@ -915,19 +912,19 @@ class AIService:
         target_files: list = None, 
         input_files: dict = None,
         previous_interaction_id: str = None,
-        environment_id: str = None
+        environment_id: str = None,
+        assigned_key: int = None  # <--- ДОБАВЬ ЭТОТ АРГУМЕНТ
     ):
         is_new_session = (previous_interaction_id is None)
 
-        if is_new_session:
-            # Для нового диалога берем СЛЕДУЮЩИЙ ключ из 60 (Round-Robin)
-            self._rotate_key()
-            assigned_key = self.current_key_index
-            logger.info(f"[Antigravity] Старт НОВОГО диалога на ключе #{assigned_key}")
-        else:
-            # Для продолжения диалога берем ТОТ ЖЕ ключ, который создал сессию
-            assigned_key = self.antigravity_sessions.get(previous_interaction_id, self.current_key_index)
-            logger.info(f"[Antigravity] Продолжение диалога {previous_interaction_id[:10]} на ключе #{assigned_key}")
+        if assigned_key is None:
+            if is_new_session:
+                self._rotate_key()
+                assigned_key = self.current_key_index
+            else:
+                assigned_key = self.antigravity_sessions.get(previous_interaction_id, self.current_key_index)
+
+        logger.info(f"[Antigravity Engine] Запуск таски на ключе #{assigned_key} (new={is_new_session})")
 
         agent_system_instruction = """Ты — автономный Senior разработчик.
 Все файлы проекта (код, верстку, скрипты, презы, 3D-модели, Word-документы) ты создаешь, изменяешь и тестируешь прямо в своем окружении Linux.

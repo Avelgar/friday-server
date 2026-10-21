@@ -667,18 +667,66 @@ async def handle_target_command(websocket, data):
         if conn: conn.close()
 
 async def handle_antigravity_task(websocket, data):
-    prompt = data.get("prompt", "")
+    prompt = data.get("prompt", "").strip()
     target_files = data.get("target_files", [])
     input_files = data.get("input_files", {})
-    prev_interaction_id = data.get("previous_interaction_id")
-    environment_id = data.get("environment_id")
+    chat_uid = data.get("chat_id") or data.get("chat_uid") or f"chat_{int(time.time() * 1000)}"
     ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
 
     if not prompt:
         await async_send(websocket, {"type": "antigravity_error", "error": "Пустой промпт", "ui_msg_id": ui_msg_id})
         return
 
-    logger.info(f"[WS Antigravity] Принята задача: '{prompt[:80]}...' (цепочка: {bool(prev_interaction_id)})")
+    logger.info(f"[WS Antigravity] Принята задача: '{prompt[:80]}...' (чат: {chat_uid})")
+
+    conn = None
+    cursor = None
+    assigned_key = None
+    prev_interaction_id = None
+    environment_id = None
+
+    # 1. Читаем состояние диалога из БД
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+
+        await cursor.execute(
+            "SELECT key_index, last_interaction_id, environment_id, title FROM antigravity_chats WHERE chat_uid = %s",
+            (chat_uid,)
+        )
+        chat_row = await cursor.fetchone()
+
+        if chat_row:
+            # Чат уже есть в БД — берем его ключ и последний interaction_id
+            assigned_key = chat_row["key_index"]
+            prev_interaction_id = chat_row["last_interaction_id"]
+            environment_id = chat_row["environment_id"]
+            logger.info(f"[DB Antigravity] Найден чат {chat_uid}. Ключ #{assigned_key}, prev_id={prev_interaction_id[:10] if prev_interaction_id else 'None'}")
+        else:
+            # Новый чат — ротируем общий счетчик и создаем запись в БД
+            ai_instance._rotate_key()
+            assigned_key = ai_instance.current_key_index
+            auto_title = prompt[:30] + ("..." if len(prompt) > 30 else "")
+
+            await cursor.execute(
+                "INSERT INTO antigravity_chats (chat_uid, title, key_index) VALUES (%s, %s, %s)",
+                (chat_uid, auto_title, assigned_key)
+            )
+            await conn.commit()
+            logger.info(f"[DB Antigravity] Создан НОВЫЙ чат {chat_uid} на ключе #{assigned_key}")
+
+        # Сохраняем сообщение пользователя в историю
+        await cursor.execute(
+            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'user', %s)",
+            (chat_uid, prompt)
+        )
+        await conn.commit()
+
+    except Exception as dbe:
+        logger.error(f"[DB Error Before Task] {dbe}", exc_info=True)
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
 
     async def send_status_update(status_payload):
         await async_send(websocket, {
@@ -687,6 +735,7 @@ async def handle_antigravity_task(websocket, data):
             **status_payload
         })
 
+    # 2. Запуск в Antigravity
     try:
         result = await ai_instance.run_antigravity_agent(
             prompt_text=prompt,
@@ -694,18 +743,45 @@ async def handle_antigravity_task(websocket, data):
             target_files=target_files,
             input_files=input_files,
             previous_interaction_id=prev_interaction_id,
-            environment_id=environment_id
+            environment_id=environment_id,
+            assigned_key=assigned_key  # Передаем точный ключ из БД!
         )
 
+        new_interaction_id = result["interaction_id"]
+        new_env_id = result["environment_id"]
+        agent_reply_text = result["text"]
+
+        # 3. Обновляем сессию и пишем ответ агента в БД
+        try:
+            conn = await get_async_db_connection()
+            cursor = await conn.cursor()
+
+            await cursor.execute(
+                "UPDATE antigravity_chats SET last_interaction_id = %s, environment_id = %s, updated_at = NOW() WHERE chat_uid = %s",
+                (new_interaction_id, new_env_id, chat_uid)
+            )
+            await cursor.execute(
+                "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'agent', %s)",
+                (chat_uid, agent_reply_text)
+            )
+            await conn.commit()
+            logger.info(f"[DB Antigravity] Сессия чата {chat_uid} обновлена на {new_interaction_id[:10]}")
+        except Exception as dbe2:
+            logger.error(f"[DB Error After Task] {dbe2}")
+        finally:
+            if cursor: await cursor.close()
+            if conn: conn.close()
+
+        # 4. Отправляем клиенту результат
         await async_send(websocket, {
             "type": "antigravity_result",
             "ui_msg_id": ui_msg_id,
-            "text": result["text"],
+            "text": agent_reply_text,
             "files": result["files"],
-            "environment_id": result["environment_id"],
-            "interaction_id": result["interaction_id"]  # Отдаем ID клиенту для следующего шага
+            "environment_id": new_env_id,
+            "interaction_id": new_interaction_id,
+            "chat_id": chat_uid
         })
-        logger.info(f"[WS Antigravity] Успешно завершено: {result['interaction_id']}")
 
     except Exception as e:
         logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
