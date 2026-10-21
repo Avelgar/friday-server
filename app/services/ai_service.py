@@ -40,9 +40,13 @@ class AIService:
     def __init__(self):
         self.api_keys = GEMINI_KEYS
         self.current_key_index = 0
+        # Мапа для привязки сессий Antigravity к их ключам: { interaction_id: key_index }
+        self.antigravity_sessions = {}
 
-    def _get_client(self):
-        return genai.Client(http_options={"api_version": "v1beta"}, api_key=self.api_keys[self.current_key_index])
+    def _get_client(self, key_index=None):
+        # Если передан конкретный key_index — берем его, иначе текущий
+        idx = key_index if key_index is not None else self.current_key_index
+        return genai.Client(http_options={"api_version": "v1beta"}, api_key=self.api_keys[idx])
 
     def _get_live_client(self):
         # Для Live API используем постоянный стабильный ключ без ротации
@@ -901,6 +905,9 @@ class AIService:
     # ==============================================================================
     # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Unified Sandbox + On-Demand Sync)
     # ==============================================================================
+    # ==============================================================================
+    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Умная ротация без 404 и защита от 429)
+    # ==============================================================================
     async def run_antigravity_agent(
         self, 
         prompt_text: str, 
@@ -910,28 +917,38 @@ class AIService:
         previous_interaction_id: str = None,
         environment_id: str = None
     ):
-        attempts = 0
-        total_keys = len(self.api_keys)
-        last_err = ""
+        is_new_session = (previous_interaction_id is None)
+
+        if is_new_session:
+            # Для нового диалога берем СЛЕДУЮЩИЙ ключ из 60 (Round-Robin)
+            self._rotate_key()
+            assigned_key = self.current_key_index
+            logger.info(f"[Antigravity] Старт НОВОГО диалога на ключе #{assigned_key}")
+        else:
+            # Для продолжения диалога берем ТОТ ЖЕ ключ, который создал сессию
+            assigned_key = self.antigravity_sessions.get(previous_interaction_id, self.current_key_index)
+            logger.info(f"[Antigravity] Продолжение диалога {previous_interaction_id[:10]} на ключе #{assigned_key}")
 
         agent_system_instruction = """Ты — автономный Senior разработчик.
-Все файлы проекта (код, верстку, скрипты, презы, 3D-модели) ты создаешь, изменяешь и тестируешь прямо в своем окружении Linux.
+Все файлы проекта (код, верстку, скрипты, презы, 3D-модели, Word-документы) ты создаешь, изменяешь и тестируешь прямо в своем окружении Linux.
 
 Твое взаимодействие с компьютером пользователя строится через теги:
 1. [GET_TREE] — запросить дерево проекта у пользователя.
 2. [GET_FILES: путь1, путь2] — запросить содержимое файлов с компьютера пользователя.
 3. [SYNC: относительный_путь] — синхронизировать созданный или измененный тобой файл на компьютер пользователя. 
-   Сначала создай/отредактируй файл в своей файловой системе, протестируй его запуск, а затем укажи [SYNC: путь]. Ты можешь указать несколько тегов [SYNC: ...] подряд.
-4. [RUN_COMMAND: команда] — выполнить системную команду на компьютере пользователя (например, сборка Android через Gradle, adb, запуск локального dev-сервера).
+   Сначала создай/отредактируй файл в своей файловой системе, протестируй его, а затем укажи [SYNC: путь].
+4. [RUN_COMMAND: команда] — выполнить системную команду на компьютере пользователя (Windows). Используй `python`, а не `python3`.
 
 ПРАВИЛА:
 - На простые вопросы отвечай текстом без тегов.
-- ЗАПРЕЩЕНО выводить полные тексты файлов в чат! Создавай файлы в файловой системе и используй [SYNC: путь]. В чате пиши только краткий отчет о проделанной работе.
+- ЗАПРЕЩЕНО выводить полные тексты файлов в чат! Создавай файлы в файловой системе и используй [SYNC: путь].
 """
 
-        while attempts < total_keys:
-            client = self._get_client()
-            logger.info(f"[Antigravity] Сессия (prev_id={previous_interaction_id}) на ключе #{self.current_key_index}...")
+        max_retries = 3
+        retry_count = 0
+
+        while retry_count < max_retries:
+            client = self._get_client(key_index=assigned_key)
 
             try:
                 kwargs = {
@@ -948,13 +965,20 @@ class AIService:
                     kwargs["environment"] = "remote"
 
                 interaction = client.interactions.create(**kwargs)
+                new_interaction_id = interaction.id
+                env_id = interaction.environment_id
+
+                # Запоминаем, на каком ключе живет эта сессия
+                self.antigravity_sessions[new_interaction_id] = assigned_key
+                if previous_interaction_id:
+                    self.antigravity_sessions[previous_interaction_id] = assigned_key
 
                 if status_callback:
-                    await status_callback({"status": "started", "interaction_id": interaction.id})
+                    await status_callback({"status": "started", "interaction_id": new_interaction_id})
 
                 while True:
                     await asyncio.sleep(4)
-                    interaction = client.interactions.get(id=interaction.id)
+                    interaction = client.interactions.get(id=new_interaction_id)
                     if status_callback:
                         await status_callback({"status": interaction.status})
 
@@ -964,26 +988,21 @@ class AIService:
                 if interaction.status == "failed":
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
-                env_id = interaction.environment_id
                 output_text = interaction.output_text or ""
                 downloaded_files = {}
 
-                # 1. Ищем файлы, которые агент явно пометил для синхронизации: [SYNC: путь]
+                # Скачиваем файлы, помеченные тегом [SYNC: путь]
                 import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
-
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
                     try:
-                        logger.info(f"[Antigravity Sync] Выкачиваем {clean_path} из песочницы...")
                         file_data = client.environments.files.download(environment=env_id, path=clean_path)
                         content = file_data.read() if hasattr(file_data, "read") else file_data
                         if hasattr(content, "content"): content = content.content
-
                         downloaded_files[clean_path] = base64.b64encode(content).decode('utf-8')
-                        logger.info(f"[Antigravity Sync] Файл {clean_path} успешно выкачан ({len(content)} байт)")
+                        logger.info(f"[Antigravity Sync] Файл {clean_path} выкачан ({len(content)} байт)")
                     except Exception as fe:
-                        # Пробуем поискать в workspace/ если путь был относительным
                         try:
                             file_data = client.environments.files.download(environment=env_id, path=f"workspace/{clean_path}")
                             content = file_data.read() if hasattr(file_data, "read") else file_data
@@ -996,17 +1015,41 @@ class AIService:
                     "text": output_text,
                     "files": downloaded_files,
                     "environment_id": env_id,
-                    "interaction_id": interaction.id
+                    "interaction_id": new_interaction_id
                 }
 
             except Exception as e:
-                last_err = str(e)
-                logger.warning(f"[Antigravity Key {self.current_key_index}] Ошибка: {last_err}")
-                self._rotate_key()
-                attempts += 1
-                await asyncio.sleep(1)
+                err_str = str(e)
+                logger.warning(f"[Antigravity Key #{assigned_key}] Ошибка: {err_str}")
 
-        raise Exception(f"Antigravity недоступен. Ошибка: {last_err}")
+                # Если поймали лимит токенов в минуту (429):
+                if "429" in err_str or "too_many_requests" in err_str:
+                    wait_seconds = 60
+                    # Вытаскиваем точное время из сообщения Google ("Please retry in 58s")
+                    import re
+                    m = re.search(r"retry in ([\d\.]+)s", err_str)
+                    if m:
+                        try: wait_seconds = int(float(m.group(1))) + 2
+                        except: pass
+
+                    logger.info(f"[Antigravity 429] Лимит TPM ключа #{assigned_key}. Ждем {wait_seconds}с (ключ не меняем, чтобы не словить 404)...")
+                    if status_callback:
+                        await status_callback({"status": f"Лимит TPM превышен, пауза {wait_seconds}с..."})
+
+                    await asyncio.sleep(wait_seconds)
+                    retry_count += 1
+                    continue
+                else:
+                    # Если это был старт нового диалога и ошибка не 429 — пробуем следующий ключ
+                    if is_new_session:
+                        self._rotate_key()
+                        assigned_key = self.current_key_index
+                        retry_count += 1
+                        continue
+                    else:
+                        raise e
+
+        raise Exception(f"Antigravity: исчерпаны попытки на ключе #{assigned_key}")
     
     def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
         import json
