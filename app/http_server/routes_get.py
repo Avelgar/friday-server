@@ -44,6 +44,32 @@ def do_GET(self):
             self.wfile.write(content)
             return
         except: self.send_error(500); return
+    elif path.startswith('/uploads/'):
+        # Безопасная отдача файлов из хранилища
+        rel_path = urllib.parse.unquote(path[len('/uploads/'):])
+        safe_path = os.path.normpath(os.path.join('/opt/friday/storage/uploads', rel_path))
+
+        # Защита от выхода за пределы папки (Directory Traversal)
+        if safe_path.startswith('/opt/friday/storage/uploads') and os.path.isfile(safe_path):
+            import mimetypes
+            content_type, _ = mimetypes.guess_type(safe_path)
+            content_type = content_type or 'application/octet-stream'
+
+            try:
+                with open(safe_path, 'rb') as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('Content-Length', str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+                return
+            except Exception as e:
+                self.send_error(500, f"Read error: {e}")
+                return
+        else:
+            self.send_error(404, "File Not Found")
+            return
     elif path.startswith('/recovery'):
         token = query_params.get('token', [None])[0]
         if not token: return self.redirect('/?message=recovery_no_token')

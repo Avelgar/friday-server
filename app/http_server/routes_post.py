@@ -20,6 +20,47 @@ CAP_WEB = "смена голоса (принимает СТРОГО одно и�
 ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
 
 def do_POST(self):
+    if self.path == '/api/upload':
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length <= 0:
+                return self.send_json(400, {"status": "error", "message": "Файл пустой"})
+
+            # Забираем имя файла и ID чата из заголовков
+            raw_filename = self.headers.get('X-Filename', 'file.bin')
+            filename = os.path.basename(urllib.parse.unquote(raw_filename))
+            chat_uid = os.path.basename(self.headers.get('X-Chat-Uid', 'global'))
+
+            # Папка хранения с изоляцией по чатам
+            upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
+            os.makedirs(upload_dir, exist_ok=True)
+            dest_path = os.path.join(upload_dir, filename)
+
+            # Читаем чанками по 64 КБ прямо в файл (не держим 13 МБ в оперативке)
+            remaining = content_length
+            chunk_size = 64 * 1024
+            with open(dest_path, 'wb') as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, chunk_size))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+
+            logger.info(f"[Upload] Файл {filename} ({content_length} байт) сохранен для чата {chat_uid}")
+
+            download_url = f"https://friday-assistant.ru/uploads/{chat_uid}/{urllib.parse.quote(filename)}"
+            return self.send_json(200, {
+                "status": "success",
+                "filename": filename,
+                "url": download_url,
+                "size": content_length
+            })
+
+        except Exception as e:
+            logger.error(f"[Upload Error] {e}", exc_info=True)
+            return self.send_json(500, {"status": "error", "message": str(e)})
+
     if hasattr(self, 'raw_data'):
         data = self.raw_data
     else:

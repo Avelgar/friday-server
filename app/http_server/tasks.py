@@ -30,3 +30,25 @@ def clean_expired_tokens():
             if cursor: cursor.close()
             if conn: conn.close()
             time.sleep(3600)
+
+def clean_old_uploads():
+    upload_dir = '/opt/friday/storage/uploads'
+    if not os.path.exists(upload_dir):
+        return
+    now = time.time()
+    cutoff = now - (24 * 3600)  # 24 часа
+
+    for root, dirs, files in os.walk(upload_dir, topdown=False):
+        for f in files:
+            file_path = os.path.join(root, f)
+            try:
+                if os.path.getmtime(file_path) < cutoff:
+                    os.remove(file_path)
+            except: pass
+        # Удаляем пустые папки
+        for d in dirs:
+            dir_path = os.path.join(root, d)
+            try:
+                if not os.listdir(dir_path):
+                    os.rmdir(dir_path)
+            except: pass
