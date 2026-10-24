@@ -13,6 +13,7 @@ from app.config.settings import JWT_SECRET
 from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 from app.utils.email_sender import send_email
+import urllib.parse
 
 logger = logging.getLogger("HTTP_Server")
 
