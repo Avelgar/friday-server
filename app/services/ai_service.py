@@ -991,38 +991,61 @@ class AIService:
                 output_text = interaction.output_text or ""
                 downloaded_files = {}
 
-                # Авто-сохранение файлов на диск сервера и генерация HTTP-ссылок
+                # Умный поиск и авто-сохранение файлов на диск сервера
                 import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
                 file_urls = {}
 
-                # Папка чата на сервере
                 save_dir = os.path.join('/opt/friday/storage/uploads', chat_uid or 'common')
                 os.makedirs(save_dir, exist_ok=True)
 
+                # 1. Смотрим, какие файлы РЕАЛЬНО существуют в контейнере Google
+                real_files_in_env = []
+                try:
+                    list_resp = client.environments.files.list(environment=env_id, path="")
+                    real_files_in_env = [f.name for f in list_resp.files if f.name not in ('.', '..', 'usr')]
+                    logger.info(f"[Antigravity Env Files] Реальные файлы в контейнере: {real_files_in_env}")
+                except Exception as le:
+                    logger.warning(f"[Antigravity Env Files] Ошибка получения списка файлов: {le}")
+
+                # 2. Выкачиваем файлы
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
                     fname = os.path.basename(clean_path)
-                    try:
-                        file_data = client.environments.files.download(environment=env_id, path=clean_path)
-                        content = file_data.read() if hasattr(file_data, "read") else file_data
-                        if hasattr(content, "content"): content = content.content
+                    download_success = False
 
-                        # Сохраняем на сервере рядом с исходниками
-                        local_server_path = os.path.join(save_dir, fname)
-                        with open(local_server_path, 'wb') as sf:
-                            sf.write(content)
+                    # Пробуем варианты путей: как указал агент, через workspace/ или по совпадению имени
+                    candidate_paths = [clean_path, f"workspace/{clean_path}"]
+                    # Если агент создал файл внутри какой-то папки в контейнере
+                    for rf in real_files_in_env:
+                        if rf.endswith(fname) and rf not in candidate_paths:
+                            candidate_paths.append(rf)
 
-                        file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(fname)}"
-                        file_urls[clean_path] = file_url
-                        logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) сохранен -> {file_url}")
-                    except Exception as fe:
-                        logger.warning(f"[Antigravity Sync] Ошибка скачивания {clean_path}: {fe}")
+                    for cp in candidate_paths:
+                        try:
+                            file_data = client.environments.files.download(environment=env_id, path=cp)
+                            content = file_data.read() if hasattr(file_data, "read") else file_data
+                            if hasattr(content, "content"): content = content.content
+
+                            local_server_path = os.path.join(save_dir, fname)
+                            with open(local_server_path, 'wb') as sf:
+                                sf.write(content)
+
+                            file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(fname)}"
+                            file_urls[clean_path] = file_url
+                            logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) выкачан по пути '{cp}' -> {file_url}")
+                            download_success = True
+                            break
+                        except Exception:
+                            continue
+
+                    if not download_success:
+                        logger.warning(f"[Antigravity Sync] Файл {clean_path} НЕ найден в контейнере. Реальные файлы были: {real_files_in_env}")
 
                 return {
                     "text": output_text,
-                    "files": {},             # Больше не ломаем сокет 120 МБ пакетами
-                    "file_urls": file_urls,   # Отдаем легкие прямые ссылки
+                    "files": {},
+                    "file_urls": file_urls,
                     "environment_id": env_id,
                     "interaction_id": new_interaction_id
                 }
