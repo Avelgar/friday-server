@@ -14,6 +14,8 @@ import os
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AI_Service")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 try:
     from app.config.secrets import GEMINI_KEYS
@@ -913,7 +915,8 @@ class AIService:
         input_files: dict = None,
         previous_interaction_id: str = None,
         environment_id: str = None,
-        assigned_key: int = None  # <--- ДОБАВЬ ЭТОТ АРГУМЕНТ
+        assigned_key: int = None,
+        chat_uid: str = None
     ):
         is_new_session = (previous_interaction_id is None)
 
@@ -988,33 +991,41 @@ class AIService:
                 output_text = interaction.output_text or ""
                 downloaded_files = {}
 
-                # Скачиваем файлы, помеченные тегом [SYNC: путь]
+                # Авто-сохранение файлов на диск сервера и генерация HTTP-ссылок
                 import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
+                file_urls = {}
+
+                # Папка чата на сервере
+                save_dir = os.path.join('/opt/friday/storage/uploads', chat_uid or 'common')
+                os.makedirs(save_dir, exist_ok=True)
+
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
+                    fname = os.path.basename(clean_path)
                     try:
                         file_data = client.environments.files.download(environment=env_id, path=clean_path)
                         content = file_data.read() if hasattr(file_data, "read") else file_data
                         if hasattr(content, "content"): content = content.content
-                        downloaded_files[clean_path] = base64.b64encode(content).decode('utf-8')
-                        logger.info(f"[Antigravity Sync] Файл {clean_path} выкачан ({len(content)} байт)")
+
+                        # Сохраняем на сервере рядом с исходниками
+                        local_server_path = os.path.join(save_dir, fname)
+                        with open(local_server_path, 'wb') as sf:
+                            sf.write(content)
+
+                        file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(fname)}"
+                        file_urls[clean_path] = file_url
+                        logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) сохранен -> {file_url}")
                     except Exception as fe:
-                        try:
-                            file_data = client.environments.files.download(environment=env_id, path=f"workspace/{clean_path}")
-                            content = file_data.read() if hasattr(file_data, "read") else file_data
-                            if hasattr(content, "content"): content = content.content
-                            downloaded_files[clean_path] = base64.b64encode(content).decode('utf-8')
-                        except Exception:
-                            logger.warning(f"[Antigravity Sync] Не удалось скачать {clean_path}: {fe}")
+                        logger.warning(f"[Antigravity Sync] Ошибка скачивания {clean_path}: {fe}")
 
                 return {
                     "text": output_text,
-                    "files": downloaded_files,
+                    "files": {},             # Больше не ломаем сокет 120 МБ пакетами
+                    "file_urls": file_urls,   # Отдаем легкие прямые ссылки
                     "environment_id": env_id,
                     "interaction_id": new_interaction_id
                 }
-
             except Exception as e:
                 err_str = str(e)
                 logger.warning(f"[Antigravity Key #{assigned_key}] Ошибка: {err_str}")

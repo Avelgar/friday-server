@@ -744,7 +744,8 @@ async def handle_antigravity_task(websocket, data):
             input_files=input_files,
             previous_interaction_id=prev_interaction_id,
             environment_id=environment_id,
-            assigned_key=assigned_key  # Передаем точный ключ из БД!
+            assigned_key=assigned_key,
+            chat_uid=chat_uid
         )
 
         new_interaction_id = result["interaction_id"]
@@ -777,7 +778,7 @@ async def handle_antigravity_task(websocket, data):
             "type": "antigravity_result",
             "ui_msg_id": ui_msg_id,
             "text": agent_reply_text,
-            "files": result["files"],
+            "file_urls": result.get("file_urls", {}),
             "environment_id": new_env_id,
             "interaction_id": new_interaction_id,
             "chat_id": chat_uid
@@ -888,7 +889,6 @@ async def handle_antigravity_create_chat(websocket, data):
 
 
 async def handle_antigravity_delete_chat(websocket, data):
-    """Удалить чат и все его сообщения из базы."""
     chat_uid = data.get("chat_uid")
     if not chat_uid: return
     conn = None; cursor = None
@@ -899,11 +899,17 @@ async def handle_antigravity_delete_chat(websocket, data):
         await cursor.execute("DELETE FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
         await conn.commit()
 
+        # Удаляем папку со всеми 3D-моделями и файлами этого чата с диска
+        import shutil
+        upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
+        if os.path.exists(upload_dir):
+            shutil.rmtree(upload_dir, ignore_errors=True)
+            logger.info(f"[DB] Папка {upload_dir} удалена с диска.")
+
         await async_send(websocket, {
             "type": "antigravity_chat_deleted",
             "chat_uid": chat_uid
         })
-        logger.info(f"[DB] Чат {chat_uid} и все его сообщения удалены из базы.")
     except Exception as e:
         logger.error(f"[DB delete_chat error] {e}")
     finally:
