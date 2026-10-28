@@ -27,33 +27,40 @@ def do_POST(self):
             if content_length <= 0:
                 return self.send_json(400, {"status": "error", "message": "Файл пустой"})
 
-            # Забираем имя файла и ID чата из заголовков
-            raw_filename = self.headers.get('X-Filename', 'file.bin')
-            filename = os.path.basename(urllib.parse.unquote(raw_filename))
+            # Читаем имя из Base64-заголовка или обычного
+            b64_filename = self.headers.get('X-Filename-B64')
+            if b64_filename:
+                try:
+                    filename = base64.b64decode(b64_filename).decode('utf-8')
+                except Exception:
+                    filename = self.headers.get('X-Filename', 'file.bin')
+            else:
+                raw_filename = self.headers.get('X-Filename', 'file.bin')
+                filename = urllib.parse.unquote(raw_filename)
+
+            clean_filename = os.path.basename(filename)
             chat_uid = os.path.basename(self.headers.get('X-Chat-Uid', 'global'))
 
-            # Папка хранения с изоляцией по чатам
             upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
             os.makedirs(upload_dir, exist_ok=True)
-            dest_path = os.path.join(upload_dir, filename)
+            dest_path = os.path.join(upload_dir, clean_filename)
 
-            # Читаем чанками по 64 КБ прямо в файл (не держим 13 МБ в оперативке)
+            # Читаем чанками по 64 КБ
             remaining = content_length
             chunk_size = 64 * 1024
             with open(dest_path, 'wb') as f:
                 while remaining > 0:
                     chunk = self.rfile.read(min(remaining, chunk_size))
-                    if not chunk:
-                        break
+                    if not chunk: break
                     f.write(chunk)
                     remaining -= len(chunk)
 
-            logger.info(f"[Upload] Файл {filename} ({content_length} байт) сохранен для чата {chat_uid}")
+            logger.info(f"[Upload] Файл {clean_filename} ({content_length} байт) сохранен для чата {chat_uid}")
 
-            download_url = f"https://friday-assistant.ru/uploads/{chat_uid}/{urllib.parse.quote(filename)}"
+            download_url = f"https://friday-assistant.ru/uploads/{chat_uid}/{urllib.parse.quote(clean_filename)}"
             return self.send_json(200, {
                 "status": "success",
-                "filename": filename,
+                "filename": clean_filename,
                 "url": download_url,
                 "size": content_length
             })
