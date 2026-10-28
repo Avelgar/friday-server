@@ -976,11 +976,30 @@ class AIService:
                 if status_callback:
                     await status_callback({"status": "started", "interaction_id": new_interaction_id})
 
+                last_seen_step = ""
                 while True:
-                    await asyncio.sleep(4)
+                    await asyncio.sleep(3)
                     interaction = client.interactions.get(id=new_interaction_id)
+                    
+                    # Пытаемся достать последнее действие, запуск скрипта или мысль агента
+                    current_step_desc = interaction.status
+                    try:
+                        # Если Google вернул события выполнения (events / steps)
+                        if hasattr(interaction, 'events') and interaction.events:
+                            last_event = interaction.events[-1]
+                            # Ищем текст мысли или команду инструмента
+                            if hasattr(last_event, 'content') and last_event.content:
+                                current_step_desc = str(last_event.content)[:90]
+                            elif hasattr(last_event, 'call') and last_event.call:
+                                current_step_desc = f"Запуск: {last_event.call.name}"
+                        elif hasattr(interaction, 'steps') and interaction.steps:
+                            current_step_desc = str(interaction.steps[-1])[:90]
+                    except Exception:
+                        pass
+
+                    # Шлем статус клиенту
                     if status_callback:
-                        await status_callback({"status": interaction.status})
+                        await status_callback({"status": current_step_desc})
 
                     if interaction.status in ("completed", "failed"):
                         break
