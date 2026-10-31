@@ -754,20 +754,30 @@ async def handle_antigravity_task(websocket, data):
         new_env_id = result["environment_id"]
         agent_reply_text = result["text"]
 
-        # Обновляем сессию и название в БД
+        # Обновляем сессию, название и список файлов в БД
         try:
             conn = await get_async_db_connection()
             cursor = await conn.cursor()
+
+            # Получаем ссылки на созданные/измененные файлы
+            new_files = result.get("file_urls", {})
+            synced_str = json.dumps(new_files, ensure_ascii=False) if new_files else None
             
             if need_title_update:
                 await cursor.execute(
-                    "UPDATE antigravity_chats SET last_interaction_id = %s, environment_id = %s, title = %s, updated_at = NOW() WHERE chat_uid = %s",
-                    (new_interaction_id, new_env_id, auto_title, chat_uid)
+                    """UPDATE antigravity_chats 
+                       SET last_interaction_id = %s, environment_id = %s, title = %s, 
+                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
+                       WHERE chat_uid = %s""",
+                    (new_interaction_id, new_env_id, auto_title, synced_str, chat_uid)
                 )
             else:
                 await cursor.execute(
-                    "UPDATE antigravity_chats SET last_interaction_id = %s, environment_id = %s, updated_at = NOW() WHERE chat_uid = %s",
-                    (new_interaction_id, new_env_id, chat_uid)
+                    """UPDATE antigravity_chats 
+                       SET last_interaction_id = %s, environment_id = %s, 
+                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
+                       WHERE chat_uid = %s""",
+                    (new_interaction_id, new_env_id, synced_str, chat_uid)
                 )
 
             await cursor.execute(
@@ -831,26 +841,36 @@ async def handle_antigravity_get_chats(websocket, data):
 
 
 async def handle_antigravity_get_messages(websocket, data):
-    """Отдать историю сообщений конкретного чата."""
     chat_uid = data.get("chat_uid")
     if not chat_uid: return
     conn = None; cursor = None
     try:
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
+        
+        # Забираем сообщения
         await cursor.execute(
             "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
             (chat_uid,)
         )
         msgs = await cursor.fetchall()
         for m in msgs:
-            if m.get("created_at"):
-                m["created_at"] = str(m["created_at"])
+            if m.get("created_at"): m["created_at"] = str(m["created_at"])
+
+        # Забираем список сгенерированных файлов для оффлайн-синхронизации
+        await cursor.execute("SELECT synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        chat_row = await cursor.fetchone()
+        synced_files = {}
+        if chat_row and chat_row.get("synced_files"):
+            try:
+                synced_files = json.loads(chat_row["synced_files"]) if isinstance(chat_row["synced_files"], str) else chat_row["synced_files"]
+            except Exception: pass
 
         await async_send(websocket, {
             "type": "antigravity_chat_history",
             "chat_uid": chat_uid,
-            "messages": msgs or []
+            "messages": msgs or [],
+            "synced_files": synced_files or {}
         })
     except Exception as e:
         logger.error(f"[DB get_messages error] {e}")
