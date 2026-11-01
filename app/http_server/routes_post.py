@@ -27,7 +27,6 @@ def do_POST(self):
             if content_length <= 0:
                 return self.send_json(400, {"status": "error", "message": "Файл пустой"})
 
-            # Читаем имя из Base64-заголовка или обычного
             b64_filename = self.headers.get('X-Filename-B64')
             if b64_filename:
                 try:
@@ -45,7 +44,6 @@ def do_POST(self):
             os.makedirs(upload_dir, exist_ok=True)
             dest_path = os.path.join(upload_dir, clean_filename)
 
-            # Читаем чанками по 64 КБ
             remaining = content_length
             chunk_size = 64 * 1024
             with open(dest_path, 'wb') as f:
@@ -86,60 +84,6 @@ def do_POST(self):
     cursor = None
 
     try:
-        if self.path == '/api/gemini/cache':
-            if not isinstance(data, dict):
-                return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
-
-            database = data.get('database')
-            model = data.get('model', 'gemini-3.5-flash-lite')
-            if not isinstance(database, str) or not database.strip():
-                return self.send_json(400, {"status": "error", "message": "Field 'database' must be a non-empty string"})
-            if not isinstance(model, str) or not model.strip():
-                return self.send_json(400, {"status": "error", "message": "Field 'model' must be a non-empty string"})
-
-            try:
-                # Дергаем чистый метод из ai_service
-                result = ai_instance.create_context_cache(database, model)
-                return self.send_json(200, {
-                    "status": "success",
-                    "cache_id": result["cache_id"],
-                    "expires_at": result["expires_at"],
-                })
-            except Exception as e:
-                logger.error(f"Cache create error: {e}")
-                return self.send_json(502, {"status": "error", "message": "Gemini cache is temporarily unavailable"})
-
-        if self.path == '/api/gemini':
-            if not isinstance(data, dict):
-                return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
-
-            prompt = data.get('prompt')
-            model = data.get('model', 'gemini-3.5-flash-lite')
-            cache_id = data.get('cache_id')
-            
-            if not isinstance(prompt, str) or not prompt.strip():
-                return self.send_json(400, {"status": "error", "message": "Field 'prompt' must be a non-empty string"})
-            if not isinstance(model, str) or not model.strip():
-                return self.send_json(400, {"status": "error", "message": "Field 'model' must be a non-empty string"})
-            if not isinstance(cache_id, str) or not cache_id.startswith('cachedContents/'):
-                return self.send_json(400, {"status": "error", "message": "Field 'cache_id' must be a valid cachedContents resource name"})
-
-            try:
-                # Дергаем генерацию с использованием правильной ротации
-                answer = ai_instance.generate_from_cache(prompt, cache_id, model)
-                return self.send_json(200, {
-                    "status": "success",
-                    "response": answer,
-                    "model": model.strip(),
-                    "cache_id": cache_id,
-                })
-            except ValueError as ve:
-                # Отлавливаем ошибку превышения лимита символов
-                return self.send_json(413, {"status": "error", "message": str(ve)})
-            except Exception as e:
-                logger.error(f"Cache generate error: {e}")
-                return self.send_json(502, {"status": "error", "message": "Gemini is temporarily unavailable"})
-
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True, buffered=True)
 
@@ -182,7 +126,6 @@ def do_POST(self):
             self.end_headers()
 
             async def run_ai_stream():
-                logger.info("[HTTP] Начало генерации потока ответа...")
                 bot_msg_id = "http_" + str(int(time.time()))
                 audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
                 image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
@@ -199,11 +142,9 @@ def do_POST(self):
                 ):
                     if chunk["type"] == "user_text":
                         has_stt = True
-                        logger.info(f"[HTTP ТРАНСКРИБАЦИЯ ЮЗЕРА]: {chunk['text'].strip()}")
                         self._send_sse({"type": "user_transcription", "text": chunk["text"].strip()})
                     elif chunk["type"] == "bot_text":
                         has_content = True
-                        logger.info(f"[HTTP ЧАНК ТЕКСТА]: {chunk['text'].strip()}")
                         self._send_sse({"type": "new_message", "message_id": bot_msg_id, "text": chunk["text"]})
                     elif chunk["type"] == "audio":
                         has_content = True
@@ -211,7 +152,6 @@ def do_POST(self):
                         self._send_sse({"type": "audio_chunk", "audio_base64": audio_b64})
                     elif chunk["type"] == "commands":
                         has_content = True
-                        logger.info(f"[HTTP ЧАНК КОМАНД]: {chunk.get('commands')}")
                         for cmd in chunk.get("commands", []):
                             self._send_sse({"type": "new_message", "message_id": bot_msg_id, "actions": cmd.get("actions", [])})
                 
@@ -219,13 +159,9 @@ def do_POST(self):
                     self._send_sse({"type": "user_transcription", "text": "[Аудиосообщение]"})
 
                 if not has_content:
-                    logger.info("[HTTP] ИИ ничего не ответил (пустота/таймаут).")
                     self._send_sse({"type": "delete_message"})
                 else:
-                    logger.info("[HTTP] Генерация потока успешно завершена.")
-                    # --- ДОБАВЬ ВОТ ЭТУ СТРОЧКУ ---
                     self._send_sse({"type": "new_message", "message_id": bot_msg_id, "text": "", "actions": []})
-                    # ------------------------------
 
             try: asyncio.run(run_ai_stream())
             except Exception as ex:
@@ -250,7 +186,7 @@ def do_POST(self):
                     dt = d['created_at'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(d['created_at'], 'strftime') else d['created_at']
                     dialogs.append({"id": d['id'], "name": d['name'], "created_at": dt})
                 self.send_json(200, {"status": "success", "dialogs": dialogs})
-            except Exception as e:
+            except Exception:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
 
         elif self.path == '/api/get_history':
@@ -259,7 +195,6 @@ def do_POST(self):
             try:
                 payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
                 user_id = payload['user_id']
-                
                 cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
                 if not cursor.fetchone():
                     return self.send_json(403, {"status": "error", "message": "Нет доступа к этому диалогу"})
@@ -277,7 +212,7 @@ def do_POST(self):
                     history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
                 
                 self.send_json(200, {"status": "success", "history": history})
-            except Exception as e:
+            except Exception:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
 
         elif self.path == '/api/create_dialog':
@@ -289,7 +224,7 @@ def do_POST(self):
                 cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (name, user_id))
                 conn.commit()
                 self.send_json(200, {"status": "success", "dialog_id": cursor.lastrowid, "name": name})
-            except Exception as e:
+            except Exception:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
 
         elif self.path == '/api/delete_dialog':
@@ -301,31 +236,18 @@ def do_POST(self):
                 cursor.execute("DELETE FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
                 conn.commit()
                 self.send_json(200, {"status": "success", "message": "Диалог удален"})
-            except Exception as e:
+            except Exception:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
-
-        elif self.path == '/api/generate_image':
-            prompt = data.get('prompt')
-            model_type = data.get('model_type', 'generate')
-            if not prompt: return self.send_json(400, {"status": "error", "message": "Промпт не может быть пустым"})
-            try:
-                image_base64 = ai_instance.generate_image_pollinations(prompt)
-                self.send_json(200, {"status": "success", "image_base64": image_base64, "message": "Изображение успешно сгенерировано"})
-            except Exception as ex:
-                self.send_json(500, {"status": "error", "message": str(ex)})
 
         elif self.path == '/register':
             email = data.get('email'); login = data.get('login'); password = data.get('password')
             if not all([email, login, password]): return self.send_json(400, {"status": "error", "message": "Все поля обязательны"})
             if data.get('terms_accepted') is not True or data.get('personal_data_consent') is not True:
-                return self.send_json(400, {"status": "error", "message": "Необходимо принять соглашение и дать согласие на обработку данных"})
+                return self.send_json(400, {"status": "error", "message": "Необходимо принять соглашение"})
             cursor.execute("SELECT email, login FROM users WHERE email = %s OR login = %s", (email, login))
             existing = cursor.fetchall()
             if existing:
-                msg = "Пользователь уже существует"
-                if any(u['email'] == email for u in existing): msg = "Email уже занят"
-                elif any(u['login'] == login for u in existing): msg = "Логин уже занят"
-                return self.send_json(400, {"status": "error", "message": msg})
+                return self.send_json(400, {"status": "error", "message": "Пользователь уже существует"})
             token = secrets.token_urlsafe(32)
             link = f"https://friday-assistant.ru/verify?token={token}"
             if send_email(email, "Подтверждение регистрации", f"Ссылка: {link}"):
@@ -345,7 +267,6 @@ def do_POST(self):
             
             token = jwt.encode({'user_id': user['id'], 'exp': datetime.utcnow() + timedelta(days=365)}, JWT_SECRET, algorithm='HS256')
             if isinstance(token, bytes): token = token.decode('utf-8')
-            
             self.send_json(200, {"status": "success", "message": "Вход выполнен", "user_login": user['login'], "token": token})
 
         elif self.path == '/login_web':
@@ -467,25 +388,16 @@ def do_POST(self):
             msg_id = data.get('msg_id')
             token = data.get('token')
             mac = data.get('mac')
-            
-            if not msg_id:
-                return self.send_json(400, {"status": "error", "message": "msg_id обязателен"})
+            if not msg_id: return self.send_json(400, {"status": "error", "message": "msg_id обязателен"})
                 
             if token:
                 try:
                     payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
                     user_id = payload['user_id']
-                except:
-                    return self.send_json(401, {"status": "error", "message": "Invalid token"})
+                except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
                 
-                cursor.execute("""
-                    SELECT m.id FROM messages m 
-                    JOIN dialogs d ON m.dialog_id = d.id 
-                    WHERE m.id = %s AND d.user_id = %s
-                """, (msg_id, user_id))
-                if not cursor.fetchone():
-                    return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
-                    
+                cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
+                if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
                 cursor.execute("DELETE FROM messages WHERE id = %s", (msg_id,))
             else:
                 if not mac: return self.send_json(400, {"status": "error", "message": "mac обязателен для гостей"})
@@ -503,25 +415,16 @@ def do_POST(self):
             new_text = data.get('new_text')
             token = data.get('token')
             mac = data.get('mac')
-            
-            if not msg_id or not new_text:
-                return self.send_json(400, {"status": "error", "message": "msg_id и new_text обязательны"})
+            if not msg_id or not new_text: return self.send_json(400, {"status": "error", "message": "msg_id и new_text обязательны"})
                 
             if token:
                 try:
                     payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
                     user_id = payload['user_id']
-                except:
-                    return self.send_json(401, {"status": "error", "message": "Invalid token"})
-                    
-                cursor.execute("""
-                    SELECT m.id FROM messages m 
-                    JOIN dialogs d ON m.dialog_id = d.id 
-                    WHERE m.id = %s AND d.user_id = %s
-                """, (msg_id, user_id))
-                if not cursor.fetchone():
-                    return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
-                    
+                except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
+                
+                cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
+                if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
                 cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (new_text, msg_id))
             else:
                 if not mac: return self.send_json(400, {"status": "error", "message": "mac обязателен для гостей"})
@@ -543,30 +446,3 @@ def do_POST(self):
     finally:
         if cursor: cursor.close()
         if conn: conn.close()
-
-
-def do_DELETE(self):
-    if self.path != '/api/gemini/cache':
-        return self.send_error(404)
-
-    try:
-        content_length = int(self.headers.get('Content-Length', 0))
-        raw_data = self.rfile.read(content_length) if content_length > 0 else b'{}'
-        data = json.loads(raw_data.decode('utf-8'))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
-        return self.send_json(400, {"status": "error", "message": "Invalid JSON"})
-
-    if not isinstance(data, dict):
-        return self.send_json(400, {"status": "error", "message": "JSON body must be an object"})
-
-    cache_id = data.get('cache_id')
-    if not isinstance(cache_id, str) or not cache_id.startswith('cachedContents/'):
-        return self.send_json(400, {"status": "error", "message": "Field 'cache_id' must be a valid cachedContents resource name"})
-
-    try:
-        # Дергаем удаление из ai_service
-        ai_instance.delete_context_cache(cache_id)
-        return self.send_json(200, {"status": "success", "cache_id": cache_id})
-    except Exception as e:
-        logger.error(f"Cache delete error: {e}")
-        return self.send_json(502, {"status": "error", "message": "Gemini cache is temporarily unavailable"})

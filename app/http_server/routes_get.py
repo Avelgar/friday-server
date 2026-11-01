@@ -27,7 +27,6 @@ def do_GET(self):
     elif path == '/app.js': self.serve_file('app.js', 'application/javascript; charset=utf-8')
     elif path == '/ui.js': self.serve_file('ui.js', 'application/javascript; charset=utf-8') 
     elif path == '/media.js': self.serve_file('media.js', 'application/javascript; charset=utf-8') 
-    elif path == '/image': self.serve_file('image.html', 'text/html; charset=utf-8')
     elif path == '/tester': self.serve_file('tester.html', 'text/html; charset=utf-8')
     elif path == '/images/f.png': self.serve_file('images/f.png', 'image/png')
     elif path == '/download-windows':
@@ -45,11 +44,9 @@ def do_GET(self):
             return
         except: self.send_error(500); return
     elif path.startswith('/uploads/'):
-        # Безопасная отдача файлов из хранилища
         rel_path = urllib.parse.unquote(path[len('/uploads/'):])
         safe_path = os.path.normpath(os.path.join('/opt/friday/storage/uploads', rel_path))
 
-        # Защита от выхода за пределы папки (Directory Traversal)
         if safe_path.startswith('/opt/friday/storage/uploads') and os.path.isfile(safe_path):
             import mimetypes
             content_type, _ = mimetypes.guess_type(safe_path)

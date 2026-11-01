@@ -22,15 +22,6 @@ try:
 except ImportError:
     GEMINI_KEYS = []
 
-MAX_PROMPT_LENGTH = int(os.getenv("GEMINI_MAX_PROMPT_LENGTH", "1000000"))
-
-GEMINI_SYSTEM_PROMPT = """
-Работай исключительно с законодательством из кэша.
-Не используй знания из памяти и интернет.
-Верни только JSON с точными источниками и дословными цитатами.
-Если ответа нет: {"matches":[]}
-""".strip()
-
 class DeviceAction(BaseModel):
     action_type: str = Field(description="Тип действия.")
     action_value: str = Field(description="Параметр действия.")
@@ -42,16 +33,13 @@ class AIService:
     def __init__(self):
         self.api_keys = GEMINI_KEYS
         self.current_key_index = 0
-        # Мапа для привязки сессий Antigravity к их ключам: { interaction_id: key_index }
         self.antigravity_sessions = {}
 
     def _get_client(self, key_index=None):
-        # Если передан конкретный key_index — берем его, иначе текущий
         idx = key_index if key_index is not None else self.current_key_index
         return genai.Client(http_options={"api_version": "v1beta"}, api_key=self.api_keys[idx])
 
     def _get_live_client(self):
-        # Для Live API используем постоянный стабильный ключ без ротации
         live_key = self.api_keys[0] if self.api_keys else None
         return genai.Client(http_options={"api_version": "v1beta"}, api_key=live_key)
 
@@ -60,95 +48,16 @@ class AIService:
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
         return True
 
-    def generate_image_pollinations(self, prompt):
-        import requests
-        import base64
-        import urllib.parse
-        import random
-        
-        try:
-            safe_prompt = urllib.parse.quote(prompt)
-            url = f"https://image.pollinations.ai/prompt/{safe_prompt}"
-            params = {
-                "width": 512,
-                "height": 512,
-                "model": "flux",
-                "nologo": "true",
-                "enhance": "true",
-                "seed": random.randint(1, 999999)
-            }
-            logger.info(f"Отправка GET-запроса к Pollinations AI для промпта: '{prompt}'")
-            response = requests.get(url, params=params, timeout=60)
-            if response.status_code == 200:
-                return base64.b64encode(response.content).decode('utf-8')
-            error_msg = response.text[:200] if response.text else "Нет описания ошибки"
-            raise Exception(f"Pollinations API вернул код {response.status_code}. Ответ: {error_msg}")
-        except requests.exceptions.Timeout:
-            raise Exception("Ошибка: Время ожидания ответа от Pollinations AI истекло (более 60 секунд).")
-        except Exception as e:
-            raise Exception(f"Ошибка при работе с Pollinations AI: {str(e)}")
-
-    def generate_image(self, prompt, model_type="generate"):
-        models_map = {"fast": "gemini-3.1-flash-lite-image", "generate": "gemini-2.5-flash-image", "ultra": "gemini-3-pro-image"}
-        model_id = models_map.get(model_type, models_map["generate"])
-        time.sleep(1.0) 
-        
-        total_keys_tried = 0
-        last_error_msg = ""
-        
-        while total_keys_tried < len(self.api_keys):
-            self._rotate_key()
-            try:
-                client = self._get_client()
-                response = client.models.generate_content(model=model_id, contents=prompt)
-                image_bytes = None
-
-                if response.candidates:
-                    for candidate in response.candidates:
-                        if candidate.content and candidate.content.parts:
-                            for part in candidate.content.parts:
-                                if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
-                                    image_bytes = part.inline_data.data; break
-                        if image_bytes: break
-
-                if not image_bytes and hasattr(response, 'inline_data') and response.inline_data: image_bytes = response.inline_data.data
-                if not image_bytes:
-                    try:
-                        for part in response.parts:
-                            if part.inline_data: image_bytes = part.inline_data.data; break
-                    except: pass
-                if not image_bytes: raise Exception(f"Модель {model_id} не вернула байты изображения.")
-
-                return base64.b64encode(image_bytes).decode('utf-8')
-                
-            except Exception as e:
-                last_error_msg = str(e)
-                logger.warning(f"[Key {self.current_key_index}] Ошибка генерации: {last_error_msg}")
-                if "429" in last_error_msg or "RESOURCE_EXHAUSTED" in last_error_msg:
-                    sleep_time = 5.0 
-                    import re
-                    match = re.search(r"retry in ([\d\.]+)s", last_error_msg)
-                    if match:
-                        try:
-                            sleep_time = float(match.group(1)) + 0.5
-                            logger.info(f"API требует паузу. Найдено точное время ожидания: {sleep_time} сек.")
-                        except ValueError: pass
-                    logger.info(f"Сработал лимит. Засыпаю на {sleep_time} сек. перед сменой ключа...")
-                    time.sleep(sleep_time)
-                
-                total_keys_tried += 1
-                
-        raise Exception(f"AI Image Service недоступен после перебора всех ключей. Последняя ошибка: {last_error_msg}")
-
+    # ==============================================================================
+    # 1. СИНТЕЗ РЕЧИ (TTS)
+    # ==============================================================================
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
         client = self._get_live_client()
-        
-        # ЖЕСТКИЙ ПРОМПТ ДЛЯ УБИЙСТВА ОТСЕБЯТИНЫ
-        sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст. ЗАПРЕЩЕНО добавлять слова от себя, здороваться, прощаться или задавать вопросы вроде 'Что-то еще?'."
+        sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст без отсебятины."
         
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"], 
@@ -156,12 +65,10 @@ class AIService:
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
         )
         audio_data = bytearray()
-        
         cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
         session = None
         try:
             session = await asyncio.wait_for(cm.__aenter__(), timeout=10.0)
-            # Измененный приказ на чтение
             await session.send(input=f"Озвучь строго этот текст: {text}", end_of_turn=True)
             receive_iterator = session.receive().__aiter__()
             while True:
@@ -178,20 +85,18 @@ class AIService:
         return base64.b64encode(audio_data).decode('utf-8') if audio_data else None
 
     async def generate_static_audio_stream(self, text, voice_name="Aoede", assistant_name="Пятница"):
-        """Потоковая версия TTS. Мгновенно отдает чанки аудио через yield."""
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
         client = self._get_live_client()
-        sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст. ЗАПРЕЩЕНО добавлять слова от себя, здороваться, прощаться или задавать вопросы."
+        sys_instr = "Ты — синтезатор речи. Твоя единственная задача: прочитать переданный текст без отсебятины."
         
         config = types.LiveConnectConfig(
             response_modalities=["AUDIO"], 
             system_instruction=types.Content(parts=[types.Part.from_text(text=sys_instr)]),
             speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice)))
         )
-        
         cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
         session = None
         try:
@@ -201,7 +106,7 @@ class AIService:
             while True:
                 response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
                 if response.server_content and response.data: 
-                    yield response.data # Отдаем байты на лету!
+                    yield response.data
                 if response.server_content and response.server_content.turn_complete:
                     break
         except Exception as e:
@@ -212,18 +117,16 @@ class AIService:
                 except: pass
 
     # ==============================================================================
-    # 1. ФУНКЦИЯ ФАСАДА (Gemini 3.1 Flash Live) - Быстрое аудио и делегирование
+    # 2. ФАСАД (Gemini 3.1 Flash Live)
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, formatted_history=None, voice_name="Aoede", assistant_name="Пятница", media_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
-
         has_yielded_data = False 
         
         try:
             client = self._get_live_client()
-            
             device_control_tool = types.Tool(
                 function_declarations=[
                     types.FunctionDeclaration(
@@ -269,23 +172,15 @@ class AIService:
                 config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
 
             config = types.LiveConnectConfig(**config_kwargs)
-
-            logger.info(f"[CONNECT] Подключаюсь к Live API (SDK, единый ключ)...")
-            
             cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
             session = None
             sender_task = None
             
             try:
                 session = await asyncio.wait_for(cm.__aenter__(), timeout=12.0)
-                
                 if formatted_history:
-                    history_to_send = formatted_history[-10:]
-                    logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
-                    try:
-                        await session.send_client_content(turns=history_to_send, turn_complete=True)
-                    except Exception as hex:
-                        logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live API: {hex}")
+                    try: await session.send_client_content(turns=formatted_history[-10:], turn_complete=True)
+                    except: pass
                 
                 async def send_input_task():
                     try:
@@ -300,7 +195,6 @@ class AIService:
                                 if item is None:
                                     await session.send_realtime_input(audio_stream_end=True)
                                     break
-                                    
                                 if item["type"] == "audio" and len(item["data"]) > 0:
                                     await session.send_realtime_input(audio=types.Blob(data=item["data"], mime_type="audio/pcm;rate=16000"))
                                 elif item["type"] == "video" and len(item["data"]) > 0:
@@ -316,26 +210,17 @@ class AIService:
                         logger.error(f"[API STREAM ERROR] {e}")
 
                 sender_task = asyncio.create_task(send_input_task())
-
-                # ДОБАВЛЕНО: Флаг для ожидания голосового ответа после вызова функции
-                is_tool_call_turn = False
-
                 receive_iterator = session.receive().__aiter__()
+
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
-                    
-                    # 1. ОБРАБОТКА ВЫЗОВА ФУНКЦИЙ
                     if response.tool_call:
                         extracted_commands = []
                         function_responses = []
-                        logger.info(f"[API TOOL] ⚡ Вызов инструментов: {len(response.tool_call.function_calls)} шт.")
-                        
                         for fc in response.tool_call.function_calls:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                                
-                            # Возвращаем строгий формат 3.8 Live
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=fc.id, 
@@ -345,64 +230,43 @@ class AIService:
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
-                        
                         await session.send_tool_response(function_responses=function_responses)
-                        logger.info(f"[API TOOL] ✅ Ответ отправлен.")
                         
-                    # 2. ОБРАБОТКА ТЕКСТА, АУДИО И ЗАВЕРШЕНИЯ ХОДА
                     sc = response.server_content
                     if sc:
                         if sc.input_transcription:
                             has_yielded_data = True
                             yield {"type": "user_text", "text": sc.input_transcription.text}
-                        
                         if sc.output_transcription:
                             has_yielded_data = True
                             yield {"type": "bot_text", "text": sc.output_transcription.text}
-                            
                         if sc.model_turn:
                             for part in sc.model_turn.parts:
                                 if part.inline_data:
                                     has_yielded_data = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                                    
-                        # Когда модель говорит, что закончила ход — мы ЧЕСТНО выходим из цикла!
                         if sc.turn_complete:
-                            logger.info("[API] Модель завершила реплику (turn_complete).")
                             break
                         
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
-                logger.warning("[API] Таймаут ожидания данных от Gemini Live (receive)")
             except StopAsyncIteration: pass
             finally:
                 if sender_task:
                     sender_task.cancel()
                     try: await sender_task
-                    except asyncio.CancelledError: pass
-                    except Exception: pass
+                    except: pass
                 if session:
                     try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                     except: pass
-            
             return 
-
         except Exception as e:
             logger.error(f"[API ERROR] Ошибка Live API: {e}")
             if has_yielded_data: return
             raise Exception("AI Live Service Unavailable")
 
-    # ==============================================================================
-    # 2. ФУНКЦИЯ ДЛЯ СТРИМИНГА С БУФЕРИЗАЦИЕЙ ПАДЕНИЙ КЛЮЧЕЙ (ФАСАД)
-    # ==============================================================================
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, media_queue, formatted_history=None, voice_name="Aoede", assistant_name="Пятница"):
-        voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
-        valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
-        mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
-
-        # === ДОБАВЬ ЭТУ СТРОКУ ===
         system_instruction += "\n\nCRITICAL RULE: You MUST speak a short voice confirmation (like 'Секунду', 'Готово') BEFORE calling any tools. Never call a tool silently!"
-
         session_audio_cache = bytearray()
         last_video_frame = None
         has_reached_stream_end = False
@@ -410,7 +274,6 @@ class AIService:
         
         try:
             client = self._get_live_client()
-            
             device_control_tool = types.Tool(
                 function_declarations=[
                     types.FunctionDeclaration(
@@ -456,37 +319,25 @@ class AIService:
                 config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
 
             config = types.LiveConnectConfig(**config_kwargs)
-
-            logger.info(f"[CONNECT] Подключаюсь к Live API (Streaming SDK, единый ключ)...")
-            
             cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
             session = None
             sender_task = None
             
             try:
                 session = await asyncio.wait_for(cm.__aenter__(), timeout=12.0)
-                
                 if formatted_history:
-                    history_to_send = formatted_history[-10:]
-                    logger.info(f"[HISTORY] Отправка контекста из {len(history_to_send)} сообщений.")
-                    try:
-                        await session.send_client_content(turns=history_to_send, turn_complete=True)
-                    except Exception as hex:
-                        logger.warning(f"[HISTORY WARN] Ошибка отправки истории в Live Realtime API: {hex}")
+                    try: await session.send_client_content(turns=formatted_history[-10:], turn_complete=True)
+                    except: pass
                 
                 async def send_input_task():
                     nonlocal session_audio_cache, last_video_frame, has_reached_stream_end
                     has_sent_activity_start = False
-
                     try:
-                        if prompt_text:
-                            await session.send_realtime_input(text=prompt_text)
-
+                        if prompt_text: await session.send_realtime_input(text=prompt_text)
                         if session_audio_cache:
                             await session.send_realtime_input(activity_start=types.ActivityStart())
                             has_sent_activity_start = True
                             await session.send_realtime_input(audio=types.Blob(data=bytes(session_audio_cache), mime_type="audio/pcm;rate=16000"))
-
                         if last_video_frame:
                             await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
 
@@ -502,21 +353,16 @@ class AIService:
                                         if has_sent_activity_start:
                                             await session.send_realtime_input(activity_end=types.ActivityEnd())
                                         break
-                                        
                                     if item["type"] == "audio" and len(item["data"]) > 0:
                                         chunk = item["data"]
                                         session_audio_cache.extend(chunk)
-
                                         if not has_sent_activity_start:
                                             await session.send_realtime_input(activity_start=types.ActivityStart())
                                             has_sent_activity_start = True
-
                                         await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="audio/pcm;rate=16000"))
-                                        
                                     elif item["type"] == "video" and len(item["data"]) > 0:
                                         last_video_frame = item["data"]
                                         await session.send_realtime_input(video=types.Blob(data=last_video_frame, mime_type="image/jpeg"))
-                                        
                                 except asyncio.TimeoutError:
                                     if has_sent_activity_start:
                                         await session.send_realtime_input(activity_end=types.ActivityEnd())
@@ -525,88 +371,54 @@ class AIService:
                         logger.error(f"[API STREAM ERROR] {e}")
 
                 sender_task = asyncio.create_task(send_input_task())
-                
-                # ДОБАВЛЕНО: Флаг для ожидания голосового ответа
-                is_tool_call_turn = False
-
                 receive_iterator = session.receive().__aiter__()
+
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
-                    
-                    # 1. ОБРАБОТКА ВЫЗОВА ФУНКЦИЙ
                     if response.tool_call:
                         extracted_commands = []
                         function_responses = []
-                        logger.info(f"[API TOOL] ⚡ Вызов инструментов: {len(response.tool_call.function_calls)} шт.")
-                        
                         for fc in response.tool_call.function_calls:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
-                                
-                            # Возвращаем строгий формат 3.8 Live
                             function_responses.append(types.FunctionResponse(
-                                name=fc.name, 
-                                id=fc.id, 
-                                response={"status": "ok", "retryable": False, "message": "Success"}
+                                name=fc.name, id=fc.id, response={"status": "ok", "retryable": False, "message": "Success"}
                             ))
-                        
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
-                        
                         await session.send_tool_response(function_responses=function_responses)
-                        logger.info(f"[API TOOL] ✅ Ответ отправлен.")
                         
-                    # 2. ОБРАБОТКА ТЕКСТА, АУДИО И ЗАВЕРШЕНИЯ ХОДА
                     sc = response.server_content
                     if sc:
                         if sc.input_transcription:
                             has_yielded_data = True
                             yield {"type": "user_text", "text": sc.input_transcription.text}
-                        
                         if sc.output_transcription:
                             has_yielded_data = True
                             yield {"type": "bot_text", "text": sc.output_transcription.text}
-                            
                         if sc.model_turn:
                             for part in sc.model_turn.parts:
                                 if part.inline_data:
                                     has_yielded_data = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                                    
-                        # Когда модель говорит, что закончила ход — мы ЧЕСТНО выходим из цикла!
-                        if sc.turn_complete:
-                            logger.info("[API] Модель завершила реплику (turn_complete).")
-                            break
-                        
-            except (asyncio.TimeoutError, TimeoutError):
-                if has_yielded_data: return 
-                logger.warning("[API] Таймаут получения данных от Gemini Live (receive)")
-            except StopAsyncIteration: pass
+                        if sc.turn_complete: break
+            except: pass
             finally:
-                if sender_task:
-                    sender_task.cancel()
-                    try: await sender_task
-                    except asyncio.CancelledError: pass
-                    except Exception: pass
+                if sender_task: sender_task.cancel()
                 if session:
                     try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                     except: pass
-            
-            return 
-
+            return
         except Exception as e:
-            logger.error(f"[API ERROR] Ошибка Live API: {e}")
             if has_yielded_data: return
             raise Exception("AI Live Service Unavailable")
 
-
     # ==============================================================================
-    # 3. ТЕКСТОВОЙ ОРКЕСТРАТОР (БЫСТРЫЙ И ТЯЖЕЛЫЙ МОЗГ)
+    # 3. ТЕКСТОВЫЙ ОРКЕСТРАТОР (Fast Brain)
     # ==============================================================================
     async def _chat_send_with_retry(self, model_id, config, history, input_data):
-        """Мгновенный перебор ключей без сна и задержек при 429."""
         total_keys = len(self.api_keys)
         attempts = 0
         last_err = ""
@@ -619,33 +431,13 @@ class AIService:
                 return chat, response
             except Exception as e:
                 last_err = str(e)
-                
-                # МГНОВЕННО МЕНЯЕМ КЛЮЧ БЕЗ ПАУЗ (0 СЕКУНД ОЖИДАНИЯ)
-                if "429" in last_err or "RESOURCE_EXHAUSTED" in last_err:
-                    logger.warning(f"[Key {self.current_key_index}] Квота исчерпана (429). Мгновенно переключаем ключ...")
-                else:
-                    logger.warning(f"[Key {self.current_key_index}] Ошибка Brain Chat: {last_err}")
-                
+                logger.warning(f"[Key {self.current_key_index}] Ошибка Brain Chat: {last_err[:120]}")
                 self._rotate_key()
                 attempts += 1
-                # Никаких sleep() — сразу бомбим с нового ключа!
                 
-        raise Exception(f"Brain Chat недоступен после перебора всех {total_keys} ключей. Ошибка: {last_err}")
+        raise Exception(f"Brain Chat недоступен после перебора {total_keys} ключей. Ошибка: {last_err}")
 
     async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash-lite"):
-        """
-        Умный агент, который работает в цикле (Stateful ReAct).
-        device_bridge_callback - асинхронная функция из handlers_cmds.py, которая ждет выполнения на клиенте.
-        """
-        logger.info(f"[BRAIN INIT] Запуск оркестратора на базе {model_id}...")
-
-        safety_settings = [
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        ]
-
         device_control_tool = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -661,7 +453,7 @@ class AIService:
                                     type=types.Type.OBJECT,
                                     properties={
                                         "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение (параметр) команды")
+                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение команды")
                                     },
                                     required=["action_type", "action_value"]
                                 )
@@ -676,22 +468,16 @@ class AIService:
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
             tools=[device_control_tool],
-            safety_settings=safety_settings,
             temperature=0.2
         )
 
-        history = []
-        if formatted_history:
-            for msg in formatted_history:
-                history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
-
+        history = [types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]) for msg in (formatted_history or [])]
         current_input = prompt_text
         max_turns = 10 
         current_turn = 0
 
         while current_turn < max_turns:
             current_turn += 1
-            
             chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
             history = list(chat.get_history())
 
@@ -700,8 +486,7 @@ class AIService:
 
             if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
-                    if part.text:
-                        text_result += part.text + " "
+                    if part.text: text_result += part.text + " "
                     if part.function_call:
                         fc = part.function_call
                         args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
@@ -713,25 +498,9 @@ class AIService:
                             })
 
             if commands_to_execute:
-                logger.info(f"[BRAIN TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
-                
-                # --- ДОБАВЬ ВОТ ЭТИ СТРОКИ СЮДА ---
-                for cmd in commands_to_execute:
-                    logger.info(f"   🛠 [FAST BRAIN CALL]: {cmd['name']} -> {cmd['args']}")
-                # ----------------------------------
-
-                # Замираем и ждем, пока устройство выполнит команду и вернет ответ
                 tool_results = await device_bridge_callback(commands_to_execute)
-                
-                function_responses = [] # <--- ВЕРНИ ЭТУ СТРОЧКУ!
-                
-                # --- И ВОТ ЭТИ СТРОКИ ДЛЯ ОТВЕТА ---
+                function_responses = []
                 for res in tool_results:
-                    # Урезаем ответ, если он слишком длинный
-                    resp_str = str(res['response'])
-                    if len(resp_str) > 300: resp_str = resp_str[:300] + "... [ОБРЕЗАНО]"
-                    logger.info(f"   📥 [FAST BRAIN RESP]: {resp_str}")
-                    
                     function_responses.append(
                         types.Part.from_function_response(
                             name=res["name"],
@@ -740,172 +509,12 @@ class AIService:
                     )
                 current_input = function_responses
             else:
-                final_answer = text_result.strip()
-                logger.info(f"[BRAIN DONE] Цикл завершен. Ответ: {final_answer}")
-                return final_answer
+                return text_result.strip()
                 
-        logger.warning(f"[BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
-        return text_result.strip()
-    # ==============================================================================
-    # 4. ТЯЖЕЛЫЙ МОЗГ (НА БАЗЕ СВЕРХБЫСТРОГО 3.5 FLASH)
-    # ==============================================================================
-    async def execute_heavy_agent(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.8-flash"):
-        logger.info(f"[HEAVY BRAIN] Запуск тяжелого агента на базе {model_id}...")
-
-        safety_settings = [
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-            types.SafetySetting(category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=types.HarmBlockThreshold.BLOCK_NONE),
-        ]
-
-        device_control_tool = types.Tool(
-            function_declarations=[
-                types.FunctionDeclaration(
-                    name="send_device_commands",
-                    description="Отправляет команды на устройства пользователя.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства"),
-                            "actions": types.Schema(
-                                type=types.Type.ARRAY,
-                                items=types.Schema(
-                                    type=types.Type.OBJECT,
-                                    properties={
-                                        "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение (параметр) команды")
-                                    },
-                                    required=["action_type", "action_value"]
-                                )
-                            )
-                        },
-                        required=["target_device", "actions"]
-                    )
-                )
-            ]
-        )
-
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=[device_control_tool],
-            safety_settings=safety_settings,
-            temperature=0.0 
-        )
-
-        history = []
-        if formatted_history:
-            for msg in formatted_history:
-                history.append(types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]))
-
-        current_input = [types.Part.from_text(text=prompt_text)]
-        max_turns = 10 
-        current_turn = 0
-
-        while current_turn < max_turns:
-            current_turn += 1
-            
-            chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
-            history = list(chat.get_history())
-
-            text_result = ""
-            commands_to_execute = []
-            task_is_completed = False
-
-            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if part.text:
-                        text_result += part.text + " "
-                    if part.function_call:
-                        fc = part.function_call
-                        args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                        
-                        if isinstance(args_dict, dict) and "actions" in args_dict:
-                            for act in args_dict.get("actions", []):
-                                if act.get("action_type") == "task_completed":
-                                    task_is_completed = True
-                                    # ВОТ ТОТ САМЫЙ ФИКС, КОТОРЫЙ ПЕРЕДАЕТ ТЕКСТ ОРКЕСТРАТОРУ!
-                                    if act.get("action_value"):
-                                        text_result = str(act.get("action_value"))
-                            
-                            commands_to_execute.append({
-                                "name": fc.name,
-                                "id": getattr(fc, "id", ""),
-                                "args": args_dict
-                            })
-
-            if commands_to_execute:
-                logger.info(f"[HEAVY TURN {current_turn}] Мозг запросил инструменты: {len(commands_to_execute)} шт.")
-                for cmd in commands_to_execute:
-                    logger.info(f"   🛠 [HEAVY CALL]: {cmd['name']} -> {cmd['args']}")
-                
-                tool_results = await device_bridge_callback(commands_to_execute)
-                
-                current_input = []
-                for res in tool_results:
-                    logger.info(f"   📥 [HEAVY RESP]: Отдаем мозгу результат -> {res['response']}")
-                    current_input.append(
-                        types.Part.from_function_response(
-                            name=res["name"],
-                            response=res["response"]
-                        )
-                    )
-                    
-                    if res.get("attached_image_base64"):
-                        img_b64 = res["attached_image_base64"]
-                        logger.info(f"[HEAVY TURN] Прикрепляю скриншот к ответу для ИИ ({len(img_b64)} байт).")
-                        try:
-                            img_bytes = base64.b64decode(img_b64)
-                            res_str = res.get("attached_resolution", "неизвестно")
-                            current_input.append(types.Part.from_text(text=f"[СИСТЕМА]: Скриншот успешно получен. Разрешение монитора: {res_str}. Выполни задачу пользователя."))                      
-                            current_input.append(types.Part(inline_data=types.Blob(mime_type="image/jpeg", data=img_bytes)))
-                        except Exception as decode_err:
-                            logger.error(f"❌ Ошибка декодирования скриншота: {decode_err}")
-                if task_is_completed:
-                    logger.info(f"[HEAVY DONE] Визуальная задача выполнена! Ответ: {text_result.strip()}")
-                    return text_result.strip()
-
-            else:
-                final_answer = text_result.strip()
-                logger.info(f"[HEAVY DONE] Цикл завершен. Ответ: {final_answer}")
-                return final_answer
-                
-        logger.warning(f"[HEAVY BRAIN] Превышен лимит шагов ({max_turns}). Принудительное завершение.")
         return text_result.strip()
 
     # ==============================================================================
-    # 5. ЛОКАЛЬНЫЙ КОНТЕКСТНЫЙ КЭШ (ОБХОД ПЛАТНОГО API GOOGLE)
-    # ==============================================================================
-    
-    # Глобальный словарь для хранения баз данных в оперативке сервера
-    LOCAL_LAW_CACHE = {}
-
-    def create_context_cache(self, database_text: str, model_id: str = "gemini-3.5-flash-lite"):
-        import uuid
-        from datetime import datetime, timedelta
-        
-        # Генерируем фейковый ID, который проходит проверки роутера
-        cache_id = f"cachedContents/local-{uuid.uuid4().hex[:12]}"
-        
-        # Сохраняем базу в оперативную память сервера на 24 часа
-        self.LOCAL_LAW_CACHE[cache_id] = {
-            "text": database_text,
-            "expires": datetime.now() + timedelta(days=1)
-        }
-        
-        # Чистим старый мусор, чтобы оперативка не забивалась
-        expired = [k for k, v in self.LOCAL_LAW_CACHE.items() if v["expires"] < datetime.now()]
-        for k in expired:
-            self.LOCAL_LAW_CACHE.pop(k, None)
-            
-        expires_at = self.LOCAL_LAW_CACHE[cache_id]["expires"].isoformat() + "Z"
-        
-        logger.info(f"[Local Cache] Создан локальный кэш {cache_id} размером {len(database_text)} символов.")
-        return {"cache_id": cache_id, "expires_at": expires_at}
-
-
-    # ==============================================================================
-    # 6. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (Unified Sandbox + On-Demand Sync)
+    # 4. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY
     # ==============================================================================
     async def run_antigravity_agent(
         self, 
@@ -969,7 +578,6 @@ class AIService:
                 new_interaction_id = interaction.id
                 env_id = interaction.environment_id
 
-                # Запоминаем, на каком ключе живет эта сессия
                 self.antigravity_sessions[new_interaction_id] = assigned_key
                 if previous_interaction_id:
                     self.antigravity_sessions[previous_interaction_id] = assigned_key
@@ -977,28 +585,22 @@ class AIService:
                 if status_callback:
                     await status_callback({"status": "started", "interaction_id": new_interaction_id})
 
-                last_seen_step = ""
                 while True:
                     await asyncio.sleep(3)
                     interaction = client.interactions.get(id=new_interaction_id)
                     
-                    # Пытаемся достать последнее действие, запуск скрипта или мысль агента
                     current_step_desc = interaction.status
                     try:
-                        # Если Google вернул события выполнения (events / steps)
                         if hasattr(interaction, 'events') and interaction.events:
                             last_event = interaction.events[-1]
-                            # Ищем текст мысли или команду инструмента
                             if hasattr(last_event, 'content') and last_event.content:
                                 current_step_desc = str(last_event.content)[:90]
                             elif hasattr(last_event, 'call') and last_event.call:
                                 current_step_desc = f"Запуск: {last_event.call.name}"
                         elif hasattr(interaction, 'steps') and interaction.steps:
                             current_step_desc = str(interaction.steps[-1])[:90]
-                    except Exception:
-                        pass
+                    except Exception: pass
 
-                    # Шлем статус клиенту
                     if status_callback:
                         await status_callback({"status": current_step_desc})
 
@@ -1009,9 +611,6 @@ class AIService:
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
                 output_text = interaction.output_text or ""
-                downloaded_files = {}
-
-                # Умный поиск и авто-сохранение файлов на диск сервера
                 import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
                 file_urls = {}
@@ -1019,24 +618,20 @@ class AIService:
                 save_dir = os.path.join('/opt/friday/storage/uploads', chat_uid or 'common')
                 os.makedirs(save_dir, exist_ok=True)
 
-                # 1. Смотрим, какие файлы РЕАЛЬНО существуют в контейнере Google
                 real_files_in_env = []
                 try:
                     list_resp = client.environments.files.list(environment=env_id, path="")
                     real_files_in_env = [f.name for f in list_resp.files if f.name not in ('.', '..', 'usr')]
                     logger.info(f"[Antigravity Env Files] Реальные файлы в контейнере: {real_files_in_env}")
                 except Exception as le:
-                    logger.warning(f"[Antigravity Env Files] Ошибка получения списка файлов: {le}")
+                    logger.warning(f"[Antigravity Env Files] Ошибка: {le}")
 
-                # 2. Выкачиваем файлы
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
                     fname = os.path.basename(clean_path)
                     download_success = False
 
-                    # Пробуем варианты путей: как указал агент, через workspace/ или по совпадению имени
                     candidate_paths = [clean_path, f"workspace/{clean_path}"]
-                    # Если агент создал файл внутри какой-то папки в контейнере
                     for rf in real_files_in_env:
                         if rf.endswith(fname) and rf not in candidate_paths:
                             candidate_paths.append(rf)
@@ -1053,14 +648,13 @@ class AIService:
 
                             file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(fname)}"
                             file_urls[clean_path] = file_url
-                            logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) выкачан по пути '{cp}' -> {file_url}")
+                            logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) выкачан -> {file_url}")
                             download_success = True
                             break
-                        except Exception:
-                            continue
+                        except Exception: continue
 
                     if not download_success:
-                        logger.warning(f"[Antigravity Sync] Файл {clean_path} НЕ найден в контейнере. Реальные файлы были: {real_files_in_env}")
+                        logger.warning(f"[Antigravity Sync] Файл {clean_path} НЕ найден в контейнере: {real_files_in_env}")
 
                 return {
                     "text": output_text,
@@ -1069,21 +663,20 @@ class AIService:
                     "environment_id": env_id,
                     "interaction_id": new_interaction_id
                 }
+
             except Exception as e:
                 err_str = str(e)
                 logger.warning(f"[Antigravity Key #{assigned_key}] Ошибка: {err_str}")
 
-                # Если поймали лимит токенов в минуту (429):
                 if "429" in err_str or "too_many_requests" in err_str:
                     wait_seconds = 60
-                    # Вытаскиваем точное время из сообщения Google ("Please retry in 58s")
                     import re
                     m = re.search(r"retry in ([\d\.]+)s", err_str)
                     if m:
                         try: wait_seconds = int(float(m.group(1))) + 2
                         except: pass
 
-                    logger.info(f"[Antigravity 429] Лимит TPM ключа #{assigned_key}. Ждем {wait_seconds}с (ключ не меняем, чтобы не словить 404)...")
+                    logger.info(f"[Antigravity 429] Лимит TPM ключа #{assigned_key}. Ждем {wait_seconds}с...")
                     if status_callback:
                         await status_callback({"status": f"Лимит TPM превышен, пауза {wait_seconds}с..."})
 
@@ -1091,60 +684,13 @@ class AIService:
                     retry_count += 1
                     continue
                 else:
-                    # Если это был старт нового диалога и ошибка не 429 — пробуем следующий ключ
                     if is_new_session:
                         self._rotate_key()
                         assigned_key = self.current_key_index
                         retry_count += 1
                         continue
-                    else:
-                        raise e
+                    else: raise e
 
         raise Exception(f"Antigravity: исчерпаны попытки на ключе #{assigned_key}")
-    
-    def generate_from_cache(self, prompt: str, cache_id: str, model_id: str = "gemini-3.5-flash-lite"):
-        import json
-        
-        if cache_id not in self.LOCAL_LAW_CACHE:
-            raise Exception("Кэш устарел или не найден (возможно сервер перезагружался). Создайте новый.")
-            
-        database_text = self.LOCAL_LAW_CACHE[cache_id]["text"]
-        
-        # СКЛЕИВАЕМ: Системный промпт + Огромная база + Вопрос юзера
-        full_prompt = f"{GEMINI_SYSTEM_PROMPT}\n\n=== БАЗА ДАННЫХ ===\n{database_text}\n\n=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n{prompt}"
-        
-        if len(full_prompt) > MAX_PROMPT_LENGTH:
-            raise ValueError(f"Текст слишком большой! Максимум {MAX_PROMPT_LENGTH} символов.")
 
-        attempts = 0
-        last_err = ""
-        
-        while attempts < len(self.api_keys):
-            client = self._get_client()
-            try:
-                # Отправляем как ОБЫЧНЫЙ запрос! Никакого платного кэша.
-                response = client.models.generate_content(
-                    model=model_id.strip(),
-                    contents=full_prompt, 
-                    config=types.GenerateContentConfig(
-                        temperature=0,
-                        max_output_tokens=1200,
-                        response_mime_type="application/json",
-                    ),
-                )
-                return json.loads(response.text)
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"[Local Cache Generate] Ошибка на ключе {self.current_key_index}: {last_err}")
-                self._rotate_key()
-                attempts += 1
-                
-        raise Exception(f"Gemini is temporarily unavailable. Error: {last_err}")
-
-    def delete_context_cache(self, cache_id: str):
-        if cache_id in self.LOCAL_LAW_CACHE:
-            self.LOCAL_LAW_CACHE.pop(cache_id, None)
-            logger.info(f"[Local Cache] Удален локальный кэш {cache_id}")
-        return True
-        
 ai_instance = AIService()
