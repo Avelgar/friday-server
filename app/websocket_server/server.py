@@ -66,6 +66,9 @@ async def websocket_handler(websocket):
                 elif data.get("type") == "delete_chat":
                     from app.websocket_server.handlers_cmds import handle_antigravity_delete_chat
                     asyncio.create_task(handle_antigravity_delete_chat(websocket, data))
+                elif data.get("type") == "cancel_task":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_cancel_task
+                    asyncio.create_task(handle_antigravity_cancel_task(websocket, data))
                 # ------------------------
                 elif data.get("type") == "antigravity_task":
                     from app.websocket_server.handlers_cmds import handle_antigravity_task
