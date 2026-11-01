@@ -440,7 +440,7 @@ class AIService:
                 
         raise Exception(f"Brain Chat недоступен после перебора {total_keys} ключей. Ошибка: {last_err}")
 
-    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.5-flash-lite"):
+    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.8-flash"):
         device_control_tool = types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
