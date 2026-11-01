@@ -27,7 +27,6 @@ async def handle_account_sync(websocket, data):
         
         await cursor.execute("UPDATE devices SET user_id = %s WHERE mac = %s", (user_id, mac))
         
-        # Получаем ПОСЛЕДНИЙ диалог
         await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
         dialog = await cursor.fetchone()
         
@@ -53,6 +52,7 @@ async def handle_account_sync(websocket, data):
             "user_login": user_rec['login'] if user_rec else "User",
             "status": "success"
         })
+        logger.info(f"[AUTH] Аккаунт пользователя {user_rec['login'] if user_rec else user_id} привязан к устройству {mac}")
     except Exception as e:
         logger.error(f"[SYNC ERROR] Ошибка синхронизации: {e}", exc_info=True)
     finally:
@@ -86,7 +86,6 @@ async def handle_web_client_auth(websocket, data):
         mac_to_websocket[mac] = websocket; ws_to_mac[websocket] = mac
         await conn.commit()
         
-        # Для WEB мы возвращаем пустую историю при WS коннекте (Сайт сам грузит историю через REST API)
         await async_send(websocket, {"status": "success", "message": "Данные успешно обработаны!", "history": []})
     except Exception as e:
         logger.error(f"[AUTH ERROR] Ошибка WEB авторизации: {e}", exc_info=True)
@@ -98,35 +97,60 @@ async def handle_web_client_auth(websocket, data):
 async def handle_device_registration(websocket, data):
     conn = None; cursor = None
     try:
-        mac = data.get("MAC"); device_name = data.get("DeviceName"); password = data.get("Password")
+        mac = data.get("MAC")
+        device_name = data.get("DeviceName")
+        password = data.get("Password")
+
+        logger.info(f"[AUTH] Получен запрос регистрации: MAC={mac}, DeviceName={device_name}")
+
+        if not mac or not device_name or not password:
+            logger.warning("[AUTH] Запрос отклонен: не все поля заполнены.")
+            await async_send(websocket, {"status": "error", "message": "Не все поля заполнены"})
+            return
+
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
         
+        # 1. Проверяем, не занято ли это имя ДРУГИМ устройством
+        await cursor.execute("SELECT id FROM devices WHERE device_name = %s AND mac != %s", (device_name, mac))
+        if await cursor.fetchone():
+            logger.warning(f"[AUTH] Имя '{device_name}' уже занято другим устройством.")
+            await async_send(websocket, {"status": "error", "message": "Это имя устройства уже занято. Пожалуйста, выберите другое."})
+            return
+
+        # Хэшируем новый пароль
+        hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+        # 2. Проверяем наличие этого MAC в БД
         await cursor.execute("SELECT * FROM devices WHERE mac = %s", (mac,))
         device = await cursor.fetchone()
         response = {"status": "success", "message": "Данные успешно обработаны!"}
-        
+
         if device:
-            if not bcrypt.checkpw(password.encode('utf-8'), device['password'].encode('utf-8')):
-                await async_send(websocket, {"status": "error", "message": "Неверный пароль устройства. В доступе отказано."})
-                return
-            await cursor.execute("UPDATE devices SET device_name = %s, is_online = TRUE WHERE id = %s", (device_name, device['id']))
+            # === ПЕРЕЗАПИСЫВАЕМ ИМЯ И ПАРОЛЬ ПО ТВОЕМУ ТРЕБОВАНИЮ ===
+            logger.info(f"[AUTH] Устройство с MAC={mac} найдено. Перезаписываем имя на '{device_name}' и обновляем пароль.")
+            await cursor.execute(
+                "UPDATE devices SET device_name = %s, password = %s, is_online = TRUE WHERE id = %s",
+                (device_name, hashed_pw, device['id'])
+            )
             device_id = device['id']
             if device.get('user_id'):
                 await cursor.execute("SELECT login FROM users WHERE id = %s", (device['user_id'],))
                 user_rec = await cursor.fetchone()
                 if user_rec: response['user_login'] = user_rec['login']
         else:
-            await cursor.execute("SELECT id FROM devices WHERE device_name = %s", (device_name,))
-            if await cursor.fetchone():
-                await async_send(websocket, {"status": "error", "message": "Это имя устройства уже занято. Пожалуйста, выберите другое."})
-                return
-            hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-            await cursor.execute("INSERT INTO devices (mac, device_name, password, is_online) VALUES (%s, %s, %s, TRUE)", (mac, device_name, hashed_pw))
+            # Создаем новое устройство
+            logger.info(f"[AUTH] Создаем новое устройство: MAC={mac}, Name={device_name}")
+            await cursor.execute(
+                "INSERT INTO devices (mac, device_name, password, is_online) VALUES (%s, %s, %s, TRUE)",
+                (mac, device_name, hashed_pw)
+            )
             device_id = cursor.lastrowid
             
-        mac_to_websocket[mac] = websocket; ws_to_mac[websocket] = mac
+        mac_to_websocket[mac] = websocket
+        ws_to_mac[websocket] = mac
         
+        # 3. Подгружаем историю диалогов устройства
         history = []
         user_id = device.get('user_id') if device else None
         
@@ -139,14 +163,15 @@ async def handle_device_registration(websocket, data):
                     FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
                     WHERE m.dialog_id = %s ORDER BY m.created_at ASC
                 """, (dialog['id'],))
+                for msg in await cursor.fetchall():
+                    msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
+                    history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
         else:
             await cursor.execute("""
                 SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
                 FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
                 WHERE m.recipient_device_id = %s ORDER BY m.created_at ASC
             """, (device_id,))
-            
-        if cursor.rowcount > 0:
             for msg in await cursor.fetchall():
                 msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
                 history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
@@ -154,6 +179,8 @@ async def handle_device_registration(websocket, data):
         response["history"] = history
         await conn.commit()
         await async_send(websocket, response)
+        logger.info(f"[AUTH] ✅ Устройство {mac} успешно зарегистрировано и авторизовано.")
+
     except Exception as e:
         logger.error(f"[AUTH ERROR] Ошибка регистрации устройства: {e}", exc_info=True)
         await async_send(websocket, {"status": "error", "message": str(e)})
