@@ -647,11 +647,12 @@ class AIService:
                             content = file_data.read() if hasattr(file_data, "read") else file_data
                             if hasattr(content, "content"): content = content.content
 
-                            local_server_path = os.path.join(save_dir, fname)
+                            local_server_path = os.path.join(save_dir, clean_path)
+                            os.makedirs(os.path.dirname(local_server_path), exist_ok=True)
                             with open(local_server_path, 'wb') as sf:
                                 sf.write(content)
 
-                            file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(fname)}"
+                            file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(clean_path)}"
                             file_urls[clean_path] = file_url
                             logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) выкачан -> {file_url}")
                             download_success = True
