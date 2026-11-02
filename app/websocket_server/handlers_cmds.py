@@ -264,6 +264,9 @@ async def handle_command(websocket, data):
                         actions = cmd.get('actions', [])
                         if not actions: continue
 
+                        acts_summary = ", ".join([f"{a.get('action_type')}: '{a.get('action_value')}'" for a in actions])
+                        logger.info(f"🛠️ [TOOL CALL] ИИ вызвал: [{acts_summary}] -> цель: '{target_device_name or sender_name}'")
+
                         # Находим сокет целевого устройства в оперативной памяти
                         target_ws = get_target_websocket(user_id, target_device_name, fallback_ws=websocket)
 
