@@ -294,6 +294,10 @@ class AIService:
             raise Exception("AI Live Service Unavailable")
 
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, media_queue, formatted_history=None, voice_name="Aoede", assistant_name="Пятница"):
+        voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
+        valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
+        mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
+        
         system_instruction += "\n\nCRITICAL RULE: You MUST speak a short voice confirmation (like 'Секунду', 'Готово') BEFORE calling any tools. Never call a tool silently!"
         session_audio_cache = bytearray()
         last_video_frame = None
