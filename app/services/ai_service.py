@@ -30,10 +30,9 @@ def send_device_commands(target_device: str, actions: list[DeviceAction]):
     pass
 
 class GeminiKeyPool:
-    """Менеджер пула API-ключей Gemini с отслеживанием лимитов и ротацией."""
     def __init__(self, keys: list[str]):
         self.keys = keys or []
-        self.exhausted_keys = {}  # key_index -> unban_timestamp
+        self.exhausted_keys = {}
 
     def mark_exhausted(self, key_index: int, duration_seconds: float = 3600 * 12):
         now = time.time()
@@ -41,10 +40,8 @@ class GeminiKeyPool:
         logger.warning(f"🚫 [Key Pool] Ключ #{key_index} помечен как ИСЧЕРПАННЫЙ на {duration_seconds/3600:.1f}ч.")
 
     def is_usable(self, key_index: int) -> bool:
-        if not self.keys:
-            return True
-        if key_index not in self.exhausted_keys:
-            return True
+        if not self.keys: return True
+        if key_index not in self.exhausted_keys: return True
         if time.time() > self.exhausted_keys[key_index]:
             del self.exhausted_keys[key_index]
             return True
@@ -52,28 +49,19 @@ class GeminiKeyPool:
 
     def get_available_key(self, preferred_index: int = None) -> int:
         total = len(self.keys)
-        if total <= 1:
-            return 0
-        
-        # Если переданный ключ валиден и не в бане — остаемся на нем
+        if total <= 1: return 0
         if preferred_index is not None and 0 <= preferred_index < total:
-            if self.is_usable(preferred_index):
-                return preferred_index
+            if self.is_usable(preferred_index): return preferred_index
 
-        # Ищем следующий свободный ключ
         start = (preferred_index + 1) % total if preferred_index is not None else 0
         for i in range(total):
             idx = (start + i) % total
-            if self.is_usable(idx):
-                return idx
+            if self.is_usable(idx): return idx
 
-        # Если все ключи временно заблокированы — разблокируем тот, у кого бан кончится быстрее
         if self.exhausted_keys:
             earliest = min(self.exhausted_keys.keys(), key=lambda k: self.exhausted_keys[k])
-            logger.warning(f"⚠️ [Key Pool] Все ключи исчерпаны! Принудительно разблокируем ключ #{earliest}")
             del self.exhausted_keys[earliest]
             return earliest
-
         return 0
 
 class AIService:
@@ -121,10 +109,8 @@ class AIService:
             receive_iterator = session.receive().__aiter__()
             while True:
                 response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
-                if response.server_content and response.data: 
-                    audio_data.extend(response.data)
-                if response.server_content and response.server_content.turn_complete:
-                    break
+                if response.server_content and response.data: audio_data.extend(response.data)
+                if response.server_content and response.server_content.turn_complete: break
         except: pass
         finally:
             if session:
@@ -153,10 +139,8 @@ class AIService:
             receive_iterator = session.receive().__aiter__()
             while True:
                 response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=20.0)
-                if response.server_content and response.data: 
-                    yield response.data
-                if response.server_content and response.server_content.turn_complete:
-                    break
+                if response.server_content and response.data: yield response.data
+                if response.server_content and response.server_content.turn_complete: break
         except Exception as e:
             logger.error(f"[TTS STREAM ERROR]: {e}")
         finally:
@@ -165,7 +149,7 @@ class AIService:
                 except: pass
 
     # ==============================================================================
-    # 2. ФАСАД (Gemini 3.1 Flash Live)
+    # 2. ФАСАД (Gemini 3.1 Flash Live) — ЕДИНЫЙ ГОЛОСОВОЙ ИНТЕРФЕЙС
     # ==============================================================================
     async def generate_audio_stream(self, prompt_text, system_instruction, allowed_actions, audio_bytes=None, image_bytes=None, formatted_history=None, voice_name="Aoede", assistant_name="Пятница", media_queue=None):
         voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
@@ -179,18 +163,18 @@ class AIService:
                 function_declarations=[
                     types.FunctionDeclaration(
                         name="send_device_commands",
-                        description="Отправляет команды на устройства пользователя.",
+                        description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот).",
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
                             properties={
-                                "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
+                                "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства из списка онлайн-устройств"),
                                 "actions": types.Schema(
                                     type=types.Type.ARRAY,
                                     items=types.Schema(
                                         type=types.Type.OBJECT,
                                         properties={
                                             "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение")
+                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение/параметр действия")
                                         },
                                         required=["action_type", "action_value"]
                                     )
@@ -232,10 +216,8 @@ class AIService:
                 
                 async def send_input_task():
                     try:
-                        if prompt_text:
-                            await session.send_realtime_input(text=prompt_text)
-                        if image_bytes:
-                            await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
+                        if prompt_text: await session.send_realtime_input(text=prompt_text)
+                        if image_bytes: await session.send_realtime_input(video=types.Blob(data=image_bytes, mime_type="image/jpeg"))
 
                         if media_queue:
                             while True:
@@ -293,9 +275,7 @@ class AIService:
                                 if part.inline_data:
                                     has_yielded_data = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                        if sc.turn_complete:
-                            break
-                        
+                        if sc.turn_complete: break
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
             except StopAsyncIteration: pass
@@ -314,9 +294,6 @@ class AIService:
             raise Exception("AI Live Service Unavailable")
 
     async def generate_audio_stream_realtime(self, prompt_text, system_instruction, allowed_actions, media_queue, formatted_history=None, voice_name="Aoede", assistant_name="Пятница"):
-        voice_clean = str(voice_name).strip().capitalize() if voice_name else "Aoede"
-        valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
-        mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         system_instruction += "\n\nCRITICAL RULE: You MUST speak a short voice confirmation (like 'Секунду', 'Готово') BEFORE calling any tools. Never call a tool silently!"
         session_audio_cache = bytearray()
         last_video_frame = None
@@ -329,18 +306,18 @@ class AIService:
                 function_declarations=[
                     types.FunctionDeclaration(
                         name="send_device_commands",
-                        description="Отправляет команды на устройства пользователя.",
+                        description="Отправляет системные команды на целевые устройства пользователя.",
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
                             properties={
-                                "target_device": types.Schema(type=types.Type.STRING, description="Имя устройства"),
+                                "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства из списка онлайн-устройств"),
                                 "actions": types.Schema(
                                     type=types.Type.ARRAY,
                                     items=types.Schema(
                                         type=types.Type.OBJECT,
                                         properties={
                                             "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение")
+                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение/параметр действия")
                                         },
                                         required=["action_type", "action_value"]
                                     )
@@ -467,105 +444,7 @@ class AIService:
             raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 3. ТЕКСТОВЫЙ ОРКЕСТРАТОР (Fast Brain)
-    # ==============================================================================
-    async def _chat_send_with_retry(self, model_id, config, history, input_data):
-        total_keys = len(self.api_keys)
-        attempts = 0
-        last_err = ""
-        
-        while attempts < total_keys:
-            client = self._get_client()
-            chat = client.aio.chats.create(model=model_id, config=config, history=history)
-            try:
-                response = await chat.send_message(input_data)
-                return chat, response
-            except Exception as e:
-                last_err = str(e)
-                logger.warning(f"[Key {self.current_key_index}] Ошибка Brain Chat: {last_err[:120]}")
-                self._rotate_key()
-                attempts += 1
-                
-        raise Exception(f"Brain Chat недоступен после перебора {total_keys} ключей. Ошибка: {last_err}")
-
-    async def run_brain_orchestrator(self, prompt_text, system_instruction, allowed_actions, formatted_history, device_bridge_callback, model_id="gemini-3.8-flash"):
-        device_control_tool = types.Tool(
-            function_declarations=[
-                types.FunctionDeclaration(
-                    name="send_device_commands",
-                    description="Отправляет команды на устройства пользователя.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства"),
-                            "actions": types.Schema(
-                                type=types.Type.ARRAY,
-                                items=types.Schema(
-                                    type=types.Type.OBJECT,
-                                    properties={
-                                        "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                        "action_value": types.Schema(type=types.Type.STRING, description="Значение команды")
-                                    },
-                                    required=["action_type", "action_value"]
-                                )
-                            )
-                        },
-                        required=["target_device", "actions"]
-                    )
-                )
-            ]
-        )
-
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            tools=[device_control_tool],
-            temperature=0.2
-        )
-
-        history = [types.Content(role=msg["role"], parts=[types.Part.from_text(text=msg["parts"][0]["text"])]) for msg in (formatted_history or [])]
-        current_input = prompt_text
-        max_turns = 10 
-        current_turn = 0
-
-        while current_turn < max_turns:
-            current_turn += 1
-            chat, response = await self._chat_send_with_retry(model_id, config, history, current_input)
-            history = list(chat.get_history())
-
-            text_result = ""
-            commands_to_execute = []
-
-            if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if part.text: text_result += part.text + " "
-                    if part.function_call:
-                        fc = part.function_call
-                        args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
-                        if isinstance(args_dict, dict) and "actions" in args_dict:
-                            commands_to_execute.append({
-                                "name": fc.name,
-                                "id": getattr(fc, "id", ""),
-                                "args": args_dict
-                            })
-
-            if commands_to_execute:
-                tool_results = await device_bridge_callback(commands_to_execute)
-                function_responses = []
-                for res in tool_results:
-                    function_responses.append(
-                        types.Part.from_function_response(
-                            name=res["name"],
-                            response=res["response"]
-                        )
-                    )
-                current_input = function_responses
-            else:
-                return text_result.strip()
-                
-        return text_result.strip()
-
-    # ==============================================================================
-    # 4. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY (С ПУЛОМ КЛЮЧЕЙ И SESSION HANDOFF)
+    # 3. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY
     # ==============================================================================
     async def run_antigravity_agent(
         self, 
@@ -591,17 +470,7 @@ class AIService:
                     assigned_key = self.key_pool.get_available_key(assigned_key)
         else:
             if not self.key_pool.is_usable(assigned_key):
-                logger.info(f"[Antigravity Engine] Ключ #{assigned_key} исчерпан. Ротируем на свободный.")
                 assigned_key = self.key_pool.get_available_key(assigned_key)
-
-        # ТЕСТ ПЕРЕКЛЮЧЕНИЯ КЛЮЧЕЙ
-        if "[TEST_KEY_ROTATION]" in prompt_text:
-            old_k = assigned_key
-            self.key_pool.mark_exhausted(old_k, duration_seconds=3600 * 12)
-            assigned_key = self.key_pool.get_available_key(old_k)
-            logger.warning(f"🧪 [TEST KEY ROTATION] Тест: Ключ #{old_k} искусственно исчерпан! Эстафета передана ключу #{assigned_key}")
-            previous_interaction_id = None
-            environment_id = None
 
         logger.info(f"[Antigravity Engine] Запуск таски на ключе #{assigned_key} (new={is_new_session})")
 
@@ -637,14 +506,12 @@ class AIService:
 
                 current_input_prompt = prompt_text
 
-                # Если сессия продолжается
                 if previous_interaction_id and environment_id:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
                     kwargs["input"] = current_input_prompt
                     logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | prev_id={previous_interaction_id[:10]} | Input: '{current_input_prompt[:60]}'")
                 else:
-                    # Чистый запуск или Handoff после отмены
                     kwargs["system_instruction"] = agent_system_instruction
                     kwargs["environment"] = "remote"
 
@@ -767,15 +634,13 @@ class AIService:
                 err_lower = err_str.lower()
                 logger.warning(f"[Antigravity Key #{assigned_key}] Ошибка: {err_str}")
 
-                # 1. Если новый ключ не имеет прав на старое окружение другого аккаунта
                 if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and previous_interaction_id:
-                    logger.info(f"[Antigravity Handoff] Ключ #{assigned_key} не видит среду #{environment_id}. Делаем Handoff на чистую среду.")
+                    logger.info(f"[Antigravity Handoff] Ключ #{assigned_key} не видит среду #{environment_id}. Handoff на чистую среду.")
                     previous_interaction_id = None
                     environment_id = None
                     attempt += 1
                     continue
 
-                # 2. Ошибка квот и лимитов (429 / ResourceExhausted)
                 if "429" in err_str or "too_many_requests" in err_lower or "resource_exhausted" in err_lower:
                     is_daily = ("per day" in err_lower or "queries per day" in err_lower or "daily" in err_lower or "limit: 100" in err_lower)
                     
@@ -804,7 +669,6 @@ class AIService:
                     attempt += 1
                     continue
 
-                # Любая другая ошибка
                 attempt += 1
                 if attempt < max_attempts and total_keys > 1:
                     assigned_key = self.key_pool.get_available_key(assigned_key)

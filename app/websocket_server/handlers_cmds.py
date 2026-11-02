@@ -18,17 +18,18 @@ logger = logging.getLogger("WS_Server")
 
 HISTORY_LIMIT = 10 
 active_media_queues = {} 
-
 device_audio_locks = {}
-pending_device_responses = {}
 
 def get_device_audio_lock(mac: str) -> asyncio.Lock:
     if mac not in device_audio_locks:
         device_audio_locks[mac] = asyncio.Lock()
     return device_audio_locks[mac]
 
+# Полный список поддерживаемых команд для управления устройствами
 ACTION_DESCRIPTIONS = {
     "открытие ссылки": "строго полный URL адрес (например https://youtube.com)",
+    "открытие файла": "строго точное имя программы или путь (например 'steam', 'telegram', 'calc', 'pubg')",
+    "завершение процесса": "имя процесса (без .exe)",
     "напечатать текст": "любой текст для набора на клавиатуре",
     "нажать кнопку мыши": "строго одно из: 'лкм', 'пкм', 'скм'",
     "переместить мышь": "строго координаты x и y через запятую (например: 500, 300)",
@@ -41,40 +42,12 @@ ACTION_DESCRIPTIONS = {
     "check_network_devices": "любой текст (возвращает список доступных устройств)",
     "get_running_processes": "любой текст (возвращает список запущенных процессов)",
     "get_installed_programs": "любой текст (возвращает список программ)",
-    "открытие файла": "строго точный абсолютный путь к программе/файлу",
-    "завершение процесса": "имя процесса (без .exe)",
     "выключить микрофон": "любой текст (доступно только на веб-сайте)",
-    "голосовой ответ": "текст для озвучивания (Используется для финального ответа)",
-    "название диалога": "краткое название для текущего диалога (1-3 слова).",
-    "смена имени": "любой текст (новое имя для бота)",
-    "движение": "строго одно из: 'вперед', 'назад', 'влево', 'вправо'",
-    
-    # Роутинг задач
-    "delegate_to_brain": "строго подробное описание задачи. Вызывай НЕМЕДЛЕННО, если нужно выполнить системную или логическую команду.",
-    "delegate_to_robot_brain": "строго подробное описание задачи или название объекта. Вызывай для поиска объектов через камеру робота."
+    "название диалога": "краткое название для текущего диалога (1-3 слова)",
+    "движение": "строго одно из: 'вперед', 'назад', 'влево', 'вправо'"
 }
 
-BASE_PC = [
-    "открытие ссылки", "напечатать текст", "нажать кнопку мыши", "переместить мышь", 
-    "уведомление", "музыка", "смена голоса", "очистка истории", 
-    "изменение громкости", "изменение яркости", "check_network_devices", 
-    "get_running_processes", "get_installed_programs", "открытие файла", "завершение процесса", "голосовой ответ"
-]
-
-BASE_PHONE = [
-    "открытие ссылки", "изменение громкости", "изменение яркости", "музыка", 
-    "очистка истории", "check_network_devices", "get_running_processes", "get_installed_programs", "голосовой ответ"
-]
-
-BASE_WEB = ["смена голоса", "выключить микрофон", "очистка истории", "check_network_devices", "голосовой ответ"]
-BASE_PI = ["музыка", "очистка истории", "смена голоса", "движение", "check_network_devices", "голосовой ответ"]
-
-FACADE_PC = ["музыка", "открытие ссылки", "смена голоса", "очистка истории", "изменение громкости", "изменение яркости", "уведомление", "delegate_to_brain"]
-FACADE_PHONE = ["музыка", "открытие ссылки", "очистка истории", "изменение громкости", "изменение яркости", "delegate_to_brain"]
-FACADE_WEB = ["смена голоса", "выключить микрофон", "очистка истории", "delegate_to_brain"]
-FACADE_PI = ["музыка", "очистка истории", "смена голоса", "движение", "delegate_to_brain"]
-
-active_brain_tasks = {}
+ALL_ACTIONS = list(ACTION_DESCRIPTIONS.keys())
 
 def get_action_strings(action_keys):
     caps = []
@@ -82,7 +55,6 @@ def get_action_strings(action_keys):
         desc = ACTION_DESCRIPTIONS.get(k, "любой текст")
         caps.append(f"- {k} (принимает: {desc})")
     return "\n".join(caps), ", ".join(action_keys)
-
 
 async def handle_audio_chunk(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
@@ -102,24 +74,37 @@ async def handle_audio_end(websocket, data):
         active_media_queues[ui_msg_id].put_nowait(None)
         active_media_queues.pop(ui_msg_id, None)
 
+async def get_mac_by_name(cursor, device_name, fallback_mac):
+    if not device_name: return fallback_mac
+    clean_name = device_name.lower().strip()
+    
+    # 1. Точное совпадение
+    await cursor.execute("SELECT mac FROM devices WHERE LOWER(device_name) = %s", (clean_name,))
+    res = await cursor.fetchone()
+    if res: return res['mac']
+    
+    # 2. Нечеткое совпадение по онлайн-устройствам
+    await cursor.execute("SELECT mac, device_name FROM devices WHERE is_online = TRUE")
+    for d in await cursor.fetchall():
+        d_name = d['device_name'].lower()
+        if d_name in clean_name or clean_name in d_name:
+            return d['mac']
+        # Проверяем ключевые слова "комп", "пк", "телефон", "робот"
+        if ("комп" in clean_name or "пк" in clean_name) and ("комп" in d_name or "pc" in d_name):
+            return d['mac']
+        if "телефон" in clean_name and "телефон" in d_name:
+            return d['mac']
+            
+    return fallback_mac
+
 
 # =========================================================================
-# 1. ПЕРВИЧНЫЙ АГЕНТ (ФАСАД)
+# 1. ПЕРВИЧНЫЙ АГЕНТ (ФАСАД) С ПРЯМЫМ УПРАВЛЕНИЕМ УСТРОЙСТВАМИ
 # =========================================================================
 async def handle_command(websocket, data):
-    client_msg_id = str(data.get('user_msg_id', ''))
-    if client_msg_id and client_msg_id in pending_device_responses:
-        logger.info(f"[BRIDGE DEBUG] Пойман ответ от C#. msg_id={client_msg_id}. Ключи: {list(data.keys())}")
-        if "processes" in data or "programs" in data:
-            future = pending_device_responses[client_msg_id]
-            if not future.done(): 
-                future.set_result(data)
-            return
-
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None; dialog_id = None
     audio_chunks_count = 0; has_commands = False
     final_user_text_full = ""; final_bot_text_full = ""
-    pending_routes = []
 
     try:
         command = data.get('command', '').strip()
@@ -152,14 +137,16 @@ async def handle_command(websocket, data):
         sender_device = await cursor.fetchone()
         if not sender_device: raise Exception(f"Устройство отправителя не найдено (MAC: {mac})")
         
-        sender_id = sender_device['id']; sender_name = sender_device['device_name']; device_type = get_device_type(mac)
+        sender_id = sender_device['id']
+        sender_name = sender_device['device_name']
+        device_type = get_device_type(mac)
+        user_id = sender_device.get('user_id')
         db_user_text = command if command else ("[Аудиосообщение]" if (audio_bytes or is_streaming) else "🖼️ [Фото]")
         
         logger.info("\n" + "="*50)
-        logger.info(f"[ФАСАД] Инициатор: {sender_name} | Стрим: {is_streaming}")
+        logger.info(f"[ФАСАД] Инициатор: {sender_name} ({device_type}) | Стрим: {is_streaming}")
 
         client_dialog_id = data.get('dialog_id')
-        user_id = sender_device.get('user_id')
         sender_ws = mac_to_websocket.get(mac)
         
         is_new_dialog = False
@@ -214,29 +201,35 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
-        if device_type == 'компьютер': facade_acts = list(FACADE_PC)
-        elif device_type == 'телефон': facade_acts = list(FACADE_PHONE)
-        elif mac.lower() == 'b8:27:eb:00:51:06' or 'pibot' in sender_name.lower(): facade_acts = list(FACADE_PI)
-        else: facade_acts = list(FACADE_WEB)
+        # === ПОДТЯГИВАЕМ ДОСТУПНЫЕ ОНЛАЙН-УСТРОЙСТВА ДЛЯ ФАСАДА ===
+        accessible_devices = await get_accessible_devices(cursor, mac, user_id)
+        online_devices_list = [f"- {dev}" for dev in accessible_devices]
+        # Добавляем самого себя
+        online_devices_list.append(f"- {sender_name} ({device_type}, текущее устройство)")
+        devices_online_str = "\n".join(online_devices_list)
 
-        if dialog_id and "очистка истории" in facade_acts: facade_acts.remove("очистка истории")
-        if is_new_dialog: facade_acts.append("название диалога")
+        caps_text, allowed_actions = get_action_strings(ALL_ACTIONS)
 
-        caps_text, allowed_actions = get_action_strings(facade_acts)
-
-        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник за устройством: {sender_name} (Тип: {device_type}).
+        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник говорит через устройство: {sender_name} (Тип: {device_type}).
 Тебе в реальном времени передается видеопоток с камеры пользователя.
 
-ПРАВИЛА:
-1. ВСЕГДА НА ЛЮБОЙ ЗАПРОС ОБЯЗАТЕЛЬНО ОТВЕЧАЙ ГОЛОСОМ! Даже если ты вызываешь инструмент (tool_call), обязательно скажи коротко: "Секунду", "Открываю", "Готово". Никогда не молчи.
-2. СТОП-СЛОВА И ОТМЕНА: Если пользователь ругается, говорит "хватит", "отмена", "не надо", "в пизду", "нахрен", "заткнись", "отбой" — СТРОГО ЗАПРЕЩЕНО вызывать delegate_to_brain или открывать что-либо! Просто скажи: "Понял, отбой" или "Ничего не трогаю".
-3. САМОСТОЯТЕЛЬНЫЕ ДЕЙСТВИЯ: Открыть сайт/ютуб (открытие ссылки), изменить громкость, включить музыку — делай САМ через свои инструменты! НЕ НАДО звать delegate_to_brain ради открытия ссылки.
-4. ДЕЛЕГИРОВАНИЕ: Вызывай delegate_to_brain ТОЛЬКО ДЛЯ СЛОЖНЫХ задач (запустить локальную игру/программу через exe, найти процесс, переключить окно). В action_value передавай только чистую суть задачи.
-5. КРАТКОСТЬ: Говори кратко (1-2 простых предложения). Не строй из себя лектора.
-Доступные действия:
+ДОСТУПНЫЕ УСТРОЙСТВА В СЕТИ (ОНЛАЙН СЕЙЧАС):
+{devices_online_str}
+
+ПРАВИЛА И ПРЯМОЕ УПРАВЛЕНИЕ:
+1. ВСЕГДА НА ЛЮБОЙ ЗАПРОС ОТВЕЧАЙ ГОЛОСОМ! Даже если вызываешь команду, обязательно скажи коротко: "Секунду", "Открываю", "Делаю". Никогда не молчи!
+2. ПРЯМОЕ УПРАВЛЕНИЕ: Ты управляешь устройствами НАПРЯМУЮ через инструмент `send_device_commands`.
+   - В параметре `target_device` ОБЯЗАТЕЛЬНО указывай точное имя целевого устройства из списка онлайн-устройств (например '{sender_name}' или компьютер пользователя).
+   - Если пользователь говорит с телефона: "Открой ютуб на компе" или "Включи музыку на компьютере" — сразу вызывай `send_device_commands` с `target_device='имя компьютера'` и нужным действием!
+3. ЗАПУСК ИГР И ПРОГРАММ: Чтобы запустить приложение/игру на компьютере (пабг, стим, браузер, телеграм), вызывай action_type='открытие файла' с именем программы ('pubg', 'steam', 'telegram') или 'открытие ссылки' для сайтов.
+4. СТОП-СЛОВА: Если пользователь ругается, говорит "хватит", "отмена", "не надо", "в пизду", "отбой" — СТРОГО ЗАПРЕЩЕНО вызывать любые команды! Скажи: "Понял, отбой".
+5. КРАТКОСТЬ: Говори кратко и емко (1-2 простых предложения). Никаких длинных паст!
+
+Доступные действия для устройств:
 {caps_text}"""
         
         prompt_text_to_send = f"[ЗАПРОС]: {command}" if command else None
+        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.1)... Онлайн устройств: {len(online_devices_list)}")
 
         if is_streaming and media_queue:
             generator = ai_instance.generate_audio_stream_realtime(
@@ -248,7 +241,6 @@ async def handle_command(websocket, data):
             )
 
         audio_lock = get_device_audio_lock(mac)
-        facade_executed_actions = []
         async with audio_lock:
             async for chunk in generator:
                 if chunk["type"] == "user_text":
@@ -266,57 +258,43 @@ async def handle_command(websocket, data):
                 elif chunk["type"] == "commands":
                     if chunk["commands"]: has_commands = True
                     extracted_commands = chunk["commands"]
-                    filtered_commands = []
                     
                     for cmd in extracted_commands:
-                        for act in cmd.get('actions', []):
+                        target_device_name = cmd.get('target_device', '').strip()
+                        actions = cmd.get('actions', [])
+                        if not actions: continue
+
+                        # Определяем реальный MAC целевого устройства
+                        target_mac = await get_mac_by_name(cursor, target_device_name, fallback_mac=mac)
+                        target_ws = mac_to_websocket.get(target_mac)
+
+                        real_actions = []
+                        for act in actions:
                             act_type = act.get('action_type')
                             act_val = act.get('action_value')
-                            
-                            if act_type == "delegate_to_brain":
-                                logger.warning(f"🧠 [ФАСАД ДЕЛЕГИРУЕТ ЗАДАЧУ МОЗГУ]: {act_val}")
-                                pseudo_data = {
-                                    "internal_routing": "brain_agent", 
-                                    "task": act_val,
-                                    "source_name": sender_name, 
-                                    "source_type": device_type,
-                                    "mac": mac, 
-                                    "user_id": sender_device.get('user_id'), 
-                                    "user_msg_id": user_msg_id, 
-                                    "voice_type": voice_name, 
-                                    "message_history": message_history, 
-                                    "dialog_id": dialog_id
-                                }
-                                pending_routes.append(pseudo_data)
-                                
-                            elif act_type == "название диалога" and dialog_id:
+
+                            if act_type == "название диалога" and dialog_id:
                                 new_name = str(act_val).strip()
                                 await cursor.execute("UPDATE dialogs SET name = %s WHERE id = %s", (new_name, dialog_id))
                                 await conn.commit()
                                 if sender_ws: await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
-                            
                             else:
-                                facade_executed_actions.append(act)
-                                filtered_commands.append({"target_device": cmd.get("target_device", ""), "actions": [act]})
-                    
-                    for cmd in filtered_commands:
-                        target_device_name = cmd.get('target_device', '').strip()
-                        actions = cmd.get('actions', [])
-                        if not target_device_name or not actions: continue
-                        
-                        await cursor.execute("SELECT id, mac FROM devices WHERE device_name = %s", (target_device_name,))
-                        target_device_info = await cursor.fetchone()
-                        if not target_device_info:
-                            await cursor.execute("SELECT id, mac, device_name FROM devices WHERE is_online = TRUE")
-                            for d in await cursor.fetchall():
-                                if d['device_name'].lower() in target_device_name.lower() or target_device_name.lower() in d['device_name'].lower():
-                                    target_device_info = d; break
-                        if not target_device_info: continue
+                                real_actions.append(act)
 
-                        target_mac = target_device_info['mac']
-                        target_ws = mac_to_websocket.get(target_mac)
-                        if target_ws:
-                            await async_send(target_ws, {"type": "new_message", "message_id": bot_message_id if target_mac == mac else None, "user_msg_id": user_msg_id if target_mac == mac else None, "sender": "Бот" if target_mac == mac else sender_name, "text": "", "actions": actions})
+                        # ОТПРАВЛЯЕМ КОМАНДУ НА ЦЕЛЕВОЕ УСТРОЙСТВО НАПРЯМУЮ!
+                        if real_actions:
+                            if target_ws:
+                                logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправил {len(real_actions)} действий на '{target_device_name or sender_name}' (MAC: {target_mac})")
+                                await async_send(target_ws, {
+                                    "type": "new_message",
+                                    "message_id": bot_message_id if target_mac == mac else None,
+                                    "user_msg_id": user_msg_id if target_mac == mac else None,
+                                    "sender": "Бот" if target_mac == mac else sender_name,
+                                    "text": "",
+                                    "actions": real_actions
+                                })
+                            else:
+                                logger.warning(f"⚠️ [DIRECT DISPATCH] Устройство '{target_device_name}' (MAC: {target_mac}) не в сети!")
 
                 elif chunk["type"] == "audio":
                     audio_chunks_count += 1
@@ -340,18 +318,6 @@ async def handle_command(websocket, data):
             await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
 
         logger.info(f"[DONE] Фасад отработал.\n" + "="*50)
-        
-        # ЗАПУСК МОЗГА
-        for route_data in pending_routes:
-            route_data["user_raw_command"] = final_user_text_full.strip() or command
-            route_data["facade_executed_actions"] = facade_executed_actions
-            
-            if mac in active_brain_tasks and not active_brain_tasks[mac].done():
-                logger.warning(f"🛑 [KILL ZOMBIE] Отменяем старый зависший Мозг для {mac}")
-                active_brain_tasks[mac].cancel()
-
-            task = asyncio.create_task(handle_target_command(websocket, route_data))
-            active_brain_tasks[mac] = task
 
     except Exception as e:
         logger.error(f"[ERROR] {e}", exc_info=True)
@@ -365,227 +331,6 @@ async def handle_command(websocket, data):
         if cursor: await cursor.close()
         if conn: conn.close()
         active_media_queues.pop(data.get('ui_msg_id', ''), None)
-
-
-# =========================================================================
-# 2. ОРКЕСТРАТОР (Fast Brain)
-# =========================================================================
-async def get_mac_by_name(cursor, device_name, fallback_mac):
-    await cursor.execute("SELECT mac FROM devices WHERE device_name = %s", (device_name,))
-    res = await cursor.fetchone()
-    if res: return res['mac']
-    await cursor.execute("SELECT mac, device_name FROM devices WHERE is_online = TRUE")
-    for d in await cursor.fetchall():
-        if d['device_name'].lower() in device_name.lower() or device_name.lower() in d['device_name'].lower():
-            return d['mac']
-    return fallback_mac
-
-
-async def handle_target_command(websocket, data):
-    conn = None; cursor = None
-    bot_message_id = None; source_ws = None
-    
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        
-        is_internal = data.get("internal_routing")
-        if is_internal != "brain_agent": return
-
-        voice_name = data.get('voice_type', 'Aoede')
-        name = data.get('name', 'Пятница')
-        task = data.get('task', '')
-        source_name = data.get('source_name')
-        source_type = data.get('source_type', 'неизвестно')
-        mac = data.get('mac')
-        user_id = data.get("user_id")
-        user_msg_id = data.get("user_msg_id")
-        dialog_id = data.get("dialog_id")
-        message_history = data.get('message_history', [])
-
-        await cursor.execute("SELECT id, device_name, mac FROM devices WHERE mac = %s", (mac,))
-        source_device_info = await cursor.fetchone()
-        if not source_device_info: return
-
-        source_id = source_device_info['id']
-        source_ws = mac_to_websocket.get(source_device_info['mac'])
-        source_mac = source_device_info['mac']
-
-        user_raw_command = data.get('user_raw_command', '')
-        facade_executed_actions = data.get('facade_executed_actions', [])
-
-        accessible_devices = await get_accessible_devices(cursor, source_mac, user_id)
-        if accessible_devices:
-            devices_online_str = "\n".join([f"- {dev}" for dev in accessible_devices])
-        else:
-            devices_online_str = "- Ни одно устройство не найдено в сети"
-
-        if facade_executed_actions:
-            executed_str = ", ".join([f"{a.get('action_type')}: {a.get('action_value')}" for a in facade_executed_actions])
-        else:
-            executed_str = "Никаких системных действий Фасад еще не выполнял."
-
-        logger.info("\n" + "="*50)
-        logger.info(f"[BRAIN] Подключение текстового мозга. Задача: {task}")
-
-        fast_acts = list(set(BASE_PC + BASE_PHONE + BASE_PI + BASE_WEB))
-        if "check_network_devices" in fast_acts: fast_acts.remove("check_network_devices")
-        if dialog_id and "очистка истории" in fast_acts: fast_acts.remove("очистка истории")
-        fast_acts.extend(["check_network_devices", "delegate_to_robot_brain"])
-        fast_caps, fast_allowed = get_action_strings(fast_acts)
-
-        fast_instruction = f"""Ты — Быстрый Мозг-Оркестратор. 
-Твое текущее устройство-отправитель: {source_name} (Тип: {source_type}). 
-
-КОНТЕКСТ ВЫЗОВА:
-- Оригинальная команда пользователя: "{user_raw_command}"
-- Интерпретация задачи Фасадом: "{task}"
-- Доступные устройства пользователя в сети (ОНЛАЙН):
-{devices_online_str}
-- Действия, уже выполненные Фасадом в этом запросе: {executed_str}
-
-ПРАВИЛА И АЛГОРИТМ РАБОТЫ:
-
-1. НЕ ДУБЛИРУЙ ДЕЙСТВИЯ:
-Если в списке уже есть действия, выполненные Фасадом (например, изменение громкости, выбор голоса или переключение трека), ЗАПРЕЩЕНО вызывать их повторно!
-
-2. УПРАВЛЕНИЕ УСТРОЙСТВАМИ ТОЛЬКО ПО ЯВНОМУ ЗАПРОСУ:
-Если пользователь ведет обычный диалог (факты, философия, ответы на вопросы) и НЕ ПРОСИТ управлять ПК/устройствами — ЗАПРЕЩЕНО отправлять любые команды на устройства! Отвечай только текстом.
-
-3. СЦЕНАРИЙ ОТКРЫТИЯ/ЗАПУСКА ПРОГРАММ НА ПК:
-Если пользователь ЯВНО просит открыть или запустить приложение/файл на ПК:
-- Найди нужный компьютер в списке онлайн-устройств.
-- Вызови "get_installed_programs" или сразу "открытие файла" с точным путем/именем на целевом ПК.
-- Проверь запуск с помощью "get_running_processes".
-- Сообщи результат короткой фразой.
-
-4. СТАНДАРТНЫЕ И ДРУГИЕ ЗАДАЧИ:
-Для всех остальных явных команд (управление плеером, смена настроек, вызов робота через "delegate_to_robot_brain") действуй свободно и точно выполни просьбу пользователя.
-
-5. КРАТКОСТЬ ГОЛОСОВОГО ОТВЕТА:
-Финальный текст ответа для пользователя должен быть СТРОГО коротким (1-3 простых предложения, не более 25-30 слов). Излагай только суть!
-
-Доступные инструменты:
-{fast_caps}"""
-
-        formatted_history = []
-        if dialog_id:
-            await cursor.execute("""
-                SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
-                FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
-                WHERE m.dialog_id = %s ORDER BY m.created_at ASC
-            """, (dialog_id,))
-            raw_history = await cursor.fetchall()
-            if raw_history:
-                for msg in raw_history[-HISTORY_LIMIT:]:
-                    role = "user" if msg['sender_name'] == 'Пользователь' else "model"
-                    formatted_history.append({"role": role, "parts": [{"text": msg['text']}]})
-            
-            await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (source_id, dialog_id))
-            bot_message_id = cursor.lastrowid
-            await conn.commit()
-        else:
-            if message_history:
-                for m in message_history[-HISTORY_LIMIT:]:
-                    role = "user" if m.get('role') == 'user' else "model"
-                    formatted_history.append({"role": role, "parts": [{"text": m.get('content', '')}]})
-
-        async def device_bridge_callback(commands_to_execute):
-            results = []
-            for cmd in commands_to_execute:
-                name_tool = cmd["name"]
-                args = cmd.get("args", {})
-                target_device_name = args.get("target_device", "")
-                actions = args.get("actions", [])
-                tool_resp = {"result": "success"}
-                
-                for act in actions:
-                    act_type = act.get("action_type")
-                    act_val = act.get("action_value")
-                    
-                    if act_type == "delegate_to_robot_brain":
-                        logger.warning(f"🤖 [МОЗГ] Делегирует задачу Робо-Мозгу (ER): {act_val}")
-                        robot_result = await ai_instance.execute_robotics_agent(
-                            prompt_text=act_val,
-                            device_bridge_callback=device_bridge_callback,
-                            model_id="gemini-robotics-er-2-preview" 
-                        )
-                        tool_resp["robot_brain_report"] = robot_result
-                        
-                    elif act_type == "check_network_devices":
-                        devices = await get_accessible_devices(cursor, source_mac, user_id)
-                        tool_resp["devices_online"] = devices
-                        
-                    elif act_type in ["get_running_processes", "get_installed_programs"]:
-                        target_mac = await get_mac_by_name(cursor, target_device_name, source_mac)
-                        target_ws = mac_to_websocket.get(target_mac)
-                        if target_ws:
-                            future = asyncio.Future()
-                            pending_device_responses[str(user_msg_id)] = future
-                            logger.info(f"[BRIDGE] Отправка запроса ({act_type}) на устройство {target_mac}...")
-                            await async_send(target_ws, {"type": "new_message", "user_msg_id": user_msg_id, "actions": [act]})
-                            try:
-                                wait_task = asyncio.create_task(asyncio.wait_for(future, timeout=25.0))
-                                client_data = await wait_task
-                                if act_type == "get_running_processes": tool_resp["processes"] = client_data.get("processes")
-                                elif act_type == "get_installed_programs": tool_resp["programs"] = client_data.get("programs")
-                            except asyncio.TimeoutError:
-                                tool_resp["error"] = "Устройство не ответило вовремя"
-                            except Exception as ex:
-                                tool_resp["error"] = str(ex)
-                            finally:
-                                pending_device_responses.pop(str(user_msg_id), None)
-                        else:
-                            tool_resp["error"] = "Устройство не в сети"
-                            
-                    else:
-                        target_mac = await get_mac_by_name(cursor, target_device_name, source_mac)
-                        target_ws = mac_to_websocket.get(target_mac)
-                        if target_ws:
-                            await async_send(target_ws, {"type": "new_message", "user_msg_id": user_msg_id, "actions": [act]})
-                            
-                results.append({"name": name_tool, "response": tool_resp})
-            return results
-
-        final_text = await ai_instance.run_brain_orchestrator(
-            prompt_text=f"Выполни задачу: {task}",
-            system_instruction=fast_instruction,
-            allowed_actions=fast_allowed,
-            formatted_history=formatted_history,
-            device_bridge_callback=device_bridge_callback,
-            model_id="gemini-3.5-flash-lite"
-        )
-
-        final_text = final_text.strip()
-        if final_text:
-            logger.info(f"[TTS] Мозг: {final_text}")
-            audio_lock = get_device_audio_lock(source_mac)
-            async with audio_lock:
-                if source_ws: await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id) if bot_message_id else None, "sender": "Бот", "text": final_text, "actions": []})
-                if source_ws:
-                    async for audio_chunk in ai_instance.generate_static_audio_stream(final_text, voice_name, name):
-                        await async_send(source_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(audio_chunk).decode('utf-8')})
-                if source_ws: await async_send(source_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": str(bot_message_id) if bot_message_id else None, "sender": "Бот", "text": "", "actions": []})
-
-        if dialog_id and bot_message_id:
-            if final_text: await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_text, bot_message_id))
-            else: await cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
-            await conn.commit()
-
-        logger.info(f"[DONE] Оркестратор завершил работу.\n" + "="*50)
-
-    except Exception as e:
-        logger.error(f"[ERROR в Мозге] {e}", exc_info=True)
-        try:
-            if cursor and bot_message_id:
-                await cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
-                if conn: await conn.commit()
-            if source_ws and bot_message_id:
-                await async_send(source_ws, {"type": "delete_message", "ui_msg_id": str(bot_message_id)})
-        except: pass
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
 
 async def get_least_used_key_index(cursor):
     total_keys = len(ai_instance.api_keys)

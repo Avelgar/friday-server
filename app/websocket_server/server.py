@@ -9,7 +9,7 @@ from app.database.connection import get_async_db_connection
 
 from app.websocket_server.state import active_connections, mac_to_websocket, ws_to_mac, last_ping_times, PING_TIMEOUT
 from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth, handle_account_sync
-from app.websocket_server.handlers_cmds import handle_command, handle_target_command
+from app.websocket_server.handlers_cmds import handle_command
 from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_end
 
 logger = logging.getLogger("WS_Server")
@@ -78,7 +78,7 @@ async def websocket_handler(websocket):
                 elif "command" in data: 
                     asyncio.create_task(handle_command(websocket, data))
                 elif "command_to_device" in data: 
-                    asyncio.create_task(handle_target_command(websocket, data))
+                    asyncio.create_task(handle_command(websocket, data))
                 elif data.get('type') == 'video_stream_chunk':
                     from app.websocket_server.handlers_cmds import handle_video_chunk
                     logger.info("🎥 Получен кадр видео от клиента!")
