@@ -341,17 +341,15 @@ async def handle_command(websocket, data):
 
         logger.info(f"[DONE] Фасад отработал.\n" + "="*50)
         
-        # ЗАПУСК МОЗГА (с отменой старого висящего таска для этого компа)
+        # ЗАПУСК МОЗГА
         for route_data in pending_routes:
             route_data["user_raw_command"] = final_user_text_full.strip() or command
             route_data["facade_executed_actions"] = facade_executed_actions
             
-            # УБИВАЕМ СТАРОГО ЗОМБИ!
             if mac in active_brain_tasks and not active_brain_tasks[mac].done():
                 logger.warning(f"🛑 [KILL ZOMBIE] Отменяем старый зависший Мозг для {mac}")
                 active_brain_tasks[mac].cancel()
 
-            # Запускаем новый и запоминаем
             task = asyncio.create_task(handle_target_command(websocket, route_data))
             active_brain_tasks[mac] = task
 
@@ -430,7 +428,6 @@ async def handle_target_command(websocket, data):
         logger.info("\n" + "="*50)
         logger.info(f"[BRAIN] Подключение текстового мозга. Задача: {task}")
 
-        # Быстрый мозг (без тяжелого фото-мозга)
         fast_acts = list(set(BASE_PC + BASE_PHONE + BASE_PI + BASE_WEB))
         if "check_network_devices" in fast_acts: fast_acts.remove("check_network_devices")
         if dialog_id and "очистка истории" in fast_acts: fast_acts.remove("очистка истории")
@@ -493,7 +490,6 @@ async def handle_target_command(websocket, data):
                     role = "user" if m.get('role') == 'user' else "model"
                     formatted_history.append({"role": role, "parts": [{"text": m.get('content', '')}]})
 
-        # Мост выполнения без VLM-фотомозга
         async def device_bridge_callback(commands_to_execute):
             results = []
             for cmd in commands_to_execute:
@@ -501,7 +497,6 @@ async def handle_target_command(websocket, data):
                 args = cmd.get("args", {})
                 target_device_name = args.get("target_device", "")
                 actions = args.get("actions", [])
-                
                 tool_resp = {"result": "success"}
                 
                 for act in actions:
@@ -604,29 +599,30 @@ async def get_least_used_key_index(cursor):
         idx = r['key_index']
         if idx in key_counts: key_counts[idx] = r['cnt']
 
-    best_key = min(key_counts, key=key_counts.get)
+    usable_keys = [i for i in range(total_keys) if ai_instance.key_pool.is_usable(i)]
+    if not usable_keys:
+        usable_keys = list(range(total_keys))
+
+    best_key = min(usable_keys, key=lambda k: key_counts.get(k, 0))
     return best_key
-    # Реестр запущенных фоновых задач для отмены
-active_antigravity_tasks = {}  # { chat_uid: asyncio.Task }
+
+active_antigravity_tasks = {}
 
 # ==============================================================================
 # CRUD ДИАЛОГОВ И СООБЩЕНИЙ ANTIGRAVITY (С ПРИВЯЗКОЙ К АККАУНТУ И ПАПКЕ)
 # ==============================================================================
 
 async def handle_antigravity_get_chats(websocket, data):
-    """Отдать клиенту список чатов ТОЛЬКО его аккаунта."""
     user_token = data.get("user_token")
     conn = None; cursor = None
     try:
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
         
-        # Если токен не пришел — создаем дефолтный или отдаем пустой список
         if not user_token:
             await async_send(websocket, {"type": "antigravity_chats_list", "chats": []})
             return
 
-        # Гарантируем, что пользователь зарегистрирован в БД
         await cursor.execute(
             "INSERT IGNORE INTO antigravity_users (user_token, username) VALUES (%s, %s)",
             (user_token, data.get("username", "Developer"))
@@ -788,6 +784,7 @@ async def handle_antigravity_task(websocket, data):
     prev_interaction_id = None
     environment_id = None
     need_title_update = False
+    recent_history = []
 
     # Формируем читаемый заголовок
     clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
@@ -820,6 +817,13 @@ async def handle_antigravity_task(websocket, data):
             )
             await conn.commit()
 
+        # Подтягиваем недавние сообщения для эстафеты (Handoff) при смене инстанса
+        await cursor.execute(
+            "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
+            (chat_uid,)
+        )
+        recent_history = await cursor.fetchall() or []
+
         await cursor.execute(
             "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'user', %s)",
             (chat_uid, prompt)
@@ -839,7 +843,6 @@ async def handle_antigravity_task(websocket, data):
             **status_payload
         })
 
-    # Регистрируем текущий таск для возможности отмены
     active_antigravity_tasks[chat_uid] = asyncio.current_task()
 
     try:
@@ -851,12 +854,14 @@ async def handle_antigravity_task(websocket, data):
             previous_interaction_id=prev_interaction_id,
             environment_id=environment_id,
             assigned_key=assigned_key,
-            chat_uid=chat_uid
+            chat_uid=chat_uid,
+            recent_history=recent_history
         )
 
         new_interaction_id = result["interaction_id"]
         new_env_id = result["environment_id"]
         agent_reply_text = result["text"]
+        final_assigned_key = result.get("assigned_key", assigned_key)
 
         try:
             conn = await get_async_db_connection()
@@ -868,18 +873,18 @@ async def handle_antigravity_task(websocket, data):
             if need_title_update:
                 await cursor.execute(
                     """UPDATE antigravity_chats 
-                       SET last_interaction_id = %s, environment_id = %s, title = %s, 
+                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, title = %s, 
                            synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
                        WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, auto_title, synced_str, chat_uid)
+                    (new_interaction_id, new_env_id, final_assigned_key, auto_title, synced_str, chat_uid)
                 )
             else:
                 await cursor.execute(
                     """UPDATE antigravity_chats 
-                       SET last_interaction_id = %s, environment_id = %s, 
+                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, 
                            synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
                        WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, synced_str, chat_uid)
+                    (new_interaction_id, new_env_id, final_assigned_key, synced_str, chat_uid)
                 )
 
             await cursor.execute(
