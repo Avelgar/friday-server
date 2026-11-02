@@ -623,8 +623,10 @@ async def handle_antigravity_get_chats(websocket, data):
             await async_send(websocket, {"type": "antigravity_chats_list", "chats": []})
             return
 
+        # Заменяем INSERT IGNORE на ON DUPLICATE KEY, чтобы убрать спам варнингов в логах
         await cursor.execute(
-            "INSERT IGNORE INTO antigravity_users (user_token, username) VALUES (%s, %s)",
+            """INSERT INTO antigravity_users (user_token, username) VALUES (%s, %s)
+               ON DUPLICATE KEY UPDATE username = VALUES(username)""",
             (user_token, data.get("username", "Developer"))
         )
         await conn.commit()
@@ -759,25 +761,19 @@ async def handle_antigravity_delete_chat(websocket, data):
 async def handle_antigravity_cancel_task(websocket, data):
     chat_uid = data.get("chat_id")
     ui_msg_id = data.get("ui_msg_id")
+    logger.info(f"🛑 [WS CANCEL REQUEST] Запрос отмены для чата: {chat_uid}")
+
     if chat_uid and chat_uid in active_antigravity_tasks:
         task = active_antigravity_tasks[chat_uid]
         if not task.done():
             task.cancel()
-            logger.info(f"[WS Antigravity] Принудительная отмена таска для чата: {chat_uid}")
-            # Сразу уведомляем клиента об отмене, не дожидаясь падения потока
-            await async_send(websocket, {
-                "type": "antigravity_cancelled",
-                "chat_id": chat_uid,
-                "ui_msg_id": ui_msg_id
-            })
-            return
+            logger.info(f"🛑 [WS CANCEL] Таск успешно отменен в памяти: {chat_uid}")
 
     await async_send(websocket, {
         "type": "antigravity_cancelled",
         "chat_id": chat_uid,
         "ui_msg_id": ui_msg_id
     })
-
 
 async def handle_antigravity_task(websocket, data):
     prompt = data.get("prompt", "").strip()
@@ -793,6 +789,8 @@ async def handle_antigravity_task(websocket, data):
     ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
     if not prompt: return
 
+    logger.info(f"📥 [WS IN] Чат: {chat_uid} | Задача: '{prompt[:70]}' | ui_msg_id: {ui_msg_id}")
+
     conn = None; cursor = None
     assigned_key = None
     prev_interaction_id = None
@@ -800,7 +798,6 @@ async def handle_antigravity_task(websocket, data):
     need_title_update = False
     recent_history = []
 
-    # Формируем читаемый заголовок
     clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
     if not clean_title_text: clean_title_text = prompt
     auto_title = clean_title_text[:30].replace("\n", " ").strip()
@@ -831,7 +828,9 @@ async def handle_antigravity_task(websocket, data):
             )
             await conn.commit()
 
-        # Подтягиваем недавние сообщения для эстафеты (Handoff) при смене инстанса
+        logger.info(f"📋 [DB STATE] Чат: {chat_uid} | Ключ #{assigned_key} | prev_id: {prev_interaction_id[:12] if prev_interaction_id else 'None'} | env: {environment_id[:12] if environment_id else 'None'}")
+
+        # Подтягиваем чистую историю для эстафеты (Handoff)
         await cursor.execute(
             "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
             (chat_uid,)
@@ -876,6 +875,8 @@ async def handle_antigravity_task(websocket, data):
         new_env_id = result["environment_id"]
         agent_reply_text = result["text"]
         final_assigned_key = result.get("assigned_key", assigned_key)
+
+        logger.info(f"📤 [ANTIGRAVITY DONE] Ответ готов ({len(agent_reply_text)} симв.): '{agent_reply_text[:60]}...'")
 
         try:
             conn = await get_async_db_connection()
@@ -923,19 +924,25 @@ async def handle_antigravity_task(websocket, data):
         })
 
     except asyncio.CancelledError:
-        logger.info(f"[WS Antigravity] Задача чата {chat_uid} отменена по запросу пользователя.")
+        logger.warning(f"🛑 [WS Antigravity] Задача {chat_uid} прервана! Очистка контекста...")
         try:
             conn = await get_async_db_connection()
             cursor = await conn.cursor()
-            # Удаляем незавершенное сообщение из истории, чтобы не сбивать контекст
+            # 1. Удаляем незавершенное сообщение из истории
             await cursor.execute(
                 "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
                 (chat_uid,)
             )
+            # 2. СБРАСЫВАЕМ ЗАГРЯЗНЕННЫЙ КОНТЕЙНЕР GOOGLE!
+            # Следующий запрос пойдет в чистую среду без старых хвостов
+            await cursor.execute(
+                "UPDATE antigravity_chats SET last_interaction_id = NULL, environment_id = NULL WHERE chat_uid = %s",
+                (chat_uid,)
+            )
             await conn.commit()
-            logger.info(f"[WS Antigravity] Незавершенное сообщение удалено из базы: {chat_uid}")
+            logger.info(f"🧹 [CLEANUP SUCCESS] Окружение Google сброшено в NULL для чата {chat_uid}. Следующий запрос будет с чистого листа.")
         except Exception as cle:
-            logger.warning(f"[WS Antigravity Cleanup Error] {cle}")
+            logger.warning(f"[WS Cleanup Error] {cle}")
         finally:
             if cursor: await cursor.close()
             if conn: conn.close()

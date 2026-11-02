@@ -642,34 +642,37 @@ class AIService:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
                     kwargs["input"] = current_input_prompt
+                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | prev_id={previous_interaction_id[:10]} | Input: '{current_input_prompt[:60]}'")
                 else:
-                    # Новая сессия или Handoff
+                    # Чистый запуск или Handoff после отмены
                     kwargs["system_instruction"] = agent_system_instruction
                     kwargs["environment"] = "remote"
 
-                    # Если это эстафета (Handoff с историей диалога)
                     if recent_history:
                         history_parts = []
                         for m in recent_history[-8:]:
                             role = "Пользователь" if m.get("role") == "user" else "Ассистент"
                             text_snip = (m.get("text") or "").strip()
                             if text_snip:
-                                if len(text_snip) > 400: text_snip = text_snip[:400] + "..."
+                                if len(text_snip) > 300: text_snip = text_snip[:300] + "..."
                                 history_parts.append(f"{role}: {text_snip}")
                         
                         if history_parts:
                             history_block = "\n".join(history_parts)
                             current_input_prompt = (
-                                f"# Продолжение диалога (сессия переведена на рабочий инстанс)\n\n"
-                                f"Краткий контекст недавних действий:\n{history_block}\n\n"
-                                f"Текущая задача:\n{prompt_text}"
+                                f"# История недавних сообщений диалога:\n{history_block}\n\n"
+                                f"# Текущее задание:\n{prompt_text}"
                             )
+                            logger.info(f"🔄 [GOOGLE CALL] Handoff в новую среду с историей из {len(history_parts)} сообщений | Input: '{prompt_text[:60]}'")
+                    else:
+                        logger.info(f"✨ [GOOGLE CALL] Чистый старт в новом окружении | Input: '{prompt_text[:60]}'")
 
                     kwargs["input"] = current_input_prompt
 
                 interaction = await asyncio.to_thread(client.interactions.create, **kwargs)
                 new_interaction_id = interaction.id
                 env_id = interaction.environment_id
+                logger.info(f"🆔 [GOOGLE CREATED] interaction_id={new_interaction_id} | env_id={env_id}")
 
                 self.antigravity_sessions[new_interaction_id] = assigned_key
                 if previous_interaction_id:
