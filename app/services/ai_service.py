@@ -667,7 +667,7 @@ class AIService:
 
                     kwargs["input"] = current_input_prompt
 
-                interaction = client.interactions.create(**kwargs)
+                interaction = await asyncio.to_thread(client.interactions.create, **kwargs)
                 new_interaction_id = interaction.id
                 env_id = interaction.environment_id
 
@@ -680,7 +680,7 @@ class AIService:
 
                 while True:
                     await asyncio.sleep(3)
-                    interaction = client.interactions.get(id=new_interaction_id)
+                    interaction = await asyncio.to_thread(client.interactions.get, id=new_interaction_id)
                     
                     current_step_desc = interaction.status
                     try:

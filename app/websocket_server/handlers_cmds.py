@@ -758,11 +758,18 @@ async def handle_antigravity_delete_chat(websocket, data):
 
 async def handle_antigravity_cancel_task(websocket, data):
     chat_uid = data.get("chat_id")
+    ui_msg_id = data.get("ui_msg_id")
     if chat_uid and chat_uid in active_antigravity_tasks:
         task = active_antigravity_tasks[chat_uid]
         if not task.done():
             task.cancel()
             logger.info(f"[WS Antigravity] Принудительная отмена таска для чата: {chat_uid}")
+            return
+    await async_send(websocket, {
+        "type": "antigravity_cancelled",
+        "chat_id": chat_uid,
+        "ui_msg_id": ui_msg_id
+    })
 
 
 async def handle_antigravity_task(websocket, data):
@@ -928,7 +935,8 @@ async def handle_antigravity_task(websocket, data):
 
         await async_send(websocket, {
             "type": "antigravity_cancelled",
-            "chat_id": chat_uid
+            "chat_id": chat_uid,
+            "ui_msg_id": ui_msg_id
         })
     except Exception as e:
         logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
