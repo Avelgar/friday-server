@@ -764,7 +764,14 @@ async def handle_antigravity_cancel_task(websocket, data):
         if not task.done():
             task.cancel()
             logger.info(f"[WS Antigravity] Принудительная отмена таска для чата: {chat_uid}")
+            # Сразу уведомляем клиента об отмене, не дожидаясь падения потока
+            await async_send(websocket, {
+                "type": "antigravity_cancelled",
+                "chat_id": chat_uid,
+                "ui_msg_id": ui_msg_id
+            })
             return
+
     await async_send(websocket, {
         "type": "antigravity_cancelled",
         "chat_id": chat_uid,
@@ -920,13 +927,13 @@ async def handle_antigravity_task(websocket, data):
         try:
             conn = await get_async_db_connection()
             cursor = await conn.cursor()
-            # Удаляем последнее незавершенное сообщение пользователя, так как ответа не последовало
+            # Удаляем незавершенное сообщение из истории, чтобы не сбивать контекст
             await cursor.execute(
                 "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
                 (chat_uid,)
             )
             await conn.commit()
-            logger.info(f"[WS Antigravity] Незавершенное сообщение удалено из базы для чата: {chat_uid}")
+            logger.info(f"[WS Antigravity] Незавершенное сообщение удалено из базы: {chat_uid}")
         except Exception as cle:
             logger.warning(f"[WS Antigravity Cleanup Error] {cle}")
         finally:
