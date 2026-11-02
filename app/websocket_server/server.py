@@ -8,7 +8,7 @@ from websockets.exceptions import ConnectionClosed
 from app.database.connection import get_async_db_connection
 
 from app.websocket_server.state import active_connections, mac_to_websocket, ws_to_mac, last_ping_times, PING_TIMEOUT
-from app.websocket_server.handlers_auth import handle_device_registration, handle_web_client_auth, handle_account_sync
+from app.websocket_server.handlers_auth import handle_auth
 from app.websocket_server.handlers_cmds import handle_command
 from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_end
 
@@ -53,7 +53,10 @@ async def websocket_handler(websocket):
                 
                 if data.get("type") == "ping": 
                     continue
-                # --- CRUD АНТИГРАВИТИ ---
+                # --- ЕДИНАЯ АВТОРИЗАЦИЯ ВСЕХ УСТРОЙСТВ ---
+                elif data.get("type") in ("auth", "web_client_auth", "account_sync") or "DeviceName" in data or "token" in data:
+                    asyncio.create_task(handle_auth(websocket, data))
+                # -----------------------------------------
                 elif data.get("type") == "get_chats":
                     from app.websocket_server.handlers_cmds import handle_antigravity_get_chats
                     asyncio.create_task(handle_antigravity_get_chats(websocket, data))
