@@ -38,29 +38,67 @@ let silenceFrames = 0;
 function connectWebSocket() {
     const token = localStorage.getItem('token'); 
     if (!token) return;
-    if (websocketConnection) websocketConnection.close();
     
-    websocketConnection = new WebSocket('wss://friday-assistant.ru/ws');
+    if (websocketConnection) {
+        try { websocketConnection.close(); } catch (e) {}
+        websocketConnection = null;
+    }
+    
+    // Определяем URL сокета динамически
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const wsUrl = `${protocol}//${host}/ws`;
+    
+    try {
+        websocketConnection = new WebSocket(wsUrl);
+    } catch (err) {
+        websocketConnection = new WebSocket('wss://friday-assistant.ru/ws');
+    }
+
     websocketConnection.onopen = function() {
-        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'web_client_auth', token: token, login: userLogin })))));
+        console.log("[WS] Подключено к серверу, авторизация...");
+        const authData = {
+            type: 'web_client_auth',
+            token: token,
+            device_name: 'Браузер',
+            device_type: 'web'
+        };
+        websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(authData)))));
+        
+        if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => { 
-            if (websocketConnection.readyState === WebSocket.OPEN) 
+            if (websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
                 websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify({ type: 'ping', timestamp: Date.now() }))))); 
+            }
         }, 30000);
     };
+
     websocketConnection.onmessage = function(event) {
         try {
             const data = JSON.parse(decodeURIComponent(escape(atob(event.data))));
-            if (data.status === 'success' && data.message === "Данные успешно обработаны!") {
-                console.log("WebSocket Auth OK");
+            if (data.type === 'account_sync_success' || (data.status === 'success' && data.message === "Данные успешно обработаны!")) {
+                console.log("[WS] Авторизация успешна:", data.user_login);
+                if (data.dialog_id && !currentDialogId) {
+                    currentDialogId = data.dialog_id;
+                }
             } else { 
                 handleIncomingStreamData(data); // Функция из ui.js
             }
-        } catch (error) { }
+        } catch (error) {
+            console.error("[WS Error] Ошибка парсинга сообщения:", error);
+        }
     };
+
     websocketConnection.onclose = function() { 
         if (pingInterval) { clearInterval(pingInterval); pingInterval = null; } 
-        setTimeout(() => { if (localStorage.getItem('token')) connectWebSocket(); }, 5000); 
+        // Автопереподключение каждые 5 секунд, если пользователь авторизован
+        setTimeout(() => { 
+            if (localStorage.getItem('token')) connectWebSocket(); 
+        }, 5000); 
+    };
+
+    websocketConnection.onerror = function(err) {
+        console.warn("[WS] Ошибка соединения:", err);
     };
 }
 
@@ -71,27 +109,55 @@ async function verifyToken() {
     try { 
         const r = await fetch(`/verify_token?token=${encodeURIComponent(token)}`); 
         const d = await r.json(); 
-        if (r.ok && d.status === 'success') { userLogin = d.user_login; return true; } 
-        else { localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null; return false; } 
-    } catch (e) { return false; }
+        if (r.ok && d.status === 'success') { 
+            userLogin = d.user_login; 
+            return true; 
+        } else { 
+            localStorage.removeItem('token'); 
+            localStorage.removeItem('userLogin'); 
+            userLogin = null; 
+            return false; 
+        } 
+    } catch (e) { 
+        return false; 
+    }
 }
 
 async function logout() {
     try {
         const token = localStorage.getItem('token');
-        if (websocketConnection) { websocketConnection.close(); websocketConnection = null; }
-        if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
-        if (token) { try { await fetch('/logout_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: token }) }); } catch (e) {} }
+        if (websocketConnection) { 
+            websocketConnection.close(); 
+            websocketConnection = null; 
+        }
+        if (pingInterval) { 
+            clearInterval(pingInterval); 
+            pingInterval = null; 
+        }
+        if (token) { 
+            try { 
+                await fetch('/logout_web', { 
+                    method: 'POST', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify({ token: token }) 
+                }); 
+            } catch (e) {} 
+        }
         
-        localStorage.removeItem('token'); localStorage.removeItem('userLogin'); userLogin = null;
+        localStorage.removeItem('token'); 
+        localStorage.removeItem('userLogin'); 
+        userLogin = null;
         currentDialogId = null;
         
         updateAuthUI(); 
-        messageHistory = []; localStorage.removeItem('guestMessageHistory'); 
+        messageHistory = []; 
+        localStorage.removeItem('guestMessageHistory'); 
         renderEmptyChat();
         document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local"><span>Гостевой диалог</span></div>';
         showNotification('Вы вышли из системы', 'success');
-    } catch (e) { showNotification('Ошибка выхода', 'error'); }
+    } catch (e) { 
+        showNotification('Ошибка выхода', 'error'); 
+    }
 }
 
 async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id = null, stream_audio = false) {
@@ -103,10 +169,16 @@ async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id
         
         if (token && websocketConnection && websocketConnection.readyState === WebSocket.OPEN) {
             const requestData = { 
-                type: 'web_command', command: prompt, audio_base64: audio_base64, 
-                token: token, timestamp: new Date().toISOString(), name: "Пятница", 
-                voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId, 
-                stream_audio: stream_audio, dialog_id: currentDialogId
+                type: 'command', 
+                command: prompt, 
+                audio_base64: audio_base64, 
+                timestamp: new Date().toISOString(), 
+                name: "Пятница", 
+                voice_type: selectedVoice, 
+                command_type: command_type, 
+                ui_msg_id: finalUiMsgId, 
+                stream_audio: stream_audio, 
+                dialog_id: currentDialogId
             };
             
             if (currentFile) { 
@@ -114,7 +186,9 @@ async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id
                 r.onload = function() { 
                     requestData.screenshot = r.result.split(',')[1]; 
                     websocketConnection.send(btoa(unescape(encodeURIComponent(JSON.stringify(requestData))))); 
-                    currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = ''; 
+                    currentFile = null; 
+                    document.getElementById('imagePreviewContainer').style.display = 'none'; 
+                    document.getElementById('file-upload').value = ''; 
                 }; 
                 r.readAsDataURL(currentFile); 
             } else {
@@ -123,9 +197,14 @@ async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id
             }
         } else {
             const requestData = { 
-                prompt: prompt, audio_base64: audio_base64, bot_name: "Пятница", 
-                voice_type: selectedVoice, command_type: command_type, ui_msg_id: finalUiMsgId,
-                dialog_id: currentDialogId, token: token 
+                prompt: prompt, 
+                audio_base64: audio_base64, 
+                bot_name: "Пятница", 
+                voice_type: selectedVoice, 
+                command_type: command_type, 
+                ui_msg_id: finalUiMsgId,
+                dialog_id: currentDialogId, 
+                token: token 
             };
             if (!token) requestData.message_history = messageHistory; 
             
@@ -141,25 +220,64 @@ async function sendToServer(prompt, command_type, audio_base64 = null, ui_msg_id
                 sendFetchRequest(requestData);
             }
         }
-    } catch (error) { showNotification('Ошибка', 'error'); vadState = 'idle'; removePendingBubble(); }
+    } catch (error) { 
+        showNotification('Ошибка отправки', 'error'); 
+        vadState = 'idle'; 
+        removePendingBubble(); 
+    }
 }
 
 async function sendFetchRequest(requestData) {
     try {
-        const response = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestData) });
+        const response = await fetch('/generate', { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(requestData) 
+        });
         if (!response.ok) throw new Error();
-        const reader = response.body.getReader(); const decoder = new TextDecoder("utf-8"); let buffer = "";
+        const reader = response.body.getReader(); 
+        const decoder = new TextDecoder("utf-8"); 
+        let buffer = "";
         while (true) {
-            const { done, value } = await reader.read(); if (done) break;
-            buffer += decoder.decode(value, { stream: true }); let msgs = buffer.split('\n\n'); buffer = msgs.pop();
-            for (let msg of msgs) { if (msg.startsWith('data: ')) { try { handleIncomingStreamData(JSON.parse(msg.substring(6))); } catch(e) {} } }
+            const { done, value } = await reader.read(); 
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true }); 
+            let msgs = buffer.split('\n\n'); 
+            buffer = msgs.pop();
+            for (let msg of msgs) { 
+                if (msg.startsWith('data: ')) { 
+                    try { 
+                        handleIncomingStreamData(JSON.parse(msg.substring(6))); 
+                    } catch(e) {} 
+                } 
+            }
         }
-        currentFile = null; document.getElementById('imagePreviewContainer').style.display = 'none'; document.getElementById('file-upload').value = '';
-    } catch (error) { vadState = 'idle'; removePendingBubble(); }
+        currentFile = null; 
+        document.getElementById('imagePreviewContainer').style.display = 'none'; 
+        document.getElementById('file-upload').value = '';
+    } catch (error) { 
+        vadState = 'idle'; 
+        removePendingBubble(); 
+    }
 }
 
 // --- ИНИЦИАЛИЗАЦИЯ И СЛУШАТЕЛИ ---
 document.addEventListener('DOMContentLoaded', async function() {
+    // 1. Проверяем системные параметры URL (например, возврат после подтверждения почты)
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlMsg = urlParams.get('message');
+    if (urlMsg === 'email_verified') {
+        showNotification('Почта успешно подтверждена! Теперь вы можете войти.', 'success');
+        openLoginModal();
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlMsg === 'invalid_token') {
+        showNotification('Ссылка подтверждения недействительна или устарела.', 'error');
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (urlMsg === 'no_token') {
+        showNotification('Токен подтверждения не найден.', 'error');
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     const savedVoiceType = localStorage.getItem('voiceType'); 
     if (savedVoiceType) document.getElementById('voice-type').value = savedVoiceType;
     document.getElementById('voice-type').addEventListener('change', () => localStorage.setItem('voiceType', document.getElementById('voice-type').value));
@@ -180,25 +298,38 @@ document.addEventListener('DOMContentLoaded', async function() {
     initStopWordDetection(); // из media.js
 
     if (await verifyToken()) { 
-        updateAuthUI(); connectWebSocket(); loadDialogs(); 
+        updateAuthUI(); 
+        connectWebSocket(); 
+        loadDialogs(); 
     } else { 
-        updateAuthUI(); document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local"><span>Гостевой диалог</span></div>';
+        updateAuthUI(); 
+        document.getElementById('dialogList').innerHTML = '<div class="dialog-item active" data-id="local"><span>Гостевой диалог</span></div>';
     }
 
     if (!document.querySelector('#chatMessages .message')) renderEmptyChat();
 
-    document.getElementById('messageInput').addEventListener('input', function() { this.style.height = 'auto'; this.style.height = (this.scrollHeight) + 'px'; });
+    document.getElementById('messageInput').addEventListener('input', function() { 
+        this.style.height = 'auto'; 
+        this.style.height = (this.scrollHeight) + 'px'; 
+    });
     
     document.getElementById('sendMessage').addEventListener('click', function() {
         const message = document.getElementById('messageInput').value.trim(); 
         if (!message && !currentFile && !currentVideoSource) return;
-        document.getElementById('messageInput').style.height = 'auto'; const uiMsgId = Date.now().toString();
+        document.getElementById('messageInput').style.height = 'auto'; 
+        const uiMsgId = Date.now().toString();
         if (message) addMessage('user', message, false, uiMsgId); 
-        document.getElementById('messageInput').value = ''; document.getElementById('imagePreviewContainer').style.display = 'none';
+        document.getElementById('messageInput').value = ''; 
+        document.getElementById('imagePreviewContainer').style.display = 'none';
         sendToServer(message, "текстовое сообщение", null, uiMsgId, false);
     });
                 
-    document.getElementById('messageInput').addEventListener('keydown', function(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('sendMessage').click(); } });
+    document.getElementById('messageInput').addEventListener('keydown', function(e) { 
+        if (e.key === 'Enter' && !e.shiftKey) { 
+            e.preventDefault(); 
+            document.getElementById('sendMessage').click(); 
+        } 
+    });
 
     document.getElementById('chatMessages').addEventListener('click', function(e) {
         const suggestion = e.target.closest('.prompt-suggestion');
@@ -216,46 +347,207 @@ document.addEventListener('DOMContentLoaded', async function() {
     });
     
     document.getElementById('file-upload').addEventListener('change', function(e) {
-        const f = e.target.files[0]; const c = document.getElementById('imagePreviewContainer'); c.innerHTML = ''; c.style.display = 'none'; currentFile = null; 
+        const f = e.target.files[0]; 
+        const c = document.getElementById('imagePreviewContainer'); 
+        c.innerHTML = ''; 
+        c.style.display = 'none'; 
+        currentFile = null; 
         if (f) {
-            if (!f.type.match('image/png') && !f.type.match('image/jpeg')) { showNotification('Только PNG и JPG', 'error'); this.value = ''; return; }
-            currentFile = f; const r = new FileReader();
-            r.onload = function(e) { const img = document.createElement('img'); img.src = e.target.result; img.className = 'image-preview'; const btn = document.createElement('button'); btn.className = 'remove-image'; btn.innerHTML = '&times;'; btn.onclick = function() { c.style.display = 'none'; document.getElementById('file-upload').value = ''; currentFile = null; }; c.appendChild(img); c.appendChild(btn); c.style.display = 'block'; };
+            if (!f.type.match('image/png') && !f.type.match('image/jpeg')) { 
+                showNotification('Только PNG и JPG', 'error'); 
+                this.value = ''; 
+                return; 
+            }
+            currentFile = f; 
+            const r = new FileReader();
+            r.onload = function(e) { 
+                const img = document.createElement('img'); 
+                img.src = e.target.result; 
+                img.className = 'image-preview'; 
+                const btn = document.createElement('button'); 
+                btn.className = 'remove-image'; 
+                btn.innerHTML = '&times;'; 
+                btn.onclick = function() { 
+                    c.style.display = 'none'; 
+                    document.getElementById('file-upload').value = ''; 
+                    currentFile = null; 
+                }; 
+                c.appendChild(img); 
+                c.appendChild(btn); 
+                c.style.display = 'block'; 
+            };
             r.readAsDataURL(f);
         }
     });
 
     // Обработчики модальных окон
     document.querySelectorAll('.modal-close').forEach(btn => btn.addEventListener('click', closeModals));
-    window.addEventListener('click', function(e) { if (e.target === document.getElementById('registerModal') || e.target === document.getElementById('loginModal') || e.target === document.getElementById('recoveryModal')) closeModals(); });
-
-    document.getElementById('registerForm').addEventListener('submit', async function(e) {
-        e.preventDefault(); const em = document.getElementById('regEmail').value; const lo = document.getElementById('regLogin').value; const pw = document.getElementById('regPassword').value; const pwc = document.getElementById('regPasswordConfirm').value; const termsAccepted = document.getElementById('regTerms').checked; const personalDataConsent = document.getElementById('regPersonalData').checked; const re = document.getElementById('registerResponse'); const sb = this.querySelector('button[type="submit"]');
-        if (pw !== pwc) { re.textContent = 'Пароли не совпадают!'; re.className = 'response-message error'; return; }
-        try { sb.disabled = true; sb.textContent = 'Регистрация...'; const r = await fetch('/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em, login: lo, password: pw, terms_accepted: termsAccepted, personal_data_consent: personalDataConsent }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Зарегистрироваться'; }
+    window.addEventListener('click', function(e) { 
+        if (e.target === document.getElementById('registerModal') || 
+            e.target === document.getElementById('loginModal') || 
+            e.target === document.getElementById('recoveryModal')) closeModals(); 
     });
 
-    document.getElementById('loginForm').addEventListener('submit', async function(e) {
-        e.preventDefault(); const lo = document.getElementById('loginEmail').value; const pw = document.getElementById('loginPassword').value; const re = document.getElementById('loginResponse'); const sb = this.querySelector('button[type="submit"]');
+    // --- ФОРМА РЕГИСТРАЦИИ ---
+    document.getElementById('registerForm').addEventListener('submit', async function(e) {
+        e.preventDefault(); 
+        const em = document.getElementById('regEmail').value.trim(); 
+        const lo = document.getElementById('regLogin').value.trim(); 
+        const pw = document.getElementById('regPassword').value; 
+        const pwc = document.getElementById('regPasswordConfirm').value; 
+        const termsAccepted = document.getElementById('regTerms').checked; 
+        const personalDataConsent = document.getElementById('regPersonalData').checked; 
+        const re = document.getElementById('registerResponse'); 
+        const sb = this.querySelector('button[type="submit"]');
+
+        if (pw.length < 8) {
+            re.textContent = 'Пароль должен содержать не менее 8 символов!';
+            re.className = 'response-message error';
+            return;
+        }
+
+        if (pw !== pwc) { 
+            re.textContent = 'Пароли не совпадают!'; 
+            re.className = 'response-message error'; 
+            return; 
+        }
+
         try { 
-            sb.disabled = true; sb.textContent = 'Вход...'; 
-            const r = await fetch('/login_web', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: lo, password: pw }) }); 
+            sb.disabled = true; 
+            sb.textContent = 'Регистрация...'; 
+            re.textContent = '';
+            re.className = 'response-message';
+
+            const r = await fetch('/register', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ 
+                    email: em, 
+                    login: lo, 
+                    password: pw, 
+                    terms_accepted: termsAccepted, 
+                    personal_data_consent: personalDataConsent 
+                }) 
+            }); 
             const d = await r.json(); 
-            if (r.ok) { 
-                re.textContent = d.message; re.className = 'response-message success'; 
-                userLogin = d.user_login; localStorage.setItem('token', d.token); localStorage.setItem('userLogin', d.user_login); 
-                messageHistory = []; localStorage.removeItem('guestMessageHistory'); 
-                updateAuthUI(); connectWebSocket(); await loadDialogs();
-                setTimeout(() => { this.reset(); re.className = 'response-message'; closeModals(); }, 2000); 
-            } else { re.textContent = d.message; re.className = 'response-message error'; } 
-        } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Войти'; }
+
+            if (r.ok || r.status === 201) { 
+                re.textContent = d.message || 'Ссылка для подтверждения отправлена на вашу почту!'; 
+                re.className = 'response-message success'; 
+                showNotification('Письмо отправлено! Проверьте почту для активации.', 'success');
+                setTimeout(() => { 
+                    this.reset(); 
+                    re.className = 'response-message'; 
+                    closeModals(); 
+                }, 2500); 
+            } else { 
+                re.textContent = d.message || 'Ошибка регистрации'; 
+                re.className = 'response-message error'; 
+            } 
+        } catch (error) { 
+            re.textContent = 'Ошибка соединения с сервером'; 
+            re.className = 'response-message error'; 
+        } finally { 
+            sb.disabled = false; 
+            sb.textContent = 'Зарегистрироваться'; 
+        }
+    });
+
+    // --- ФОРМА ВХОДА ---
+    document.getElementById('loginForm').addEventListener('submit', async function(e) {
+        e.preventDefault(); 
+        const lo = document.getElementById('loginEmail').value.trim(); 
+        const pw = document.getElementById('loginPassword').value; 
+        const re = document.getElementById('loginResponse'); 
+        const sb = this.querySelector('button[type="submit"]');
+
+        try { 
+            sb.disabled = true; 
+            sb.textContent = 'Вход...'; 
+            re.textContent = '';
+            re.className = 'response-message';
+
+            const r = await fetch('/login_web', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ login: lo, password: pw }) 
+            }); 
+            const d = await r.json(); 
+
+            if (r.ok && d.token) { 
+                re.textContent = d.message || 'Вход выполнен!'; 
+                re.className = 'response-message success'; 
+                userLogin = d.user_login; 
+                localStorage.setItem('token', d.token); 
+                localStorage.setItem('userLogin', d.user_login); 
+                messageHistory = []; 
+                localStorage.removeItem('guestMessageHistory'); 
+                
+                updateAuthUI(); 
+                connectWebSocket(); 
+                await loadDialogs();
+
+                showNotification(`Добро пожаловать, ${d.user_login}!`, 'success');
+                setTimeout(() => { 
+                    this.reset(); 
+                    re.className = 'response-message'; 
+                    closeModals(); 
+                }, 1000); 
+            } else { 
+                re.textContent = d.message || 'Неверные данные для входа'; 
+                re.className = 'response-message error'; 
+            } 
+        } catch (error) { 
+            re.textContent = 'Ошибка соединения с сервером'; 
+            re.className = 'response-message error'; 
+        } finally { 
+            sb.disabled = false; 
+            sb.textContent = 'Войти'; 
+        }
     });
             
-    document.getElementById('forgotPassword').addEventListener('click', function(e) { e.preventDefault(); closeModals(); document.getElementById('recoveryModal').style.display = 'flex'; });
-    document.querySelector('.recovery-close').addEventListener('click', function() { document.getElementById('recoveryModal').style.display = 'none'; });
+    document.getElementById('forgotPassword').addEventListener('click', function(e) { 
+        e.preventDefault(); 
+        closeModals(); 
+        document.getElementById('recoveryModal').style.display = 'flex'; 
+    });
+    
+    document.querySelector('.recovery-close').addEventListener('click', function() { 
+        document.getElementById('recoveryModal').style.display = 'none'; 
+    });
             
     document.getElementById('recoveryForm').addEventListener('submit', async function(e) {
-        e.preventDefault(); const em = document.getElementById('recoveryEmail').value; const re = document.getElementById('recoveryResponse'); const sb = this.querySelector('button[type="submit"]');
-        try { sb.disabled = true; sb.textContent = 'Отправка...'; const r = await fetch('/recover-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: em }) }); const d = await r.json(); if (r.ok) { re.textContent = d.message; re.className = 'response-message success'; setTimeout(() => { document.getElementById('recoveryModal').style.display = 'none'; this.reset(); re.className = 'response-message'; }, 3000); } else { re.textContent = d.message; re.className = 'response-message error'; } } catch (error) { re.textContent = 'Ошибка'; re.className = 'response-message error'; } finally { sb.disabled = false; sb.textContent = 'Отправить ссылку'; }
+        e.preventDefault(); 
+        const em = document.getElementById('recoveryEmail').value.trim(); 
+        const re = document.getElementById('recoveryResponse'); 
+        const sb = this.querySelector('button[type="submit"]');
+        try { 
+            sb.disabled = true; 
+            sb.textContent = 'Отправка...'; 
+            const r = await fetch('/recover-password', { 
+                method: 'POST', 
+                headers: { 'Content-Type': 'application/json' }, 
+                body: JSON.stringify({ email: em }) 
+            }); 
+            const d = await r.json(); 
+            if (r.ok) { 
+                re.textContent = d.message || 'Письмо отправлено!'; 
+                re.className = 'response-message success'; 
+                setTimeout(() => { 
+                    document.getElementById('recoveryModal').style.display = 'none'; 
+                    this.reset(); 
+                    re.className = 'response-message'; 
+                }, 3000); 
+            } else { 
+                re.textContent = d.message || 'Ошибка восстановления'; 
+                re.className = 'response-message error'; 
+            } 
+        } catch (error) { 
+            re.textContent = 'Ошибка соединения с сервером'; 
+            re.className = 'response-message error'; 
+        } finally { 
+            sb.disabled = false; 
+            sb.textContent = 'Отправить ссылку'; 
+        }
     });
 });

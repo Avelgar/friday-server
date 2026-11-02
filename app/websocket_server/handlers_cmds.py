@@ -3,11 +3,10 @@ import json
 import logging
 import asyncio
 import aiomysql
-import hashlib
 from datetime import datetime
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
-from app.websocket_server.state import mac_to_websocket, ws_to_mac
+from app.websocket_server import state
 from app.websocket_server.utils import async_send, get_device_type, get_accessible_devices
 import time
 import os
@@ -20,10 +19,10 @@ HISTORY_LIMIT = 10
 active_media_queues = {} 
 device_audio_locks = {}
 
-def get_device_audio_lock(mac: str) -> asyncio.Lock:
-    if mac not in device_audio_locks:
-        device_audio_locks[mac] = asyncio.Lock()
-    return device_audio_locks[mac]
+def get_device_audio_lock(client_id: int) -> asyncio.Lock:
+    if client_id not in device_audio_locks:
+        device_audio_locks[client_id] = asyncio.Lock()
+    return device_audio_locks[client_id]
 
 # Полный список поддерживаемых команд для управления устройствами
 ACTION_DESCRIPTIONS = {
@@ -74,28 +73,33 @@ async def handle_audio_end(websocket, data):
         active_media_queues[ui_msg_id].put_nowait(None)
         active_media_queues.pop(ui_msg_id, None)
 
-async def get_mac_by_name(cursor, device_name, fallback_mac):
-    if not device_name: return fallback_mac
-    clean_name = device_name.lower().strip()
+def get_target_websocket(user_id, target_device_name, fallback_ws):
+    """Поиск целевого веб-сокета в RAM по имени или типу устройства."""
+    if not target_device_name or not user_id:
+        return fallback_ws
+    clean_name = target_device_name.lower().strip()
     
-    # 1. Точное совпадение
-    await cursor.execute("SELECT mac FROM devices WHERE LOWER(device_name) = %s", (clean_name,))
-    res = await cursor.fetchone()
-    if res: return res['mac']
-    
-    # 2. Нечеткое совпадение по онлайн-устройствам
-    await cursor.execute("SELECT mac, device_name FROM devices WHERE is_online = TRUE")
-    for d in await cursor.fetchall():
-        d_name = d['device_name'].lower()
-        if d_name in clean_name or clean_name in d_name:
-            return d['mac']
-        # Проверяем ключевые слова "комп", "пк", "телефон", "робот"
-        if ("комп" in clean_name or "пк" in clean_name) and ("комп" in d_name or "pc" in d_name):
-            return d['mac']
-        if "телефон" in clean_name and "телефон" in d_name:
-            return d['mac']
+    user_ws_set = state.user_connections.get(user_id, set())
+    for ws in user_ws_set:
+        session = state.ws_sessions.get(ws)
+        if not session: continue
+        d_name = session.get('device_name', '').lower()
+        d_type = session.get('device_type', '').lower()
+        
+        # 1. Прямое совпадение по имени устройства
+        if clean_name in d_name or d_name in clean_name:
+            return ws
+        # 2. Совпадение по типу
+        if ("комп" in clean_name or "пк" in clean_name or "pc" in clean_name) and (d_type == "pc" or "комп" in d_name or "pc" in d_name):
+            return ws
+        if ("телефон" in clean_name or "phone" in clean_name) and (d_type == "phone" or "телефон" in d_name):
+            return ws
+        if ("робот" in clean_name or "robot" in clean_name) and (d_type == "robot" or "робот" in d_name):
+            return ws
+        if ("браузер" in clean_name or "web" in clean_name) and (d_type == "web" or "браузер" in d_name):
+            return ws
             
-    return fallback_mac
+    return fallback_ws
 
 
 # =========================================================================
@@ -123,33 +127,26 @@ async def handle_command(websocket, data):
             if audio_base64:
                 media_queue.put_nowait({"type": "audio", "data": base64.b64decode(audio_base64)})
         
-        mac = ws_to_mac.get(websocket) or data.get('mac')
-        if not mac and data.get('token'):
-            mac = f"WEB{hashlib.md5(str(data.get('token')).encode()).hexdigest()[:13]}"
-            
+        session = state.ws_sessions.get(websocket, {})
+        user_id = session.get('user_id')
+        sender_name = session.get('device_name') or data.get('device_name') or data.get('DeviceName') or 'Компьютер'
+        device_type_code = session.get('device_type') or data.get('device_type') or 'pc'
+        device_type = get_device_type(type_str=device_type_code)
+
         image_bytes = base64.b64decode(screenshot_base64) if screenshot_base64 else None
         audio_bytes = base64.b64decode(audio_base64) if audio_base64 else None
 
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
         
-        await cursor.execute("SELECT id, device_name, user_id FROM devices WHERE mac = %s", (mac,))
-        sender_device = await cursor.fetchone()
-        if not sender_device: raise Exception(f"Устройство отправителя не найдено (MAC: {mac})")
-        
-        sender_id = sender_device['id']
-        sender_name = sender_device['device_name']
-        device_type = get_device_type(mac)
-        user_id = sender_device.get('user_id')
         db_user_text = command if command else ("[Аудиосообщение]" if (audio_bytes or is_streaming) else "🖼️ [Фото]")
         
         logger.info("\n" + "="*50)
         logger.info(f"[ФАСАД] Инициатор: {sender_name} ({device_type}) | Стрим: {is_streaming}")
 
         client_dialog_id = data.get('dialog_id')
-        sender_ws = mac_to_websocket.get(mac)
+        sender_ws = websocket
         
-        is_new_dialog = False
         formatted_history = []
 
         if user_id:
@@ -166,7 +163,6 @@ async def handle_command(websocket, data):
                 else: create_new = True
                     
             if create_new:
-                is_new_dialog = True
                 dialog_name = "Новый диалог"
                 await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (dialog_name, user_id))
                 dialog_id = cursor.lastrowid
@@ -174,22 +170,27 @@ async def handle_command(websocket, data):
                 if sender_ws: await async_send(sender_ws, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
             if dialog_id:
-                await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Вы', %s, %s, %s)", (db_user_text, sender_id, dialog_id))
+                await cursor.execute(
+                    "INSERT INTO messages (sender, device_name, text, dialog_id) VALUES ('Вы', %s, %s, %s)",
+                    (sender_name, db_user_text, dialog_id)
+                )
                 user_msg_id = cursor.lastrowid
-                await cursor.execute("INSERT INTO messages (send_type, text, recipient_device_id, dialog_id) VALUES ('Бот', '', %s, %s)", (sender_id, dialog_id))
+                await cursor.execute(
+                    "INSERT INTO messages (sender, device_name, text, dialog_id) VALUES ('Бот', NULL, '', %s)",
+                    (dialog_id,)
+                )
                 bot_message_id = cursor.lastrowid
                 await conn.commit()
 
                 await cursor.execute("""
-                    SELECT CASE WHEN m.send_type = 'Вы' THEN 'Пользователь' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender_name, m.text
-                    FROM messages m LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
-                    WHERE m.dialog_id = %s AND m.id < %s ORDER BY m.created_at ASC
+                    SELECT sender, text FROM messages
+                    WHERE dialog_id = %s AND id < %s ORDER BY created_at ASC
                 """, (dialog_id, user_msg_id))
                 
                 raw_history = await cursor.fetchall()
                 if raw_history:
                     for msg in raw_history[-HISTORY_LIMIT:]:
-                        role = "user" if msg['sender_name'] == 'Пользователь' else "model"
+                        role = "user" if msg['sender'] == 'Вы' else "model"
                         formatted_history.append({"role": role, "parts": [{"text": msg['text']}]})
         else:
             user_msg_id = int(datetime.now().timestamp() * 1000)
@@ -201,10 +202,9 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
-        # === ПОДТЯГИВАЕМ ДОСТУПНЫЕ ОНЛАЙН-УСТРОЙСТВА ДЛЯ ФАСАДА ===
-        accessible_devices = await get_accessible_devices(cursor, mac, user_id)
+        # === ПОДТЯГИВАЕМ ОНЛАЙН-УСТРОЙСТВА ИЗ ОПЕРАТИВНОЙ ПАМЯТИ ===
+        accessible_devices = await get_accessible_devices(None, websocket, user_id)
         online_devices_list = [f"- {dev}" for dev in accessible_devices]
-        # Добавляем самого себя
         online_devices_list.append(f"- {sender_name} ({device_type}, текущее устройство)")
         devices_online_str = "\n".join(online_devices_list)
 
@@ -240,7 +240,7 @@ async def handle_command(websocket, data):
                 prompt_text=prompt_text_to_send, system_instruction=system_instruction, allowed_actions=allowed_actions, audio_bytes=audio_bytes, image_bytes=image_bytes, formatted_history=formatted_history, voice_name=voice_name, assistant_name=name
             )
 
-        audio_lock = get_device_audio_lock(mac)
+        audio_lock = get_device_audio_lock(id(websocket))
         async with audio_lock:
             async for chunk in generator:
                 if chunk["type"] == "user_text":
@@ -264,9 +264,8 @@ async def handle_command(websocket, data):
                         actions = cmd.get('actions', [])
                         if not actions: continue
 
-                        # Определяем реальный MAC целевого устройства
-                        target_mac = await get_mac_by_name(cursor, target_device_name, fallback_mac=mac)
-                        target_ws = mac_to_websocket.get(target_mac)
+                        # Находим сокет целевого устройства в оперативной памяти
+                        target_ws = get_target_websocket(user_id, target_device_name, fallback_ws=websocket)
 
                         real_actions = []
                         for act in actions:
@@ -281,20 +280,20 @@ async def handle_command(websocket, data):
                             else:
                                 real_actions.append(act)
 
-                        # ОТПРАВЛЯЕМ КОМАНДУ НА ЦЕЛЕВОЕ УСТРОЙСТВО НАПРЯМУЮ!
+                        # Отправляем команду целевому устройству
                         if real_actions:
                             if target_ws:
-                                logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправил {len(real_actions)} действий на '{target_device_name or sender_name}' (MAC: {target_mac})")
+                                logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправил {len(real_actions)} действий на '{target_device_name or sender_name}'")
                                 await async_send(target_ws, {
                                     "type": "new_message",
-                                    "message_id": bot_message_id if target_mac == mac else None,
-                                    "user_msg_id": user_msg_id if target_mac == mac else None,
-                                    "sender": "Бот" if target_mac == mac else sender_name,
+                                    "message_id": bot_message_id if target_ws == websocket else None,
+                                    "user_msg_id": user_msg_id if target_ws == websocket else None,
+                                    "sender": "Бот" if target_ws == websocket else sender_name,
                                     "text": "",
                                     "actions": real_actions
                                 })
                             else:
-                                logger.warning(f"⚠️ [DIRECT DISPATCH] Устройство '{target_device_name}' (MAC: {target_mac}) не в сети!")
+                                logger.warning(f"⚠️ [DIRECT DISPATCH] Устройство '{target_device_name}' не в сети!")
 
                 elif chunk["type"] == "audio":
                     audio_chunks_count += 1
@@ -324,7 +323,7 @@ async def handle_command(websocket, data):
         try:
             if cursor and bot_message_id and user_msg_id:
                 await cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id)); await conn.commit()
-            sender_ws = mac_to_websocket.get(mac)
+            sender_ws = websocket
             if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
         except: pass
     finally:
@@ -368,7 +367,6 @@ async def handle_antigravity_get_chats(websocket, data):
             await async_send(websocket, {"type": "antigravity_chats_list", "chats": []})
             return
 
-        # Заменяем INSERT IGNORE на ON DUPLICATE KEY, чтобы убрать спам варнингов в логах
         await cursor.execute(
             """INSERT INTO antigravity_users (user_token, username) VALUES (%s, %s)
                ON DUPLICATE KEY UPDATE username = VALUES(username)""",
@@ -575,7 +573,6 @@ async def handle_antigravity_task(websocket, data):
 
         logger.info(f"📋 [DB STATE] Чат: {chat_uid} | Ключ #{assigned_key} | prev_id: {prev_interaction_id[:12] if prev_interaction_id else 'None'} | env: {environment_id[:12] if environment_id else 'None'}")
 
-        # Подтягиваем чистую историю для эстафеты (Handoff)
         await cursor.execute(
             "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
             (chat_uid,)
@@ -673,19 +670,16 @@ async def handle_antigravity_task(websocket, data):
         try:
             conn = await get_async_db_connection()
             cursor = await conn.cursor()
-            # 1. Удаляем незавершенное сообщение из истории
             await cursor.execute(
                 "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
                 (chat_uid,)
             )
-            # 2. СБРАСЫВАЕМ ЗАГРЯЗНЕННЫЙ КОНТЕЙНЕР GOOGLE!
-            # Следующий запрос пойдет в чистую среду без старых хвостов
             await cursor.execute(
                 "UPDATE antigravity_chats SET last_interaction_id = NULL, environment_id = NULL WHERE chat_uid = %s",
                 (chat_uid,)
             )
             await conn.commit()
-            logger.info(f"🧹 [CLEANUP SUCCESS] Окружение Google сброшено в NULL для чата {chat_uid}. Следующий запрос будет с чистого листа.")
+            logger.info(f"🧹 [CLEANUP SUCCESS] Окружение Google сброшено в NULL для чата {chat_uid}.")
         except Exception as cle:
             logger.warning(f"[WS Cleanup Error] {cle}")
         finally:

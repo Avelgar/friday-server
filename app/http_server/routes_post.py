@@ -200,16 +200,21 @@ def do_POST(self):
                     return self.send_json(403, {"status": "error", "message": "Нет доступа к этому диалогу"})
                 
                 cursor.execute("""
-                    SELECT m.id, CASE WHEN m.send_type = 'Вы' THEN 'Вы' WHEN m.send_type = 'Бот' THEN 'Бот' ELSE d.device_name END AS sender, m.text, m.created_at as time
-                    FROM messages m 
-                    LEFT JOIN devices d ON m.send_type COLLATE utf8mb4_general_ci = CAST(d.id AS CHAR) COLLATE utf8mb4_general_ci AND m.send_type NOT IN ('Вы', 'Бот')
-                    WHERE m.dialog_id = %s ORDER BY m.created_at ASC
+                    SELECT id, sender, device_name, text, created_at as time
+                    FROM messages
+                    WHERE dialog_id = %s ORDER BY created_at ASC
                 """, (dialog_id,))
                 
                 history = []
                 for msg in cursor.fetchall():
                     msg_time = msg['time'].strftime('%Y-%m-%d %H:%M:%S') if hasattr(msg['time'], 'strftime') else msg['time']
-                    history.append({"id": msg['id'], "sender": msg['sender'], "text": msg['text'], "time": msg_time})
+                    history.append({
+                        "id": msg['id'],
+                        "sender": msg['sender'],
+                        "device_name": msg.get('device_name'),
+                        "text": msg['text'],
+                        "time": msg_time
+                    })
                 
                 self.send_json(200, {"status": "success", "history": history})
             except Exception:
@@ -240,8 +245,10 @@ def do_POST(self):
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
 
         elif self.path == '/register':
-            email = data.get('email'); login = data.get('login'); password = data.get('password')
-            if not all([email, login, password]): 
+            email = data.get('email')
+            login = data.get('login')
+            password = data.get('password')
+            if not all([email, login, password]):
                 return self.send_json(400, {"status": "error", "message": "Все поля обязательны"})
 
             # Проверяем согласие только если это явный запрос с веб-сайта с чекбоксами
@@ -249,6 +256,24 @@ def do_POST(self):
                 return self.send_json(400, {"status": "error", "message": "Необходимо принять соглашение"})
             if 'personal_data_consent' in data and data.get('personal_data_consent') is not True:
                 return self.send_json(400, {"status": "error", "message": "Необходимо дать согласие на обработку данных"})
+
+            cursor.execute("SELECT email, login FROM users WHERE email = %s OR login = %s", (email, login))
+            existing = cursor.fetchall()
+            if existing:
+                return self.send_json(400, {"status": "error", "message": "Пользователь уже существует"})
+
+            token = secrets.token_urlsafe(32)
+            link = f"https://friday-assistant.ru/verify?token={token}"
+            if send_email(email, "Подтверждение регистрации", f"Ссылка: {link}"):
+                hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                cursor.execute(
+                    "INSERT INTO users (email, login, password, SingUpToken, SingUpTokenDelTime) VALUES (%s, %s, %s, %s, NOW() + INTERVAL 1 DAY)",
+                    (email, login, hashed_pw, token)
+                )
+                conn.commit()
+                self.send_json(201, {"status": "success", "message": "Письмо отправлено"})
+            else:
+                self.send_json(500, {"status": "error", "message": "Ошибка отправки письма"})
 
         elif self.path == '/login':
             login = data.get('login'); password = data.get('password')
@@ -273,27 +298,9 @@ def do_POST(self):
             if isinstance(token, bytes): token = token.decode('utf-8')
             self.send_json(200, {"status": "success", "message": "Вход выполнен", "user_login": user['login'], "token": token})
 
-        elif self.path == '/logout_web':
-            token = data.get('token')
-            if token:
-                mac = f"WEB{hashlib.md5(str(token).encode()).hexdigest()[:13]}"
-                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
-                dev = cursor.fetchone()
-                if dev:
-                    cursor.execute("UPDATE devices SET is_online = FALSE WHERE id = %s", (dev['id'],))
-                    conn.commit()
-                    return self.send_json(200, {"status": "success", "message": "Выход выполнен"})
-            self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-
-        elif self.path == '/logout':
-            mac = data.get('MAC')
-            if mac:
-                cursor.execute("UPDATE devices SET user_id = NULL WHERE mac = %s", (mac,))
-                if cursor.rowcount > 0:
-                    conn.commit()
-                    self.send_json(200, {"status": "success"})
-                else: self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-            else: self.send_json(400, {"status": "error", "message": "MAC required"})
+        elif self.path == '/logout' or self.path == '/logout_web':
+            # Логаут для stateless JWT
+            self.send_json(200, {"status": "success", "message": "Выход выполнен"})
 
         elif self.path == '/recover-password':
             email = data.get('email')
@@ -318,88 +325,24 @@ def do_POST(self):
             if user:
                 hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
                 cursor.execute("UPDATE users SET password = %s, RecoveryToken = NULL, RecoveryTokenDelTime = NULL WHERE id = %s", (hashed_pw, user['id']))
-                cursor.execute("UPDATE devices SET user_id = NULL WHERE user_id = %s", (user['id'],))
                 conn.commit()
                 self.send_json(200, {"status": "success", "message": "Пароль изменен"})
             else: self.send_json(400, {"status": "error", "message": "Неверный токен"})
-            
-        elif self.path == '/get_devices':
-            mac = data.get('mac')
-            cursor.execute("SELECT id, user_id FROM devices WHERE mac = %s", (mac,))
-            device = cursor.fetchone()
-            if not device: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-
-            account_devices = []; my_devices = []; processed_macs = {mac}
-
-            if device['user_id']:
-                cursor.execute("SELECT mac, device_name, is_online FROM devices WHERE user_id = %s AND mac != %s", (device['user_id'], mac))
-                for d in cursor.fetchall():
-                    account_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": True})
-                    processed_macs.add(d['mac'])
-
-            cursor.execute("SELECT d.mac, d.device_name, d.is_online FROM device_access da JOIN devices d ON da.owner_id = d.id WHERE da.guest_id = %s", (device['id'],))
-            for d in cursor.fetchall():
-                if d['mac'] not in processed_macs:
-                    my_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": False})
-                    processed_macs.add(d['mac'])
-
-            cursor.execute("SELECT d.mac, d.device_name, d.is_online FROM device_access da JOIN devices d ON da.guest_id = d.id WHERE da.owner_id = %s", (device['id'],))
-            for d in cursor.fetchall():
-                if d['mac'] not in processed_macs:
-                    my_devices.append({"DeviceName": d['device_name'], "MacAddress": d['mac'], "IsOnline": bool(d['is_online']), "IsAccountDevice": False})
-                    processed_macs.add(d['mac'])
-
-            self.send_json(200, {"status": "success", "account_devices": account_devices, "my_devices": my_devices})
-
-        elif self.path == '/connect_device':
-            req_mac = data.get('MAC'); dev_name = data.get('DeviceName'); pwd = data.get('Password')
-            cursor.execute("SELECT id, mac, password FROM devices WHERE device_name = %s", (dev_name,))
-            target = cursor.fetchone()
-            cursor.execute("SELECT id FROM devices WHERE mac = %s", (req_mac,))
-            requester = cursor.fetchone()
-            
-            if not target: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-            if not bcrypt.checkpw(pwd.encode('utf-8'), target['password'].encode('utf-8')): return self.send_json(401, {"status": "error", "message": "Неверный пароль"})
-            if req_mac == target['mac']: return self.send_json(400, {"status": "error", "message": "Само к себе"})
-            if not requester: return self.send_json(404, {"status": "error", "message": "Инициатор не найден"})
-            
-            cursor.execute("INSERT IGNORE INTO device_access (owner_id, guest_id) VALUES (%s, %s), (%s, %s)", (target['id'], requester['id'], requester['id'], target['id']))
-            conn.commit()
-            self.send_json(200, {"status": "success", "message": "Подключено", "target_mac": target['mac'], "target_device_name": dev_name})
-
-        elif self.path == '/disconnect_device':
-            req_mac = data.get('requester_mac'); target_mac = data.get('target_mac')
-            cursor.execute("SELECT id, mac FROM devices WHERE mac IN (%s, %s)", (req_mac, target_mac))
-            devs = {r['mac']: r['id'] for r in cursor.fetchall()}
-            if len(devs) != 2: return self.send_json(404, {"status": "error", "message": "Устройства не найдены"})
-            req_id = devs[req_mac]; tar_id = devs[target_mac]
-            cursor.execute("DELETE FROM device_access WHERE (owner_id=%s AND guest_id=%s) OR (owner_id=%s AND guest_id=%s)", (req_id, tar_id, tar_id, req_id))
-            conn.commit()
-            self.send_json(200, {"status": "success", "message": "Отключено"})
 
         elif self.path == '/delete_message':
             msg_id = data.get('msg_id')
             token = data.get('token')
-            mac = data.get('mac')
             if not msg_id: return self.send_json(400, {"status": "error", "message": "msg_id обязателен"})
+            if not token: return self.send_json(401, {"status": "error", "message": "Токен обязателен"})
                 
-            if token:
-                try:
-                    payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-                    user_id = payload['user_id']
-                except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
-                
-                cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
-                if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
-                cursor.execute("DELETE FROM messages WHERE id = %s", (msg_id,))
-            else:
-                if not mac: return self.send_json(400, {"status": "error", "message": "mac обязателен для гостей"})
-                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
-                dev = cursor.fetchone()
-                if not dev: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-                cursor.execute("DELETE FROM messages WHERE id = %s AND recipient_device_id = %s", (msg_id, dev['id']))
-                if cursor.rowcount == 0: return self.send_json(404, {"status": "error", "message": "Сообщение не найдено в БД"})
-                
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+            except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
+            
+            cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
+            if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
+            cursor.execute("DELETE FROM messages WHERE id = %s", (msg_id,))
             conn.commit()
             self.send_json(200, {"status": "success", "message": "Сообщение удалено"})
 
@@ -407,26 +350,17 @@ def do_POST(self):
             msg_id = data.get('msg_id')
             new_text = data.get('new_text')
             token = data.get('token')
-            mac = data.get('mac')
             if not msg_id or not new_text: return self.send_json(400, {"status": "error", "message": "msg_id и new_text обязательны"})
+            if not token: return self.send_json(401, {"status": "error", "message": "Токен обязателен"})
                 
-            if token:
-                try:
-                    payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
-                    user_id = payload['user_id']
-                except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
-                
-                cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
-                if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
-                cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (new_text, msg_id))
-            else:
-                if not mac: return self.send_json(400, {"status": "error", "message": "mac обязателен для гостей"})
-                cursor.execute("SELECT id FROM devices WHERE mac = %s", (mac,))
-                dev = cursor.fetchone()
-                if not dev: return self.send_json(404, {"status": "error", "message": "Устройство не найдено"})
-                cursor.execute("UPDATE messages SET text = %s WHERE id = %s AND recipient_device_id = %s", (new_text, msg_id, dev['id']))
-                if cursor.rowcount == 0: return self.send_json(404, {"status": "error", "message": "Сообщение не найдено в БД"})
-                
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+            except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
+            
+            cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
+            if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
+            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (new_text, msg_id))
             conn.commit()
             self.send_json(200, {"status": "success", "message": "Сообщение обновлено"})
 

@@ -1,6 +1,7 @@
 import json
 import base64
 import websockets
+from app.websocket_server import state
 
 DEVICE_TYPES_RU = {
     'pc': 'компьютер',
@@ -9,42 +10,36 @@ DEVICE_TYPES_RU = {
     'web': 'браузер'
 }
 
-def get_device_type(mac=None, type_str=None):
+def get_device_type(type_str=None, mac=None):
     """Определение понятного русского названия типа устройства."""
-    if type_str and type_str in DEVICE_TYPES_RU:
-        return DEVICE_TYPES_RU[type_str]
-    if not mac:
-        return "устройство"
-    if '-' in str(mac):
-        return "компьютер"
-    if 'WEB' in str(mac):
-        return "браузер"
-    if str(mac).lower() == "b8:27:eb:00:51:06" or "pi" in str(mac).lower():
-        return "робот"
-    return "телефон"
+    if type_str and str(type_str).lower() in DEVICE_TYPES_RU:
+        return DEVICE_TYPES_RU[str(type_str).lower()]
+    if mac:
+        if '-' in str(mac): return "компьютер"
+        if 'WEB' in str(mac): return "браузер"
+        if str(mac).lower() == "b8:27:eb:00:51:06" or "pi" in str(mac).lower(): return "робот"
+    return "устройство"
 
 # Алиас для обратной совместимости
 get_device_type_ru = get_device_type
 
-async def get_accessible_devices(cursor, current_mac, user_id):
+async def get_accessible_devices(cursor_unused, current_ws, user_id):
     """
-    Возвращает список всех онлайн-устройств пользователя.
-    Все свои устройства онлайн видят друг друга без таблицы device_access.
+    Возвращает список всех онлайн-устройств пользователя прямо из оперативной памяти (без БД).
     """
     devices = []
     if not user_id:
         return devices
 
-    await cursor.execute(
-        """SELECT mac, device_name, device_type 
-           FROM devices 
-           WHERE user_id = %s AND mac != %s AND is_online = TRUE""",
-        (user_id, current_mac)
-    )
-    rows = await cursor.fetchall()
-    for row in rows:
-        d_type = get_device_type(type_str=row.get('device_type', 'pc'), mac=row.get('mac'))
-        devices.append(f"{row['device_name']} ({d_type})")
+    user_ws_set = state.user_connections.get(user_id, set())
+    for ws in user_ws_set:
+        if ws == current_ws:
+            continue
+        session = state.ws_sessions.get(ws)
+        if session:
+            d_name = session.get('device_name', 'Устройство')
+            d_type = get_device_type(type_str=session.get('device_type', 'pc'))
+            devices.append(f"{d_name} ({d_type})")
 
     return devices
 
