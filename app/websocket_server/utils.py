@@ -9,13 +9,27 @@ DEVICE_TYPES_RU = {
     'web': 'браузер'
 }
 
-def get_device_type_ru(type_str):
-    return DEVICE_TYPES_RU.get(type_str, 'устройство')
+def get_device_type(mac=None, type_str=None):
+    """Определение понятного русского названия типа устройства."""
+    if type_str and type_str in DEVICE_TYPES_RU:
+        return DEVICE_TYPES_RU[type_str]
+    if not mac:
+        return "устройство"
+    if '-' in str(mac):
+        return "компьютер"
+    if 'WEB' in str(mac):
+        return "браузер"
+    if str(mac).lower() == "b8:27:eb:00:51:06" or "pi" in str(mac).lower():
+        return "робот"
+    return "телефон"
+
+# Алиас для обратной совместимости
+get_device_type_ru = get_device_type
 
 async def get_accessible_devices(cursor, current_mac, user_id):
     """
     Возвращает список всех онлайн-устройств пользователя.
-    Больше никаких паролей и таблицы device_access — все свои устройства доверяют друг другу!
+    Все свои устройства онлайн видят друг друга без таблицы device_access.
     """
     devices = []
     if not user_id:
@@ -29,7 +43,7 @@ async def get_accessible_devices(cursor, current_mac, user_id):
     )
     rows = await cursor.fetchall()
     for row in rows:
-        d_type = get_device_type_ru(row.get('device_type', 'pc'))
+        d_type = get_device_type(type_str=row.get('device_type', 'pc'), mac=row.get('mac'))
         devices.append(f"{row['device_name']} ({d_type})")
 
     return devices

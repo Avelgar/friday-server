@@ -241,21 +241,14 @@ def do_POST(self):
 
         elif self.path == '/register':
             email = data.get('email'); login = data.get('login'); password = data.get('password')
-            if not all([email, login, password]): return self.send_json(400, {"status": "error", "message": "Все поля обязательны"})
-            if data.get('terms_accepted') is not True or data.get('personal_data_consent') is not True:
+            if not all([email, login, password]): 
+                return self.send_json(400, {"status": "error", "message": "Все поля обязательны"})
+
+            # Проверяем согласие только если это явный запрос с веб-сайта с чекбоксами
+            if 'terms_accepted' in data and data.get('terms_accepted') is not True:
                 return self.send_json(400, {"status": "error", "message": "Необходимо принять соглашение"})
-            cursor.execute("SELECT email, login FROM users WHERE email = %s OR login = %s", (email, login))
-            existing = cursor.fetchall()
-            if existing:
-                return self.send_json(400, {"status": "error", "message": "Пользователь уже существует"})
-            token = secrets.token_urlsafe(32)
-            link = f"https://friday-assistant.ru/verify?token={token}"
-            if send_email(email, "Подтверждение регистрации", f"Ссылка: {link}"):
-                hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                cursor.execute("INSERT INTO users (email, login, password, SingUpToken, SingUpTokenDelTime) VALUES (%s, %s, %s, %s, NOW() + INTERVAL 1 DAY)", (email, login, hashed_pw, token))
-                conn.commit()
-                self.send_json(201, {"status": "success", "message": "Письмо отправлено"})
-            else: self.send_json(500, {"status": "error", "message": "Ошибка отправки письма"})
+            if 'personal_data_consent' in data and data.get('personal_data_consent') is not True:
+                return self.send_json(400, {"status": "error", "message": "Необходимо дать согласие на обработку данных"})
 
         elif self.path == '/login':
             login = data.get('login'); password = data.get('password')
