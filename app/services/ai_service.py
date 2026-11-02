@@ -594,6 +594,15 @@ class AIService:
                 logger.info(f"[Antigravity Engine] Ключ #{assigned_key} исчерпан. Ротируем на свободный.")
                 assigned_key = self.key_pool.get_available_key(assigned_key)
 
+        # ТЕСТ ПЕРЕКЛЮЧЕНИЯ КЛЮЧЕЙ
+        if "[TEST_KEY_ROTATION]" in prompt_text:
+            old_k = assigned_key
+            self.key_pool.mark_exhausted(old_k, duration_seconds=3600 * 12)
+            assigned_key = self.key_pool.get_available_key(old_k)
+            logger.warning(f"🧪 [TEST KEY ROTATION] Тест: Ключ #{old_k} искусственно исчерпан! Эстафета передана ключу #{assigned_key}")
+            previous_interaction_id = None
+            environment_id = None
+
         logger.info(f"[Antigravity Engine] Запуск таски на ключе #{assigned_key} (new={is_new_session})")
 
         agent_system_instruction = """Ты — автономный Senior разработчик.

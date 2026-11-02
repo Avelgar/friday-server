@@ -910,6 +910,22 @@ async def handle_antigravity_task(websocket, data):
 
     except asyncio.CancelledError:
         logger.info(f"[WS Antigravity] Задача чата {chat_uid} отменена по запросу пользователя.")
+        try:
+            conn = await get_async_db_connection()
+            cursor = await conn.cursor()
+            # Удаляем последнее незавершенное сообщение пользователя, так как ответа не последовало
+            await cursor.execute(
+                "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
+                (chat_uid,)
+            )
+            await conn.commit()
+            logger.info(f"[WS Antigravity] Незавершенное сообщение удалено из базы для чата: {chat_uid}")
+        except Exception as cle:
+            logger.warning(f"[WS Antigravity Cleanup Error] {cle}")
+        finally:
+            if cursor: await cursor.close()
+            if conn: conn.close()
+
         await async_send(websocket, {
             "type": "antigravity_cancelled",
             "chat_id": chat_uid
