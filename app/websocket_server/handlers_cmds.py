@@ -334,24 +334,9 @@ async def handle_command(websocket, data):
         if conn: conn.close()
         active_media_queues.pop(data.get('ui_msg_id', ''), None)
 
-async def get_least_used_key_index(cursor):
-    total_keys = len(ai_instance.api_keys)
-    if total_keys <= 1: return 0
-
-    await cursor.execute("SELECT key_index, COUNT(*) as cnt FROM antigravity_chats GROUP BY key_index")
-    rows = await cursor.fetchall()
-    
-    key_counts = {i: 0 for i in range(total_keys)}
-    for r in rows:
-        idx = r['key_index']
-        if idx in key_counts: key_counts[idx] = r['cnt']
-
-    usable_keys = [i for i in range(total_keys) if ai_instance.key_pool.is_usable(i)]
-    if not usable_keys:
-        usable_keys = list(range(total_keys))
-
-    best_key = min(usable_keys, key=lambda k: key_counts.get(k, 0))
-    return best_key
+async def get_least_used_key_index(cursor=None):
+    # Берем следующий по очереди свободный ключ из пула
+    return ai_instance.key_pool.get_next_key()
 
 active_antigravity_tasks = {}
 

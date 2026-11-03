@@ -27,11 +27,12 @@ class GeminiKeyPool:
     def __init__(self, keys: list[str]):
         self.keys = keys or []
         self.exhausted_keys = {}
+        self._round_robin_counter = 0
 
-    def mark_exhausted(self, key_index: int, duration_seconds: float = 3600 * 12):
+    def mark_exhausted(self, key_index: int, duration_seconds: float = 3600):
         now = time.time()
         self.exhausted_keys[key_index] = now + duration_seconds
-        logger.warning(f"🚫 [Key Pool] Ключ #{key_index} помечен как ИСЧЕРПАННЫЙ на {duration_seconds/3600:.1f}ч.")
+        logger.warning(f"🚫 [Key Pool] Ключ #{key_index} помечен как НЕРАБОЧИЙ на {duration_seconds/60:.0f} мин.")
 
     def is_usable(self, key_index: int) -> bool:
         if not self.keys: return True
@@ -41,20 +42,20 @@ class GeminiKeyPool:
             return True
         return False
 
-    def get_available_key(self, exclude_index: int = None) -> int:
-        """Находит следующий живой ключ. Если передан exclude_index, ищет ДРУГОЙ ключ!"""
+    def get_next_key(self, exclude_index: int = None) -> int:
+        """Честный Round-Robin: каждый раз выдает СЛЕДУЮЩИЙ живой ключ из 40."""
         total = len(self.keys)
         if total <= 1: return 0
 
-        start = (exclude_index + 1) % total if exclude_index is not None else 0
-        for i in range(total):
-            idx = (start + i) % total
-            if exclude_index is not None and idx == exclude_index:
+        for _ in range(total):
+            self._round_robin_counter = (self._round_robin_counter + 1) % total
+            candidate = self._round_robin_counter
+            if exclude_index is not None and candidate == exclude_index:
                 continue
-            if self.is_usable(idx):
-                return idx
+            if self.is_usable(candidate):
+                return candidate
 
-        # Если все ключи exhausted, берем тот, у которого тайм-аут кончится раньше всех
+        # Если все ключи в бане — сбрасываем самый ранний
         if self.exhausted_keys:
             earliest = min(self.exhausted_keys.keys(), key=lambda k: self.exhausted_keys[k])
             del self.exhausted_keys[earliest]
@@ -70,7 +71,11 @@ class AIService:
 
     def _get_client(self, key_index=None):
         idx = key_index if key_index is not None else self.current_key_index
-        return genai.Client(http_options={"api_version": "v1beta"}, api_key=self.api_keys[idx])
+        # timeout: 35.0 секунд не даст запросу висеть вечно!
+        return genai.Client(
+            http_options={"api_version": "v1beta", "timeout": 35.0}, 
+            api_key=self.api_keys[idx]
+        )
 
     def _get_live_client(self):
         live_key = self.api_keys[0] if self.api_keys else None
@@ -460,16 +465,12 @@ class AIService:
         recent_history: list = None
     ):
         total_keys = len(self.api_keys)
-        original_assigned_key = assigned_key
 
-        # Если ключ не назначен или исчерпан — выбираем доступный
+        # Если ключ не назначен или не работает — берем следующий по Round-Robin
         if assigned_key is None or not self.key_pool.is_usable(assigned_key):
-            assigned_key = self.key_pool.get_available_key(assigned_key)
-            # ВАЖНО: Ключ сменился! Чужая машина недоступна -> сбрасываем песочницу
-            if original_assigned_key is not None and assigned_key != original_assigned_key:
-                logger.info(f"🔄 Ключ #{original_assigned_key} недоступен. Переключение на #{assigned_key}. Сброс чужой среды.")
-                previous_interaction_id = None
-                environment_id = None
+            assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
+            previous_interaction_id = None
+            environment_id = None
 
         agent_system_instruction = """Ты — автономный Senior разработчик.
 Все файлы проекта (код, верстку, скрипты, презы, 3D-модели, Word-документы) ты создаешь, изменяешь и тестируешь прямо в своем окружении Linux.
@@ -481,27 +482,22 @@ class AIService:
    Сначала создай/отредактируй файл в своей файловой системе, протестируй его, а затем укажи [SYNC: путь].
 4. [RUN_COMMAND: команда] — выполнить системную команду на компьютере пользователя (Windows). Используй `python`, а не `python3`.
 5. [ASK_USER: Текст вопроса | Вариант 1 | Вариант 2 | Вариант 3] — уточнить параметры задачи или спросить мнение пользователя.
-6. [DELETE: относительный_путь] — удалить файл или папку на компьютере пользователя (без использования терминала). Клиент безопасно удалит его через файловую систему.
+6. [DELETE: относительный_путь] — удалить файл или папку на компьютере пользователя.
 
 ПРАВИЛА:
 - На простые вопросы отвечай текстом без тегов.
 - ЗАПРЕЩЕНО выводить полные тексты файлов в чат! Создавай файлы в файловой системе и используй [SYNC: путь].
-- Для удаления файлов на компьютере пользователя строго используй [DELETE: путь], не пытайся вызывать del или rm через RUN_COMMAND.
 """
 
-        max_attempts = max(3, min(total_keys, 10)) if total_keys > 0 else 3
+        max_attempts = min(total_keys, 10) if total_keys > 0 else 3
         attempt = 0
 
         while attempt < max_attempts:
             client = self._get_client(key_index=assigned_key)
 
             try:
-                # Оповещаем пользователя СРАЗУ перед сетевым вызовом!
                 if status_callback:
-                    if previous_interaction_id and environment_id:
-                        await status_callback({"status": f"Подключение к сессии (ключ #{assigned_key})..."})
-                    else:
-                        await status_callback({"status": f"Создание песочницы (ключ #{assigned_key})..."})
+                    await status_callback({"status": f"Подключение к Google (ключ #{assigned_key})..."})
 
                 kwargs = {
                     "agent": "antigravity-preview-09-2026",
@@ -514,7 +510,7 @@ class AIService:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
                     kwargs["input"] = current_input_prompt
-                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | prev_id={previous_interaction_id[:10]} | Ключ #{assigned_key}")
+                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Ключ #{assigned_key}")
                 else:
                     kwargs["system_instruction"] = agent_system_instruction
                     kwargs["environment"] = "remote"
@@ -529,33 +525,32 @@ class AIService:
                                 history_parts.append(f"{role}: {text_snip}")
                         
                         if history_parts:
-                            history_block = "\n".join(history_parts)
                             current_input_prompt = (
-                                f"# История недавних сообщений диалога:\n{history_block}\n\n"
-                                f"# Текущее задание:\n{prompt_text}"
+                                f"# История недавних сообщений диалога:\n" + "\n".join(history_parts) + f"\n\n# Текущее задание:\n{prompt_text}"
                             )
-                            logger.info(f"🔄 [GOOGLE CALL] Handoff в новую среду с историей ({len(history_parts)} сообщений) на ключе #{assigned_key}")
-                    else:
-                        logger.info(f"✨ [GOOGLE CALL] Чистый старт в новом окружении на ключе #{assigned_key}")
-
                     kwargs["input"] = current_input_prompt
+                    logger.info(f"✨ [GOOGLE CALL] Старт нового окружения на ключе #{assigned_key}")
 
-                interaction = await asyncio.to_thread(client.interactions.create, **kwargs)
+                # ЖЕСТКИЙ ТАЙМАУТ 30 СЕКУНД: если Google тупит — не ждем 2 минуты!
+                interaction = await asyncio.wait_for(
+                    asyncio.to_thread(client.interactions.create, **kwargs),
+                    timeout=30.0
+                )
+                
                 new_interaction_id = interaction.id
                 env_id = interaction.environment_id
                 logger.info(f"🆔 [GOOGLE CREATED] interaction_id={new_interaction_id} | env_id={env_id}")
 
-                self.antigravity_sessions[new_interaction_id] = assigned_key
-                if previous_interaction_id:
-                    self.antigravity_sessions[previous_interaction_id] = assigned_key
-
                 if status_callback:
-                    await status_callback({"status": "Агент думает (запуск контейнера)...", "interaction_id": new_interaction_id})
+                    await status_callback({"status": "Агент думает (контейнер запущен)...", "interaction_id": new_interaction_id})
 
-                # Опрос статуса выполнения
+                # Опрос статуса
                 while True:
-                    await asyncio.sleep(3)
-                    interaction = await asyncio.to_thread(client.interactions.get, id=new_interaction_id)
+                    await asyncio.sleep(2.5)
+                    interaction = await asyncio.wait_for(
+                        asyncio.to_thread(client.interactions.get, id=new_interaction_id),
+                        timeout=25.0
+                    )
                     
                     current_step_desc = interaction.status
                     try:
@@ -579,6 +574,7 @@ class AIService:
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
                 output_text = interaction.output_text or ""
+                import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
                 file_urls = {}
 
@@ -589,9 +585,7 @@ class AIService:
                 try:
                     list_resp = client.environments.files.list(environment=env_id, path="")
                     real_files_in_env = [f.name for f in list_resp.files if f.name not in ('.', '..', 'usr')]
-                    logger.info(f"[Antigravity Env Files] Реальные файлы в контейнере: {real_files_in_env}")
-                except Exception as le:
-                    logger.warning(f"[Antigravity Env Files] Ошибка: {le}")
+                except Exception: pass
 
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
@@ -616,13 +610,9 @@ class AIService:
 
                             file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(clean_path)}"
                             file_urls[clean_path] = file_url
-                            logger.info(f"[Antigravity Sync] Файл {fname} ({len(content)} байт) выкачан -> {file_url}")
                             download_success = True
                             break
                         except Exception: continue
-
-                    if not download_success:
-                        logger.warning(f"[Antigravity Sync] Файл {clean_path} НЕ найден в контейнере: {real_files_in_env}")
 
                 return {
                     "text": output_text,
@@ -633,45 +623,38 @@ class AIService:
                     "assigned_key": assigned_key
                 }
 
+            except (asyncio.TimeoutError, TimeoutError):
+                logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} завис и не отвечает за 30с! Переключаем на другой...")
+                self.key_pool.mark_exhausted(assigned_key, duration_seconds=1800)
+                assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
+                previous_interaction_id = None
+                environment_id = None
+                attempt += 1
+                continue
+
             except Exception as e:
                 err_str = str(e)
                 err_lower = err_str.lower()
-                logger.warning(f"[Antigravity Key #{assigned_key}] Ошибка: {err_str}")
+                logger.warning(f"[Antigravity Ошибка на ключе #{assigned_key}]: {err_str}")
 
-                # 1. Если ключ не видит песочницу (403, 404, Not Found) — сбрасываем привязку к машине
+                # Чужая среда или среда удалена
                 if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and (previous_interaction_id or environment_id):
-                    logger.info(f"[Antigravity Handoff] Среда #{environment_id} недоступна для ключа #{assigned_key}. Сброс на чистую среду.")
+                    logger.info(f"🔄 Сброс чужой среды #{environment_id} для ключа #{assigned_key}.")
                     previous_interaction_id = None
                     environment_id = None
                     attempt += 1
                     continue
 
-                # 2. Ошибка лимитов (429 RateLimit)
-                if "429" in err_str or "too_many_requests" in err_lower or "resource_exhausted" in err_lower:
-                    self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600 * 12)
-                    next_key = self.key_pool.get_available_key(exclude_index=assigned_key)
-                    if next_key != assigned_key:
-                        logger.info(f"[Antigravity Switch] Ключ #{assigned_key} исчерпан. Переключение на ключ #{next_key}...")
-                        if status_callback:
-                            await status_callback({"status": f"Лимит ключа #{assigned_key}, переход на ключ #{next_key}..."})
-                        assigned_key = next_key
-                        # КРИТИЧЕСКИ ВАЖНО: на новом ключе старая машина недоступна!
-                        previous_interaction_id = None
-                        environment_id = None
-                        attempt += 1
-                        continue
-
-                # 3. Любая другая ошибка ключа (например, заблокирован или нет баланса)
-                self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600 * 2)
+                # Лимиты 429 или любые сбои ключа
+                self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600)
+                next_key = self.key_pool.get_next_key(exclude_index=assigned_key)
+                logger.info(f"Переход с ключа #{assigned_key} на #{next_key}...")
+                assigned_key = next_key
+                previous_interaction_id = None
+                environment_id = None
                 attempt += 1
-                if attempt < max_attempts and total_keys > 1:
-                    next_key = self.key_pool.get_available_key(exclude_index=assigned_key)
-                    assigned_key = next_key
-                    previous_interaction_id = None
-                    environment_id = None
-                    continue
-                raise e
+                continue
 
-        raise Exception(f"Antigravity: исчерпаны все попытки вызова. Последний ключ: #{assigned_key}")
+        raise Exception(f"Все доступные ключи не отвечают или исчерпали квоту.")
 
 ai_instance = AIService()
