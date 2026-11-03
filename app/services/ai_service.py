@@ -71,9 +71,10 @@ class AIService:
 
     def _get_client(self, key_index=None):
         idx = key_index if key_index is not None else self.current_key_index
-        # timeout: 35.0 секунд не даст запросу висеть вечно!
+        # Внимание: timeout в google-genai задается в МИЛЛИСЕКУНДАХ!
+        # 60000 мс = 60 секунд (120000 = 2 минуты)
         return genai.Client(
-            http_options={"api_version": "v1beta", "timeout": 35.0}, 
+            http_options={"api_version": "v1beta", "timeout": 60000}, 
             api_key=self.api_keys[idx]
         )
 
@@ -532,9 +533,10 @@ class AIService:
                     logger.info(f"✨ [GOOGLE CALL] Старт нового окружения на ключе #{assigned_key}")
 
                 # ЖЕСТКИЙ ТАЙМАУТ 30 СЕКУНД: если Google тупит — не ждем 2 минуты!
+                # Здесь asyncio.wait_for принимает секунды: ставим 65.0 секунд
                 interaction = await asyncio.wait_for(
                     asyncio.to_thread(client.interactions.create, **kwargs),
-                    timeout=30.0
+                    timeout=65.0
                 )
                 
                 new_interaction_id = interaction.id
@@ -623,9 +625,9 @@ class AIService:
                     "assigned_key": assigned_key
                 }
 
-            except (asyncio.TimeoutError, TimeoutError):
-                logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} завис и не отвечает за 30с! Переключаем на другой...")
-                self.key_pool.mark_exhausted(assigned_key, duration_seconds=1800)
+            except (asyncio.TimeoutError, TimeoutError) as te:
+                logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} не ответил за 60с. Пробуем следующий...")
+                self.key_pool.mark_exhausted(assigned_key, duration_seconds=300) # на 5 минут
                 assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
                 previous_interaction_id = None
                 environment_id = None
@@ -636,6 +638,15 @@ class AIService:
                 err_str = str(e)
                 err_lower = err_str.lower()
                 logger.warning(f"[Antigravity Ошибка на ключе #{assigned_key}]: {err_str}")
+
+                # Таймаут на стороне клиента SDK
+                if "timed out" in err_lower or "timeout" in err_lower:
+                    self.key_pool.mark_exhausted(assigned_key, duration_seconds=300)
+                    assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
+                    previous_interaction_id = None
+                    environment_id = None
+                    attempt += 1
+                    continue
 
                 # Чужая среда или среда удалена
                 if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and (previous_interaction_id or environment_id):
