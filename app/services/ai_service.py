@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import requests
 import urllib.parse
 import os
+import re
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AI_Service")
@@ -21,13 +22,6 @@ try:
     from app.config.secrets import GEMINI_KEYS
 except ImportError:
     GEMINI_KEYS = []
-
-class DeviceAction(BaseModel):
-    action_type: str = Field(description="Тип действия.")
-    action_value: str = Field(description="Параметр действия.")
-
-def send_device_commands(target_device: str, actions: list[DeviceAction]):
-    pass
 
 class GeminiKeyPool:
     def __init__(self, keys: list[str]):
@@ -47,17 +41,20 @@ class GeminiKeyPool:
             return True
         return False
 
-    def get_available_key(self, preferred_index: int = None) -> int:
+    def get_available_key(self, exclude_index: int = None) -> int:
+        """Находит следующий живой ключ. Если передан exclude_index, ищет ДРУГОЙ ключ!"""
         total = len(self.keys)
         if total <= 1: return 0
-        if preferred_index is not None and 0 <= preferred_index < total:
-            if self.is_usable(preferred_index): return preferred_index
 
-        start = (preferred_index + 1) % total if preferred_index is not None else 0
+        start = (exclude_index + 1) % total if exclude_index is not None else 0
         for i in range(total):
             idx = (start + i) % total
-            if self.is_usable(idx): return idx
+            if exclude_index is not None and idx == exclude_index:
+                continue
+            if self.is_usable(idx):
+                return idx
 
+        # Если все ключи exhausted, берем тот, у которого тайм-аут кончится раньше всех
         if self.exhausted_keys:
             earliest = min(self.exhausted_keys.keys(), key=lambda k: self.exhausted_keys[k])
             del self.exhausted_keys[earliest]
@@ -448,7 +445,7 @@ class AIService:
             raise Exception("AI Live Service Unavailable")
 
     # ==============================================================================
-    # 3. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY
+    # 3. АВТОНОМНЫЙ АГЕНТ ANTIGRAVITY С КОРРЕКТНЫМ HANDOFF И РОТАЦИЕЙ
     # ==============================================================================
     async def run_antigravity_agent(
         self, 
@@ -463,20 +460,16 @@ class AIService:
         recent_history: list = None
     ):
         total_keys = len(self.api_keys)
-        is_new_session = (previous_interaction_id is None)
+        original_assigned_key = assigned_key
 
-        if assigned_key is None:
-            if is_new_session:
-                assigned_key = self.key_pool.get_available_key()
-            else:
-                assigned_key = self.antigravity_sessions.get(previous_interaction_id, self.current_key_index)
-                if not self.key_pool.is_usable(assigned_key):
-                    assigned_key = self.key_pool.get_available_key(assigned_key)
-        else:
-            if not self.key_pool.is_usable(assigned_key):
-                assigned_key = self.key_pool.get_available_key(assigned_key)
-
-        logger.info(f"[Antigravity Engine] Запуск таски на ключе #{assigned_key} (new={is_new_session})")
+        # Если ключ не назначен или исчерпан — выбираем доступный
+        if assigned_key is None or not self.key_pool.is_usable(assigned_key):
+            assigned_key = self.key_pool.get_available_key(assigned_key)
+            # ВАЖНО: Ключ сменился! Чужая машина недоступна -> сбрасываем песочницу
+            if original_assigned_key is not None and assigned_key != original_assigned_key:
+                logger.info(f"🔄 Ключ #{original_assigned_key} недоступен. Переключение на #{assigned_key}. Сброс чужой среды.")
+                previous_interaction_id = None
+                environment_id = None
 
         agent_system_instruction = """Ты — автономный Senior разработчик.
 Все файлы проекта (код, верстку, скрипты, презы, 3D-модели, Word-документы) ты создаешь, изменяешь и тестируешь прямо в своем окружении Linux.
@@ -503,6 +496,13 @@ class AIService:
             client = self._get_client(key_index=assigned_key)
 
             try:
+                # Оповещаем пользователя СРАЗУ перед сетевым вызовом!
+                if status_callback:
+                    if previous_interaction_id and environment_id:
+                        await status_callback({"status": f"Подключение к сессии (ключ #{assigned_key})..."})
+                    else:
+                        await status_callback({"status": f"Создание песочницы (ключ #{assigned_key})..."})
+
                 kwargs = {
                     "agent": "antigravity-preview-09-2026",
                     "background": True,
@@ -514,7 +514,7 @@ class AIService:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
                     kwargs["input"] = current_input_prompt
-                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | prev_id={previous_interaction_id[:10]} | Input: '{current_input_prompt[:60]}'")
+                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | prev_id={previous_interaction_id[:10]} | Ключ #{assigned_key}")
                 else:
                     kwargs["system_instruction"] = agent_system_instruction
                     kwargs["environment"] = "remote"
@@ -534,9 +534,9 @@ class AIService:
                                 f"# История недавних сообщений диалога:\n{history_block}\n\n"
                                 f"# Текущее задание:\n{prompt_text}"
                             )
-                            logger.info(f"🔄 [GOOGLE CALL] Handoff в новую среду с историей из {len(history_parts)} сообщений | Input: '{prompt_text[:60]}'")
+                            logger.info(f"🔄 [GOOGLE CALL] Handoff в новую среду с историей ({len(history_parts)} сообщений) на ключе #{assigned_key}")
                     else:
-                        logger.info(f"✨ [GOOGLE CALL] Чистый старт в новом окружении | Input: '{prompt_text[:60]}'")
+                        logger.info(f"✨ [GOOGLE CALL] Чистый старт в новом окружении на ключе #{assigned_key}")
 
                     kwargs["input"] = current_input_prompt
 
@@ -550,8 +550,9 @@ class AIService:
                     self.antigravity_sessions[previous_interaction_id] = assigned_key
 
                 if status_callback:
-                    await status_callback({"status": "started", "interaction_id": new_interaction_id})
+                    await status_callback({"status": "Агент думает (запуск контейнера)...", "interaction_id": new_interaction_id})
 
+                # Опрос статуса выполнения
                 while True:
                     await asyncio.sleep(3)
                     interaction = await asyncio.to_thread(client.interactions.get, id=new_interaction_id)
@@ -578,7 +579,6 @@ class AIService:
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
                 output_text = interaction.output_text or ""
-                import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
                 file_urls = {}
 
@@ -638,47 +638,40 @@ class AIService:
                 err_lower = err_str.lower()
                 logger.warning(f"[Antigravity Key #{assigned_key}] Ошибка: {err_str}")
 
-                if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and previous_interaction_id:
-                    logger.info(f"[Antigravity Handoff] Ключ #{assigned_key} не видит среду #{environment_id}. Handoff на чистую среду.")
+                # 1. Если ключ не видит песочницу (403, 404, Not Found) — сбрасываем привязку к машине
+                if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and (previous_interaction_id or environment_id):
+                    logger.info(f"[Antigravity Handoff] Среда #{environment_id} недоступна для ключа #{assigned_key}. Сброс на чистую среду.")
                     previous_interaction_id = None
                     environment_id = None
                     attempt += 1
                     continue
 
+                # 2. Ошибка лимитов (429 RateLimit)
                 if "429" in err_str or "too_many_requests" in err_lower or "resource_exhausted" in err_lower:
-                    is_daily = ("per day" in err_lower or "queries per day" in err_lower or "daily" in err_lower or "limit: 100" in err_lower)
-                    
-                    if is_daily or total_keys > 1:
-                        self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600 * 12)
-                        next_key = self.key_pool.get_available_key(assigned_key)
-                        if next_key != assigned_key:
-                            logger.info(f"[Antigravity Switch] Ключ #{assigned_key} уперся в лимит. Переключаем на #{next_key}...")
-                            if status_callback:
-                                await status_callback({"status": f"Лимит ключа #{assigned_key}, переключение на ключ #{next_key}..."})
-                            assigned_key = next_key
-                            attempt += 1
-                            continue
+                    self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600 * 12)
+                    next_key = self.key_pool.get_available_key(exclude_index=assigned_key)
+                    if next_key != assigned_key:
+                        logger.info(f"[Antigravity Switch] Ключ #{assigned_key} исчерпан. Переключение на ключ #{next_key}...")
+                        if status_callback:
+                            await status_callback({"status": f"Лимит ключа #{assigned_key}, переход на ключ #{next_key}..."})
+                        assigned_key = next_key
+                        # КРИТИЧЕСКИ ВАЖНО: на новом ключе старая машина недоступна!
+                        previous_interaction_id = None
+                        environment_id = None
+                        attempt += 1
+                        continue
 
-                    wait_seconds = 10
-                    import re
-                    m = re.search(r"retry in ([\d\.]+)s", err_str)
-                    if m:
-                        try: wait_seconds = int(float(m.group(1))) + 2
-                        except: pass
-
-                    logger.info(f"[Antigravity TPM] Пауза {wait_seconds}с на ключе #{assigned_key}...")
-                    if status_callback:
-                        await status_callback({"status": f"Пауза {wait_seconds}с (TPM)..."})
-                    await asyncio.sleep(wait_seconds)
-                    attempt += 1
-                    continue
-
+                # 3. Любая другая ошибка ключа (например, заблокирован или нет баланса)
+                self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600 * 2)
                 attempt += 1
                 if attempt < max_attempts and total_keys > 1:
-                    assigned_key = self.key_pool.get_available_key(assigned_key)
+                    next_key = self.key_pool.get_available_key(exclude_index=assigned_key)
+                    assigned_key = next_key
+                    previous_interaction_id = None
+                    environment_id = None
                     continue
                 raise e
 
-        raise Exception(f"Antigravity: исчерпаны попытки после перебора ключей. Последний ключ: #{assigned_key}")
+        raise Exception(f"Antigravity: исчерпаны все попытки вызова. Последний ключ: #{assigned_key}")
 
 ai_instance = AIService()
