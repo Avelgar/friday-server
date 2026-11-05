@@ -71,8 +71,6 @@ class AIService:
 
     def _get_client(self, key_index=None):
         idx = key_index if key_index is not None else self.current_key_index
-        # Внимание: timeout в google-genai задается в МИЛЛИСЕКУНДАХ!
-        # 60000 мс = 60 секунд (120000 = 2 минуты)
         return genai.Client(
             http_options={"api_version": "v1beta", "timeout": 60000}, 
             api_key=self.api_keys[idx]
@@ -166,7 +164,7 @@ class AIService:
                 function_declarations=[
                     types.FunctionDeclaration(
                         name="send_device_commands",
-                        description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот).",
+                        description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот, веб).",
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
                             properties={
@@ -313,7 +311,7 @@ class AIService:
                 function_declarations=[
                     types.FunctionDeclaration(
                         name="send_device_commands",
-                        description="Отправляет системные команды на целевые устройства пользователя.",
+                        description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот, веб).",
                         parameters=types.Schema(
                             type=types.Type.OBJECT,
                             properties={
@@ -467,7 +465,6 @@ class AIService:
     ):
         total_keys = len(self.api_keys)
 
-        # Если ключ не назначен или не работает — берем следующий по Round-Robin
         if assigned_key is None or not self.key_pool.is_usable(assigned_key):
             assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
             previous_interaction_id = None
@@ -532,8 +529,6 @@ class AIService:
                     kwargs["input"] = current_input_prompt
                     logger.info(f"✨ [GOOGLE CALL] Старт нового окружения на ключе #{assigned_key}")
 
-                # ЖЕСТКИЙ ТАЙМАУТ 30 СЕКУНД: если Google тупит — не ждем 2 минуты!
-                # Здесь asyncio.wait_for принимает секунды: ставим 65.0 секунд
                 interaction = await asyncio.wait_for(
                     asyncio.to_thread(client.interactions.create, **kwargs),
                     timeout=65.0
@@ -546,7 +541,6 @@ class AIService:
                 if status_callback:
                     await status_callback({"status": "Агент думает (контейнер запущен)...", "interaction_id": new_interaction_id})
 
-                # Опрос статуса
                 while True:
                     await asyncio.sleep(2.5)
                     interaction = await asyncio.wait_for(
@@ -576,7 +570,6 @@ class AIService:
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
 
                 output_text = interaction.output_text or ""
-                import re
                 sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
                 file_urls = {}
 
@@ -627,7 +620,7 @@ class AIService:
 
             except (asyncio.TimeoutError, TimeoutError) as te:
                 logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} не ответил за 60с. Пробуем следующий...")
-                self.key_pool.mark_exhausted(assigned_key, duration_seconds=300) # на 5 минут
+                self.key_pool.mark_exhausted(assigned_key, duration_seconds=300)
                 assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
                 previous_interaction_id = None
                 environment_id = None
@@ -639,7 +632,6 @@ class AIService:
                 err_lower = err_str.lower()
                 logger.warning(f"[Antigravity Ошибка на ключе #{assigned_key}]: {err_str}")
 
-                # Таймаут на стороне клиента SDK
                 if "timed out" in err_lower or "timeout" in err_lower:
                     self.key_pool.mark_exhausted(assigned_key, duration_seconds=300)
                     assigned_key = self.key_pool.get_next_key(exclude_index=assigned_key)
@@ -648,7 +640,6 @@ class AIService:
                     attempt += 1
                     continue
 
-                # Чужая среда или среда удалена
                 if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and (previous_interaction_id or environment_id):
                     logger.info(f"🔄 Сброс чужой среды #{environment_id} для ключа #{assigned_key}.")
                     previous_interaction_id = None
@@ -656,7 +647,6 @@ class AIService:
                     attempt += 1
                     continue
 
-                # Лимиты 429 или любые сбои ключа
                 self.key_pool.mark_exhausted(assigned_key, duration_seconds=3600)
                 next_key = self.key_pool.get_next_key(exclude_index=assigned_key)
                 logger.info(f"Переход с ключа #{assigned_key} на #{next_key}...")

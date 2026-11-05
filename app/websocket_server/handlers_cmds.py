@@ -24,29 +24,127 @@ def get_device_audio_lock(client_id: int) -> asyncio.Lock:
         device_audio_locks[client_id] = asyncio.Lock()
     return device_audio_locks[client_id]
 
-# Полный список поддерживаемых команд для управления устройствами
+# =========================================================================
+# СПИСОК И ОПИСАНИЕ ВСЕХ ВОЗМОЖНОСТЕЙ СИСТЕМЫ
+# =========================================================================
 ACTION_DESCRIPTIONS = {
     "открытие ссылки": "строго полный URL адрес (например https://youtube.com)",
     "открытие файла": "строго точное имя программы или путь (например 'steam', 'telegram', 'calc', 'pubg')",
     "завершение процесса": "имя процесса (без .exe)",
     "напечатать текст": "любой текст для набора на клавиатуре",
-    "нажать кнопку мыши": "строго одно из: 'лкм', 'пкм', 'скм'",
     "переместить мышь": "строго координаты x и y через запятую (например: 500, 300)",
     "уведомление": "текст уведомления",
     "музыка": "строго одно из: 'включить', 'выключить', 'следующий', 'предыдущий'",
     "смена голоса": "строго одно из: Aoede, Puck, Kore, Charon",
-    "очистка истории": "любой текст",
     "изменение громкости": "целое число от 0 до 100",
     "изменение яркости": "целое число от 0 до 100",
-    "check_network_devices": "любой текст (возвращает список доступных устройств)",
-    "get_running_processes": "любой текст (возвращает список запущенных процессов)",
-    "get_installed_programs": "любой текст (возвращает список программ)",
     "выключить микрофон": "любой текст (доступно только на веб-сайте)",
     "название диалога": "краткое название для текущего диалога (1-3 слова)",
     "движение": "строго одно из: 'вперед', 'назад', 'влево', 'вправо'"
 }
 
+CLIENT_ACTIONS = {
+    "web": [
+        "название диалога",
+        "выключить микрофон",
+        "смена голоса"
+    ],
+    "robot": [
+        "название диалога",
+        "движение",
+        "смена голоса",
+        "музыка"
+    ],
+    "phone": [
+        "открытие ссылки",
+        "открытие файла",
+        "завершение процесса",
+        "музыка",
+        "смена голоса",
+        "изменение громкости",
+        "изменение яркости",
+        "название диалога"
+    ],
+    "pc": [
+        "открытие ссылки",
+        "открытие файла",
+        "завершение процесса",
+        "музыка",
+        "смена голоса",
+        "изменение громкости",
+        "изменение яркости",
+        "название диалога",
+        "напечатать текст",
+        "переместить мышь",
+        "уведомление"
+    ]
+}
+
+CLIENT_NAMES = {
+    "web": "Веб-сайт (Браузер)",
+    "robot": "Робот (Raspberry Pi)",
+    "phone": "Телефон (Android)",
+    "pc": "Компьютер (ПК Windows)"
+}
+
 ALL_ACTIONS = list(ACTION_DESCRIPTIONS.keys())
+
+def format_action_list(action_keys):
+    caps = []
+    for k in action_keys:
+        desc = ACTION_DESCRIPTIONS.get(k, "параметр действия")
+        caps.append(f"  • {k} (параметр: {desc})")
+    return "\n".join(caps)
+
+ALL_PLATFORMS_CAPABILITIES = (
+    "СПРАВОЧНИК ВОЗМОЖНОСТЕЙ ВСЕХ 4 КЛИЕНТОВ (для общего вопроса «что ты умеешь вообще?»):\n"
+    f"1. {CLIENT_NAMES['pc']}:\n"
+    f"{format_action_list(CLIENT_ACTIONS['pc'])}\n\n"
+    f"2. {CLIENT_NAMES['phone']}:\n"
+    f"{format_action_list(CLIENT_ACTIONS['phone'])}\n\n"
+    f"3. {CLIENT_NAMES['robot']}:\n"
+    f"{format_action_list(CLIENT_ACTIONS['robot'])}\n\n"
+    f"4. {CLIENT_NAMES['web']}:\n"
+    f"{format_action_list(CLIENT_ACTIONS['web'])}"
+)
+
+def normalize_client_type(raw_type):
+    t = str(raw_type or '').strip().lower()
+    if t in CLIENT_ACTIONS:
+        return t
+    if any(k in t for k in ['phone', 'тел', 'android']): return 'phone'
+    if any(k in t for k in ['robot', 'робот', 'pi']): return 'robot'
+    if any(k in t for k in ['web', 'браузер', 'сайт']): return 'web'
+    return 'pc'
+
+def get_user_devices_info(user_id, current_ws, sender_name, device_type_code):
+    current_type = normalize_client_type(device_type_code)
+    current_dev = {
+        "ws": current_ws,
+        "name": sender_name,
+        "type": current_type,
+        "type_ru": get_device_type(type_str=current_type)
+    }
+
+    other_devs = []
+    if user_id:
+        user_ws_set = state.user_connections.get(user_id, set())
+        for ws in user_ws_set:
+            if ws == current_ws:
+                continue
+            session = state.ws_sessions.get(ws)
+            if not session:
+                continue
+            d_name = session.get('device_name') or 'Устройство'
+            d_type = normalize_client_type(session.get('device_type') or 'pc')
+            other_devs.append({
+                "ws": ws,
+                "name": d_name,
+                "type": d_type,
+                "type_ru": get_device_type(type_str=d_type)
+            })
+
+    return current_dev, other_devs
 
 def get_action_strings(action_keys):
     caps = []
@@ -73,32 +171,46 @@ async def handle_audio_end(websocket, data):
         active_media_queues[ui_msg_id].put_nowait(None)
         active_media_queues.pop(ui_msg_id, None)
 
-def get_target_websocket(user_id, target_device_name, fallback_ws):
-    """Поиск целевого веб-сокета в RAM по имени или типу устройства."""
-    if not target_device_name or not user_id:
-        return fallback_ws
-    clean_name = target_device_name.lower().strip()
+def get_target_websocket(user_id, target_device_name, fallback_ws, action_type=None):
+    """Поиск целевого веб-сокета в RAM по имени или типу устройства с умной маршрутизацией."""
+    clean_name = target_device_name.lower().strip() if target_device_name else ""
+    user_ws_set = state.user_connections.get(user_id, set()) if user_id else set()
     
-    user_ws_set = state.user_connections.get(user_id, set())
-    for ws in user_ws_set:
-        session = state.ws_sessions.get(ws)
-        if not session: continue
-        d_name = session.get('device_name', '').lower()
-        d_type = session.get('device_type', '').lower()
-        
-        # 1. Прямое совпадение по имени устройства
-        if clean_name in d_name or d_name in clean_name:
-            return ws
-        # 2. Совпадение по типу
-        if ("комп" in clean_name or "пк" in clean_name or "pc" in clean_name) and (d_type == "pc" or "комп" in d_name or "pc" in d_name):
-            return ws
-        if ("телефон" in clean_name or "phone" in clean_name) and (d_type == "phone" or "телефон" in d_name):
-            return ws
-        if ("робот" in clean_name or "robot" in clean_name) and (d_type == "robot" or "робот" in d_name):
-            return ws
-        if ("браузер" in clean_name or "web" in clean_name) and (d_type == "web" or "браузер" in d_name):
-            return ws
+    # 1. Прямое совпадение по имени или типу
+    if clean_name:
+        for ws in user_ws_set:
+            session = state.ws_sessions.get(ws)
+            if not session: continue
+            d_name = session.get('device_name', '').lower()
+            d_type = normalize_client_type(session.get('device_type', 'pc'))
             
+            if clean_name in d_name or d_name in clean_name:
+                return ws
+            if any(k in clean_name for k in ["комп", "пк", "pc", "компе"]) and d_type == "pc":
+                return ws
+            if any(k in clean_name for k in ["телефон", "phone", "смартфон", "мобил"]) and d_type == "phone":
+                return ws
+            if any(k in clean_name for k in ["робот", "robot", "бот", "пибот"]) and d_type == "robot":
+                return ws
+            if any(k in clean_name for k in ["браузер", "web", "сайт"]) and d_type == "web":
+                return ws
+
+    # 2. Если fallback_ws поддерживает действие — остаемся на нем
+    if action_type:
+        fallback_session = state.ws_sessions.get(fallback_ws, {})
+        fallback_type = normalize_client_type(fallback_session.get('device_type', 'pc'))
+        if action_type in CLIENT_ACTIONS.get(fallback_type, []):
+            return fallback_ws
+
+        # 3. Умная переадресация: fallback не умеет это делать (например веб-браузер не умеет запускать приложения/ссылки),
+        # перенаправляем на подходящее онлайн-устройство пользователя
+        for ws in user_ws_set:
+            session = state.ws_sessions.get(ws, {})
+            d_type = normalize_client_type(session.get('device_type', 'pc'))
+            if action_type in CLIENT_ACTIONS.get(d_type, []):
+                logger.info(f"🔄 [ROUTING] Действие '{action_type}' умно перенаправлено с '{fallback_type}' на '{session.get('device_name')}' ({d_type})")
+                return ws
+
     return fallback_ws
 
 
@@ -202,34 +314,71 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
-        # === ПОДТЯГИВАЕМ ОНЛАЙН-УСТРОЙСТВА ИЗ ОПЕРАТИВНОЙ ПАМЯТИ ===
-        accessible_devices = await get_accessible_devices(None, websocket, user_id)
-        online_devices_list = [f"- {dev}" for dev in accessible_devices]
-        online_devices_list.append(f"- {sender_name} ({device_type}, текущее устройство)")
-        devices_online_str = "\n".join(online_devices_list)
+        # === ОПРЕДЕЛЯЕМ ОНЛАЙН-УСТРОЙСТВА И ИХ ВОЗМОЖНОСТИ ===
+        current_dev, other_devs = get_user_devices_info(user_id, websocket, sender_name, device_type_code)
+        all_online_devs = [current_dev] + other_devs
+        online_types = set([d["type"] for d in all_online_devs])
 
-        caps_text, allowed_actions = get_action_strings(ALL_ACTIONS)
+        # Собираем действия, доступные хотя бы на одном из устройств онлайн:
+        allowed_action_keys = []
+        for c_type in ["pc", "phone", "robot", "web"]:
+            if c_type in online_types:
+                for act in CLIENT_ACTIONS[c_type]:
+                    if act not in allowed_action_keys:
+                        allowed_action_keys.append(act)
 
-        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник говорит через устройство: {sender_name} (Тип: {device_type}).
+        if not allowed_action_keys:
+            allowed_action_keys = CLIENT_ACTIONS.get(current_dev["type"], ["название диалога", "смена голоса"])
+
+        allowed_actions = ", ".join(allowed_action_keys)
+
+        current_dev_desc = (
+            f"• «{current_dev['name']}» ({current_dev['type_ru']}) — ТЕКУЩЕЕ УСТРОЙСТВО СОБЕСЕДНИКА\n"
+            f"  Доступные действия на этом устройстве:\n"
+            f"{format_action_list(CLIENT_ACTIONS.get(current_dev['type'], []))}"
+        )
+
+        if other_devs:
+            other_devs_lines = []
+            for d in other_devs:
+                other_devs_lines.append(
+                    f"• «{d['name']}» ({d['type_ru']}):\n"
+                    f"  Доступные действия на этом устройстве:\n"
+                    f"{format_action_list(CLIENT_ACTIONS.get(d['type'], []))}"
+                )
+            other_devices_desc = "\n\n".join(other_devs_lines)
+        else:
+            other_devices_desc = "Других устройств пользователя в сети сейчас нет (все остальные оффлайн)."
+
+        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник говорит через устройство: «{current_dev['name']}» (тип: {current_dev['type_ru']}).
 Тебе в реальном времени передается видеопоток с камеры пользователя.
 
-ДОСТУПНЫЕ УСТРОЙСТВА В СЕТИ (ОНЛАЙН СЕЙЧАС):
-{devices_online_str}
+УСТРОЙСТВА В СЕТИ (СЕЙЧАС ОНЛАЙН):
+{current_dev_desc}
 
-ПРАВИЛА И ПРЯМОЕ УПРАВЛЕНИЕ:
-1. ВСЕГДА НА ЛЮБОЙ ЗАПРОС ОТВЕЧАЙ ГОЛОСОМ! Даже если вызываешь команду, обязательно скажи коротко: "Секунду", "Открываю", "Делаю". Никогда не молчи!
-2. ПРЯМОЕ УПРАВЛЕНИЕ: Ты управляешь устройствами НАПРЯМУЮ через инструмент `send_device_commands`.
-   - В параметре `target_device` ОБЯЗАТЕЛЬНО указывай точное имя целевого устройства из списка онлайн-устройств (например '{sender_name}' или компьютер пользователя).
-   - Если пользователь говорит с телефона: "Открой ютуб на компе" или "Включи музыку на компьютере" — сразу вызывай `send_device_commands` с `target_device='имя компьютера'` и нужным действием!
-3. ЗАПУСК ИГР И ПРОГРАММ: Чтобы запустить приложение/игру на компьютере (пабг, стим, браузер, телеграм), вызывай action_type='открытие файла' с именем программы ('pubg', 'steam', 'telegram') или 'открытие ссылки' для сайтов.
-4. СТОП-СЛОВА: Если пользователь ругается, говорит "хватит", "отмена", "не надо", "в пизду", "отбой" — СТРОГО ЗАПРЕЩЕНО вызывать любые команды! Скажи: "Понял, отбой".
-5. КРАТКОСТЬ: Говори кратко и емко (1-2 простых предложения). Никаких длинных паст!
+ДРУГИЕ УСТРОЙСТВА В СЕТИ ПОЛЬЗОВАТЕЛЯ:
+{other_devices_desc}
 
-Доступные действия для устройств:
-{caps_text}"""
+{ALL_PLATFORMS_CAPABILITIES}
+
+ПРАВИЛА И МАРШРУТИЗАЦИЯ КОМАНД:
+1. ВСЕГДА НА ЛЮБОЙ ЗАПРОС ОТВЕЧАЙ ГОЛОСОМ! Даже если вызываешь инструмент send_device_commands, обязательно сначала скажи коротко: "Секунду", "Открываю", "Делаю". Никогда не молчи!
+2. ПРЯМОЕ УПРАВЛЕНИЕ: Вызывай `send_device_commands` ТОЛЬКО для действий, которые поддерживаются целевым устройством:
+   - В параметре `target_device` ОБЯЗАТЕЛЬНО указывай точное имя целевого устройства ('{current_dev['name']}' или имя устройства из списка онлайн выше).
+   - Если действие поддерживается текущим устройством ('{current_dev['name']}') — указывай target_device='{current_dev['name']}'.
+   - Если пользователь просит команду для другого устройства (например: "открой ютуб на компе", находясь в телефоне, или "робот, вперед") — проверь, есть ли целевое устройство онлайн. Если да — ставь его точное имя в target_device.
+   - Если текущее устройство НЕ поддерживает команду (например, пользователь в браузере просит открыть файл/программу или сайт), а в сети есть подходящее онлайн-устройство (например ПК) — направь команду на ПК (target_device='имя ПК') и озвучь: "Открываю на компьютере".
+3. ЗАПУСК ПРОГРАММ И ИГР («открытие файла»): Чтобы запустить приложение/игру (steam, telegram, calc, pubg и т.д.), вызывай action_type='открытие файла' с точным именем программы. «открытие приложения» и «открытие файла» — это абсолютно одно и то же действие!
+4. ОТКРЫТИЕ ССЫЛОК («открытие ссылки»): НИКОГДА НЕ ОТКАЗЫВАЙСЯ открывать ссылки, если целевое устройство (ПК или телефон) подключено! Всегда вызывай `send_device_commands` с action_type='открытие ссылки' и полным URL-адресом (например https://youtube.com).
+5. ОТВЕТ НА ВОПРОС «ЧТО ТЫ УМЕЕШЬ?» / «КАКИЕ ТВОИ ВОЗМОЖНОСТИ?»:
+   - По умолчанию перечисляй ТОЛЬКО возможности тех устройств, которые СЕЙЧАС ОНЛАЙН в сети (из блока "УСТРОЙСТВА В СЕТИ СЕЙЧАС ОНЛАЙН").
+   - СТРОГО ЗАПРЕЩЕНО называть возможности устройств, которых сейчас нет в сети! (Например, если робот не в сети — ни слова про движение робота; если ПК не в сети — не предлагай мышь или клавиатуру ПК).
+   - Если пользователь явно спросит: «Что ты умеешь вообще на всех устройствах?» или «Расскажи про все клиенты» — только тогда перечисли возможности всех 4 платформ из справочника выше.
+6. СТОП-СЛОВА: Если пользователь ругается, говорит "хватит", "отмена", "не надо", "отбой" — СТРОГО ЗАПРЕЩЕНО вызывать любые команды! Скажи: "Понял, отбой".
+7. КРАТКОСТЬ: Говори кратко и емко (1-2 простых предложения). Никаких длинных паст!"""
         
         prompt_text_to_send = f"[ЗАПРОС]: {command}" if command else None
-        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.1)... Онлайн устройств: {len(online_devices_list)}")
+        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.1)... Онлайн устройств: {len(all_online_devs)} | Доступных действий: {len(allowed_action_keys)}")
 
         if is_streaming and media_queue:
             generator = ai_instance.generate_audio_stream_realtime(
@@ -267,36 +416,37 @@ async def handle_command(websocket, data):
                         acts_summary = ", ".join([f"{a.get('action_type')}: '{a.get('action_value')}'" for a in actions])
                         logger.info(f"🛠️ [TOOL CALL] ИИ вызвал: [{acts_summary}] -> цель: '{target_device_name or sender_name}'")
 
-                        # Находим сокет целевого устройства в оперативной памяти
-                        target_ws = get_target_websocket(user_id, target_device_name, fallback_ws=websocket)
-
-                        real_actions = []
+                        ws_actions_map = {}
                         for act in actions:
-                            act_type = act.get('action_type')
-                            act_val = act.get('action_value')
+                            act_type = str(act.get('action_type', '')).strip().lower()
+                            if act_type == "открытие приложения":
+                                act['action_type'] = "открытие файла"
+                                act_type = "открытие файла"
 
                             if act_type == "название диалога" and dialog_id:
-                                new_name = str(act_val).strip()
+                                new_name = str(act.get('action_value', '')).strip()
                                 await cursor.execute("UPDATE dialogs SET name = %s WHERE id = %s", (new_name, dialog_id))
                                 await conn.commit()
                                 if sender_ws: await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
                             else:
-                                real_actions.append(act)
+                                tgt_ws = get_target_websocket(user_id, target_device_name, fallback_ws=websocket, action_type=act_type)
+                                if tgt_ws:
+                                    ws_actions_map.setdefault(tgt_ws, []).append(act)
+                                else:
+                                    logger.warning(f"⚠️ [DIRECT DISPATCH] Не найден сокет для действия '{act_type}' на '{target_device_name}'")
 
-                        # Отправляем команду целевому устройству
-                        if real_actions:
-                            if target_ws:
-                                logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправил {len(real_actions)} действий на '{target_device_name or sender_name}'")
-                                await async_send(target_ws, {
-                                    "type": "new_message",
-                                    "message_id": bot_message_id if target_ws == websocket else None,
-                                    "user_msg_id": user_msg_id if target_ws == websocket else None,
-                                    "sender": "Бот" if target_ws == websocket else sender_name,
-                                    "text": "",
-                                    "actions": real_actions
-                                })
-                            else:
-                                logger.warning(f"⚠️ [DIRECT DISPATCH] Устройство '{target_device_name}' не в сети!")
+                        for tgt_ws, real_actions in ws_actions_map.items():
+                            tgt_session = state.ws_sessions.get(tgt_ws, {})
+                            tgt_name = tgt_session.get('device_name', sender_name)
+                            logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправил {len(real_actions)} действий на '{tgt_name}'")
+                            await async_send(tgt_ws, {
+                                "type": "new_message",
+                                "message_id": bot_message_id if tgt_ws == websocket else None,
+                                "user_msg_id": user_msg_id if tgt_ws == websocket else None,
+                                "sender": "Бот" if tgt_ws == websocket else sender_name,
+                                "text": "",
+                                "actions": real_actions
+                            })
 
                 elif chunk["type"] == "audio":
                     audio_chunks_count += 1
