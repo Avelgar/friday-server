@@ -3,6 +3,7 @@ import os
 import time
 import base64
 import asyncio
+import socket
 import secrets
 import bcrypt
 import jwt
@@ -19,6 +20,18 @@ logger = logging.getLogger("HTTP_Server")
 
 CAP_WEB = "смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
 ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
+
+def notify_ws(user_id, payload):
+    """Межпроцессное мгновенное уведомление WebSocket-сервера для синхронизации всех устройств пользователя."""
+    if not user_id:
+        return
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        msg = json.dumps({"user_id": user_id, "payload": payload}, ensure_ascii=False).encode('utf-8')
+        sock.sendto(msg, ("127.0.0.1", 8116))
+        sock.close()
+    except Exception as e:
+        logger.error(f"Failed to notify WS server: {e}")
 
 def do_POST(self):
     if self.path == '/api/upload':
@@ -228,7 +241,9 @@ def do_POST(self):
                 user_id = payload['user_id']
                 cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (name, user_id))
                 conn.commit()
-                self.send_json(200, {"status": "success", "dialog_id": cursor.lastrowid, "name": name})
+                dialog_id = cursor.lastrowid
+                notify_ws(user_id, {"type": "dialog_created", "dialog_id": dialog_id, "name": name})
+                self.send_json(200, {"status": "success", "dialog_id": dialog_id, "name": name})
             except Exception:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
 
@@ -240,6 +255,7 @@ def do_POST(self):
                 user_id = payload['user_id']
                 cursor.execute("DELETE FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
                 conn.commit()
+                notify_ws(user_id, {"type": "dialog_deleted", "dialog_id": dialog_id})
                 self.send_json(200, {"status": "success", "message": "Диалог удален"})
             except Exception:
                 self.send_json(401, {"status": "error", "message": "Недействительный токен"})
@@ -340,10 +356,12 @@ def do_POST(self):
                 user_id = payload['user_id']
             except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
             
-            cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
-            if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
+            cursor.execute("SELECT m.id, m.dialog_id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
+            row = cursor.fetchone()
+            if not row: return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
             cursor.execute("DELETE FROM messages WHERE id = %s", (msg_id,))
             conn.commit()
+            notify_ws(user_id, {"type": "delete_message", "dialog_id": row['dialog_id'], "message_id": msg_id, "ui_msg_id": str(msg_id)})
             self.send_json(200, {"status": "success", "message": "Сообщение удалено"})
 
         elif self.path == '/edit_message':
@@ -358,10 +376,12 @@ def do_POST(self):
                 user_id = payload['user_id']
             except: return self.send_json(401, {"status": "error", "message": "Invalid token"})
             
-            cursor.execute("SELECT m.id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
-            if not cursor.fetchone(): return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
+            cursor.execute("SELECT m.id, m.dialog_id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
+            row = cursor.fetchone()
+            if not row: return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
             cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (new_text, msg_id))
             conn.commit()
+            notify_ws(user_id, {"type": "message_edited", "dialog_id": row['dialog_id'], "message_id": msg_id, "text": new_text})
             self.send_json(200, {"status": "success", "message": "Сообщение обновлено"})
 
         else:

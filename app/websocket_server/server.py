@@ -7,11 +7,28 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from app.websocket_server import state
+from app.websocket_server.utils import broadcast_to_user
 from app.websocket_server.handlers_auth import handle_auth
 from app.websocket_server.handlers_cmds import handle_command
 from app.websocket_server.handlers_cmds import handle_audio_chunk, handle_audio_end
 
 logger = logging.getLogger("WS_Server")
+
+class InternalNotifyProtocol(asyncio.DatagramProtocol):
+    """
+    Внутренний межпроцессный протокол на loopback (127.0.0.1:8116).
+    Позволяет HTTP-серверу (в отдельном процессе) мгновенно передавать
+    события создания/удаления диалогов и сообщений для рассылки всем устройствам пользователя.
+    """
+    def datagram_received(self, data, addr):
+        try:
+            msg = json.loads(data.decode('utf-8'))
+            user_id = msg.get("user_id")
+            payload = msg.get("payload")
+            if user_id and payload:
+                asyncio.create_task(broadcast_to_user(user_id, payload))
+        except Exception as e:
+            logger.error(f"[IPC UDP] Ошибка обработки внутреннего уведомления: {e}")
 
 def cleanup_connection(websocket):
     """Моментальная очистка сокета из памяти без обращений к базе данных."""
@@ -97,6 +114,16 @@ async def check_pings():
         await asyncio.sleep(10)
 
 async def start_ws_server():
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.create_datagram_endpoint(
+            lambda: InternalNotifyProtocol(),
+            local_addr=('127.0.0.1', 8116)
+        )
+        logger.info("Внутренний IPC UDP-слушатель запущен на 127.0.0.1:8116")
+    except Exception as e:
+        logger.error(f"Не удалось запустить IPC UDP-слушатель: {e}")
+
     asyncio.create_task(check_pings())
     async with websockets.serve(websocket_handler, "0.0.0.0", 8114, ping_interval=None, max_size=100 * 1024 * 1024):
         logger.info("WebSocket Server started on 8114 (100MB limit, RAM session management)")

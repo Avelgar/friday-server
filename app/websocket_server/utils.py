@@ -52,3 +52,18 @@ async def async_send(websocket, data):
         await websocket.send(encoded_data)
     except Exception:
         pass
+
+async def broadcast_to_user(user_id, data, exclude_ws=None):
+    """
+    Мгновенная рассылка события по WebSocket всем онлайн-устройствам конкретного пользователя.
+    """
+    if not user_id:
+        return
+    user_ws_set = state.user_connections.get(user_id, set())
+    for ws in list(user_ws_set):
+        if ws == exclude_ws:
+            continue
+        try:
+            await async_send(ws, data)
+        except Exception:
+            pass

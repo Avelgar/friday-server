@@ -174,8 +174,21 @@ function updatePendingBubble(text) {
 function removePendingBubble() { if (pendingBubbleId) { const b = document.getElementById(pendingBubbleId); if (b) b.remove(); pendingBubbleId = null; } }
 
 function handleIncomingStreamData(data) {
-    if (data.type === 'dialog_created') { currentDialogId = data.dialog_id; loadDialogs(); }
-    if (data.type === 'dialog_renamed') { const chatSpan = document.querySelector(`.dialog-item[data-id="${data.dialog_id}"] span`); if (chatSpan) chatSpan.textContent = data.name; }
+    if (data.type === 'dialog_created') { 
+        if (currentDialogId === null) currentDialogId = data.dialog_id; 
+        loadDialogs(); 
+    }
+    if (data.type === 'dialog_deleted') {
+        if (currentDialogId && String(currentDialogId) === String(data.dialog_id)) {
+            currentDialogId = null;
+            renderEmptyChat();
+        }
+        loadDialogs();
+    }
+    if (data.type === 'dialog_renamed') { 
+        const chatSpan = document.querySelector(`.dialog-item[data-id="${data.dialog_id}"] span`); 
+        if (chatSpan) chatSpan.textContent = data.name; 
+    }
 
     if (data.type === 'msg_id_map') {
         const userBubble = document.getElementById('msg_' + data.ui_msg_id);
@@ -210,16 +223,21 @@ function handleIncomingStreamData(data) {
     }
 
     if (data.type === 'new_message') {
+        if (data.dialog_id && currentDialogId && String(data.dialog_id) !== String(currentDialogId)) {
+            return;
+        }
+        if (data.dialog_id && currentDialogId === null) {
+            currentDialogId = data.dialog_id;
+            loadDialogs();
+        }
+
         const msgId = data.message_id || data.ui_msg_id;
         
         // Проверяем, является ли это сообщение финальным (пустой текст и нет действий)
         const isFinal = !data.text && (!data.actions || data.actions.length === 0);
         
         if (isFinal) {
-            // === СНИМАЕМ ЖЕСТКУЮ БЛОКИРОВКУ МИКРОФОНА ===
             vadState = 'idle';
-            // Если ИИ прислал аудио, ждем пока оно доиграет (playPCM24kHz сам снимет isPlaying)
-            // Если аудио нет (только текст), снимаем блокировку принудительно прямо сейчас:
             if (!window.streamAudioContext || window.streamAudioContext.currentTime >= window.nextPlayTime) {
                 isPlaying = false;
             }
@@ -234,13 +252,28 @@ function handleIncomingStreamData(data) {
                 if (!localStorage.getItem('token') && messageHistory.length > 0 && messageHistory[messageHistory.length - 1].role === 'assistant') {
                     messageHistory[messageHistory.length - 1].content += data.text; localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
                 }
-            } else addMessage('assistant', data.text, false, msgId);
+            } else {
+                const role = (data.sender === 'Вы') ? 'user' : 'assistant';
+                addMessage(role, data.text, false, msgId);
+            }
+        }
+    }
+
+    if (data.type === 'message_edited') {
+        const b = document.getElementById('msg_' + data.message_id);
+        if (b) {
+            const textDiv = b.querySelector('div:first-child');
+            if (textDiv) textDiv.textContent = data.text;
         }
     }
 
     if (data.type === 'delete_message') {
+        if (data.message_id) {
+            const b = document.getElementById('msg_' + data.message_id);
+            if (b) b.remove();
+            if (!document.querySelector('#chatMessages .message')) renderEmptyChat();
+        }
         removePendingBubble();
-        // === СНИМАЕМ БЛОКИРОВКУ ДАЖЕ ЕСЛИ ПРОИЗОШЕЛ ТАЙМАУТ ===
         isPlaying = false; 
         vadState = 'idle';
     }

@@ -7,7 +7,7 @@ from datetime import datetime
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
 from app.websocket_server import state
-from app.websocket_server.utils import async_send, get_device_type, get_accessible_devices
+from app.websocket_server.utils import async_send, broadcast_to_user, get_device_type, get_accessible_devices
 import time
 import os
 import shutil
@@ -202,8 +202,7 @@ def get_target_websocket(user_id, target_device_name, fallback_ws, action_type=N
         if action_type in CLIENT_ACTIONS.get(fallback_type, []):
             return fallback_ws
 
-        # 3. Умная переадресация: fallback не умеет это делать (например веб-браузер не умеет запускать приложения/ссылки),
-        # перенаправляем на подходящее онлайн-устройство пользователя
+        # 3. Умная переадресация: fallback не умеет это делать, перенаправляем на подходящее онлайн-устройство пользователя
         for ws in user_ws_set:
             session = state.ws_sessions.get(ws, {})
             d_type = normalize_client_type(session.get('device_type', 'pc'))
@@ -279,7 +278,8 @@ async def handle_command(websocket, data):
                 await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (dialog_name, user_id))
                 dialog_id = cursor.lastrowid
                 await conn.commit()
-                if sender_ws: await async_send(sender_ws, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
+                # Рассылаем создание нового диалога ВСЕМ активным устройствам пользователя
+                await broadcast_to_user(user_id, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
             if dialog_id:
                 await cursor.execute(
@@ -293,6 +293,18 @@ async def handle_command(websocket, data):
                 )
                 bot_message_id = cursor.lastrowid
                 await conn.commit()
+
+                # Мгновенно синхронизируем отправленное пользователем сообщение на все остальные его устройства
+                await broadcast_to_user(user_id, {
+                    "type": "new_message",
+                    "dialog_id": dialog_id,
+                    "message_id": user_msg_id,
+                    "ui_msg_id": ui_msg_id,
+                    "sender": "Вы",
+                    "device_name": sender_name,
+                    "text": db_user_text,
+                    "actions": []
+                }, exclude_ws=websocket)
 
                 await cursor.execute("""
                     SELECT sender, text FROM messages
@@ -402,7 +414,28 @@ async def handle_command(websocket, data):
                     if "call:send_device_commands" in text_chunk or "send_device_commands{" in text_chunk: continue
                     final_bot_text_full += text_chunk + " "
                     logger.info(f"[TTS] Фасад: {text_chunk.strip()}")
-                    if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": text_chunk, "actions": []})
+                    # Отправляем на устройство инициатора
+                    if sender_ws:
+                        await async_send(sender_ws, {
+                            "type": "new_message",
+                            "dialog_id": dialog_id,
+                            "message_id": bot_message_id,
+                            "ui_msg_id": ui_msg_id,
+                            "sender": "Бот",
+                            "text": text_chunk,
+                            "actions": []
+                        })
+                    # Синхронизируем текст бота в реальном времени на все остальные устройства пользователя
+                    if user_id:
+                        await broadcast_to_user(user_id, {
+                            "type": "new_message",
+                            "dialog_id": dialog_id,
+                            "message_id": bot_message_id,
+                            "ui_msg_id": ui_msg_id,
+                            "sender": "Бот",
+                            "text": text_chunk,
+                            "actions": []
+                        }, exclude_ws=websocket)
 
                 elif chunk["type"] == "commands":
                     if chunk["commands"]: has_commands = True
@@ -427,7 +460,11 @@ async def handle_command(websocket, data):
                                 new_name = str(act.get('action_value', '')).strip()
                                 await cursor.execute("UPDATE dialogs SET name = %s WHERE id = %s", (new_name, dialog_id))
                                 await conn.commit()
-                                if sender_ws: await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
+                                # Оповещаем все устройства пользователя о новом имени диалога
+                                if user_id:
+                                    await broadcast_to_user(user_id, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
+                                elif sender_ws:
+                                    await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
                             else:
                                 tgt_ws = get_target_websocket(user_id, target_device_name, fallback_ws=websocket, action_type=act_type)
                                 if tgt_ws:
@@ -438,25 +475,77 @@ async def handle_command(websocket, data):
                         for tgt_ws, real_actions in ws_actions_map.items():
                             tgt_session = state.ws_sessions.get(tgt_ws, {})
                             tgt_name = tgt_session.get('device_name', sender_name)
-                            logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправил {len(real_actions)} действий на '{tgt_name}'")
-                            await async_send(tgt_ws, {
-                                "type": "new_message",
-                                "message_id": bot_message_id if tgt_ws == websocket else None,
-                                "user_msg_id": user_msg_id if tgt_ws == websocket else None,
-                                "sender": "Бот" if tgt_ws == websocket else sender_name,
-                                "text": "",
-                                "actions": real_actions
-                            })
+                            logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправляет {len(real_actions)} действий на '{tgt_name}'")
+
+                            # Сохраняем и отправляем каждое действие отдельным сообщением с маркировкой
+                            for act in real_actions:
+                                a_type = act.get('action_type', '')
+                                a_val = str(act.get('action_value', '')).strip()
+                                action_label = f"⚡ [Действие на «{tgt_name}»]: {a_type} — {a_val}" if a_val else f"⚡ [Действие на «{tgt_name}»]: {a_type}"
+
+                                action_msg_id = None
+                                if dialog_id:
+                                    await cursor.execute(
+                                        "INSERT INTO messages (sender, device_name, text, dialog_id) VALUES ('Действие', %s, %s, %s)",
+                                        (tgt_name, action_label, dialog_id)
+                                    )
+                                    action_msg_id = cursor.lastrowid
+                                    await conn.commit()
+                                else:
+                                    action_msg_id = int(time.time() * 1000)
+
+                                # 1. Отправляем на целевое устройство для исполнения действия и отображения
+                                await async_send(tgt_ws, {
+                                    "type": "new_message",
+                                    "dialog_id": dialog_id,
+                                    "message_id": action_msg_id,
+                                    "user_msg_id": user_msg_id if tgt_ws == websocket else None,
+                                    "sender": "Действие",
+                                    "device_name": tgt_name,
+                                    "text": action_label,
+                                    "actions": [act]
+                                })
+
+                                # 2. Если инициатор запроса на другом устройстве — показываем отдельное сообщение и ему
+                                if tgt_ws != websocket and sender_ws:
+                                    await async_send(sender_ws, {
+                                        "type": "new_message",
+                                        "dialog_id": dialog_id,
+                                        "message_id": action_msg_id,
+                                        "user_msg_id": user_msg_id,
+                                        "sender": "Действие",
+                                        "device_name": tgt_name,
+                                        "text": action_label,
+                                        "actions": []
+                                    })
 
                 elif chunk["type"] == "audio":
                     audio_chunks_count += 1
+                    # Голос воспроизводится строго на устройстве, с которого говорят
                     if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
         
         if dialog_id and user_msg_id and bot_message_id:
             if (audio_bytes or is_streaming):
-                if final_user_text_full.strip(): await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
-            if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
-                await cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
+                if final_user_text_full.strip():
+                    await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
+                    # Синхронизируем распознанный голос на другие устройства
+                    if user_id:
+                        await broadcast_to_user(user_id, {
+                            "type": "new_message",
+                            "dialog_id": dialog_id,
+                            "message_id": user_msg_id,
+                            "ui_msg_id": ui_msg_id,
+                            "sender": "Вы",
+                            "device_name": sender_name,
+                            "text": final_user_text_full.strip(),
+                            "actions": []
+                        }, exclude_ws=websocket)
+
+            if not final_bot_text_full.strip():
+                # Удаляем пустую текстовую заготовку бота, чтобы не оставался пустой пузырь
+                await cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
+                if audio_chunks_count == 0 and not has_commands:
+                    await cursor.execute("DELETE FROM messages WHERE id = %s", (user_msg_id,))
             else:
                 await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             await conn.commit()
@@ -467,7 +556,19 @@ async def handle_command(websocket, data):
             else:
                 if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         elif sender_ws:
-            await async_send(sender_ws, {"type": "new_message", "message_id": bot_message_id, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
+            final_bot_id = bot_message_id if final_bot_text_full.strip() else None
+            finish_msg = {
+                "type": "new_message",
+                "dialog_id": dialog_id,
+                "message_id": final_bot_id,
+                "ui_msg_id": ui_msg_id,
+                "sender": "Бот",
+                "text": "",
+                "actions": []
+            }
+            await async_send(sender_ws, finish_msg)
+            if user_id:
+                await broadcast_to_user(user_id, finish_msg, exclude_ws=websocket)
 
         logger.info(f"[DONE] Фасад отработал.\n" + "="*50)
 
@@ -478,6 +579,7 @@ async def handle_command(websocket, data):
                 await cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id)); await conn.commit()
             sender_ws = websocket
             if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+            if user_id: await broadcast_to_user(user_id, {"type": "delete_message", "ui_msg_id": ui_msg_id}, exclude_ws=websocket)
         except: pass
     finally:
         if cursor: await cursor.close()
