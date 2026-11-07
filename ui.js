@@ -152,7 +152,7 @@ function addMessage(role, content, skipHistory = false, msgId = null) {
     const timeString = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     function escapeHtml(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
     
-    let actionsHtml = (!content.includes('🎤') && !content.includes('⏳')) ? `<div class="message-actions"><button onclick="editMessage('${actualMsgId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button><button onclick="deleteMessage('${actualId}')" title="Удалить"><i class="fas fa-trash"></i></button></div>` : '';
+    let actionsHtml = (!content.includes('🎤') && !content.includes('⏳')) ? `<div class="message-actions"><button onclick="editMessage('${actualMsgId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button><button onclick="deleteMessage('${actualMsgId}')" title="Удалить"><i class="fas fa-trash"></i></button></div>` : '';
     messageElement.innerHTML = `<div>${escapeHtml(content)}</div><div class="message-time">${timeString}</div>${actionsHtml}`;
     chatMessages.appendChild(messageElement); chatMessages.scrollTop = chatMessages.scrollHeight;
     
