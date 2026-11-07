@@ -262,11 +262,17 @@ async def handle_command(websocket, data):
 
         if user_id:
             create_new = False
-            if 'dialog_id' in data and client_dialog_id is None: create_new = True
+            norm_type = normalize_client_type(device_type_code)
+            if 'dialog_id' in data and client_dialog_id is None: 
+                create_new = True
+            elif norm_type == 'robot' and not client_dialog_id and not session.get('robot_dialog_id'):
+                create_new = True
             elif client_dialog_id:
                 await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (client_dialog_id, user_id))
                 if not await cursor.fetchone(): create_new = True
                 else: dialog_id = client_dialog_id
+            elif norm_type == 'robot' and session.get('robot_dialog_id'):
+                dialog_id = session['robot_dialog_id']
             else:
                 await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
                 dlg = await cursor.fetchone()
@@ -274,10 +280,12 @@ async def handle_command(websocket, data):
                 else: create_new = True
                     
             if create_new:
-                dialog_name = "Новый диалог"
+                dialog_name = f"Робот ({sender_name})" if norm_type == 'robot' else "Новый диалог"
                 await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (dialog_name, user_id))
                 dialog_id = cursor.lastrowid
                 await conn.commit()
+                if norm_type == 'robot':
+                    session['robot_dialog_id'] = dialog_id
                 # Рассылаем создание нового диалога ВСЕМ активным устройствам пользователя
                 await broadcast_to_user(user_id, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
