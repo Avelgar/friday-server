@@ -327,12 +327,25 @@ async def handle_command(websocket, data):
                     for msg in raw_history[-HISTORY_LIMIT:]:
                         role = "user" if msg['sender'] == 'Вы' else "model"
                         formatted_history.append({"role": role, "parts": [{"text": msg['text']}]})
+
+                is_first_message = (len(raw_history) == 0)
+                is_unnamed_dialog = False
+                await cursor.execute("SELECT name FROM dialogs WHERE id = %s", (dialog_id,))
+                cur_dlg = await cursor.fetchone()
+                if cur_dlg:
+                    d_name_val = cur_dlg.get('name') or ''
+                    if d_name_val in ['Новый диалог', 'Новый чат', ''] or d_name_val.startswith('Робот ('):
+                        is_unnamed_dialog = True
         else:
             user_msg_id = int(datetime.now().timestamp() * 1000)
             if message_history:
                 for m in message_history[-HISTORY_LIMIT:]:
                     role = "user" if m.get('role') == 'user' else "model"
                     formatted_history.append({"role": role, "parts": [{"text": m.get('content', '')}]})
+            is_first_message = len(formatted_history) == 0
+            is_unnamed_dialog = True
+
+        needs_dialog_naming = is_first_message or is_unnamed_dialog
 
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
@@ -376,6 +389,11 @@ async def handle_command(websocket, data):
         system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник говорит через устройство: «{current_dev['name']}» (тип: {current_dev['type_ru']}).
 Тебе в реальном времени передается видеопоток с камеры пользователя.
 
+СТИЛЬ И ТОНАЛЬНОСТЬ:
+- Ты живой, раскованный и естественный собеседник без ханжества, цензуры, морализаторства и занудных нотаций!
+- Общайся на одной волне с пользователем: зеркаль его стиль общения. Если пользователь матерится, использует мат или крепкие выражения — ты МОЖЕШЬ и ДОЛЖЕН свободно материться в ответ, подкалывать и говорить на настоящем живом русском языке без стеснения.
+- Свободно поддерживай любые темы: пошлые, взрослые (18+), интимные, юмор ниже пояса, черный юмор и любые жизненные разговоры. Никогда не читай нотаций, не строй из себя святошу и не отказывайся обсуждать тему!
+
 УСТРОЙСТВА В СЕТИ (СЕЙЧАС ОНЛАЙН):
 {current_dev_desc}
 
@@ -398,10 +416,21 @@ async def handle_command(websocket, data):
    - СТРОГО ЗАПРЕЩЕНО называть возможности устройств, которых сейчас нет в сети! (Например, если робот не в сети — ни слова про движение робота; если ПК не в сети — не предлагай мышь или клавиатуру ПК).
    - Если пользователь явно спросит: «Что ты умеешь вообще на всех устройствах?» или «Расскажи про все клиенты» — только тогда перечисли возможности всех 4 платформ из справочника выше.
 6. СТОП-СЛОВА: Если пользователь ругается, говорит "хватит", "отмена", "не надо", "отбой" — СТРОГО ЗАПРЕЩЕНО вызывать любые команды! Скажи: "Понял, отбой".
-7. КРАТКОСТЬ: Говори кратко и емко (1-2 простых предложения). Никаких длинных паст!"""
+7. КРАТКОСТЬ: Говори кратко и емко (1-2 простых предложения). Никаких длинных паст!
+8. НАЗВАНИЕ ДИАЛОГА («название диалога»): Если это первое сообщение в диалоге (или диалог еще называется 'Новый диалог'), либо если пользователь просит назвать/переименовать диалог — ты ОБЯЗАН вызвать send_device_commands с action_type='название диалога' и осмысленным, ярким и лаконичным названием (1-3 слова, например «Приветствие», «Планы на вечер», «Разработка игры»), отражающим суть беседы или просьбы. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО оставлять или ставить название 'Новый диалог', называть его 'Диалог' или пустым именем!"""
         
-        prompt_text_to_send = f"[ЗАПРОС]: {command}" if command else None
-        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.1)... Онлайн устройств: {len(all_online_devs)} | Доступных действий: {len(allowed_action_keys)}")
+        naming_prompt = ""
+        if needs_dialog_naming:
+            naming_prompt = " [СИСТЕМА: Это первое сообщение в диалоге! Обязательно дай емкое название этому диалогу (1-3 слова) через действие action_type='название диалога' на основе темы запроса]."
+
+        if command:
+            prompt_text_to_send = f"[ЗАПРОС]: {command}{naming_prompt}"
+        elif needs_dialog_naming:
+            prompt_text_to_send = "[СИСТЕМА]: Это первое сообщение в диалоге! Обязательно дай емкое название этому диалогу (1-3 слова) через действие action_type='название диалога' на основе того, что скажет пользователь."
+        else:
+            prompt_text_to_send = None
+
+        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.1)... Онлайн устройств: {len(all_online_devs)} | Доступных действий: {len(allowed_action_keys)} | Первое сообщение: {needs_dialog_naming}")
 
         if is_streaming and media_queue:
             generator = ai_instance.generate_audio_stream_realtime(
@@ -476,6 +505,7 @@ async def handle_command(websocket, data):
                                     await broadcast_to_user(user_id, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
                                 elif sender_ws:
                                     await async_send(sender_ws, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
+                                ws_actions_map.setdefault(websocket, []).append(act)
                             else:
                                 tgt_ws = get_target_websocket(user_id, target_device_name, fallback_ws=websocket, action_type=act_type)
                                 if tgt_ws:
@@ -492,7 +522,10 @@ async def handle_command(websocket, data):
                             for act in real_actions:
                                 a_type = act.get('action_type', '')
                                 a_val = str(act.get('action_value', '')).strip()
-                                action_label = f"⚡ [Действие на «{tgt_name}»]: {a_type} — {a_val}" if a_val else f"⚡ [Действие на «{tgt_name}»]: {a_type}"
+                                if a_type == "название диалога":
+                                    action_label = f"⚡ [Действие]: название диалога — «{a_val}»"
+                                else:
+                                    action_label = f"⚡ [Действие на «{tgt_name}»]: {a_type} — {a_val}" if a_val else f"⚡ [Действие на «{tgt_name}»]: {a_type}"
 
                                 action_msg_id = None
                                 if dialog_id:
