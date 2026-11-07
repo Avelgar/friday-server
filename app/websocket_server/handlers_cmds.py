@@ -509,8 +509,19 @@ async def handle_command(websocket, data):
                                     "actions": [act]
                                 })
 
-                                # 2. Если инициатор запроса на другом устройстве — показываем отдельное сообщение и ему
-                                if tgt_ws != websocket and sender_ws:
+                                # 2. Информационно синхронизируем плашку действия на ВСЕ остальные устройства пользователя
+                                if user_id:
+                                    await broadcast_to_user(user_id, {
+                                        "type": "new_message",
+                                        "dialog_id": dialog_id,
+                                        "message_id": action_msg_id,
+                                        "user_msg_id": user_msg_id if sender_ws != tgt_ws else None,
+                                        "sender": "Действие",
+                                        "device_name": tgt_name,
+                                        "text": action_label,
+                                        "actions": []
+                                    }, exclude_ws=tgt_ws)
+                                elif tgt_ws != websocket and sender_ws:
                                     await async_send(sender_ws, {
                                         "type": "new_message",
                                         "dialog_id": dialog_id,
