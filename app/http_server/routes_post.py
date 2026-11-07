@@ -212,10 +212,11 @@ def do_POST(self):
                 if not cursor.fetchone():
                     return self.send_json(403, {"status": "error", "message": "Нет доступа к этому диалогу"})
                 
+                # Строго по id ASC: первичный ключ гарантирует идеальный хронологический порядок создания сообщений
                 cursor.execute("""
                     SELECT id, sender, device_name, text, created_at as time
                     FROM messages
-                    WHERE dialog_id = %s ORDER BY created_at ASC
+                    WHERE dialog_id = %s ORDER BY id ASC
                 """, (dialog_id,))
                 
                 history = []
@@ -379,7 +380,7 @@ def do_POST(self):
             cursor.execute("SELECT m.id, m.dialog_id FROM messages m JOIN dialogs d ON m.dialog_id = d.id WHERE m.id = %s AND d.user_id = %s", (msg_id, user_id))
             row = cursor.fetchone()
             if not row: return self.send_json(403, {"status": "error", "message": "Нет доступа к сообщению"})
-            cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (new_text, msg_id))
+            cursor.execute("UPDATE messages SET text = %s, created_at = created_at WHERE id = %s", (new_text, msg_id))
             conn.commit()
             notify_ws(user_id, {"type": "message_edited", "dialog_id": row['dialog_id'], "message_id": msg_id, "text": new_text})
             self.send_json(200, {"status": "success", "message": "Сообщение обновлено"})

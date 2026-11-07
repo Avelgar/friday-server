@@ -294,10 +294,9 @@ async def handle_command(websocket, data):
                 bot_message_id = cursor.lastrowid
                 await conn.commit()
 
-                # Синхронизируем сразу только текстовые сообщения.
-                # Для аудиосообщений отправка на другие устройства произойдет строго ПОСЛЕ того,
-                # как транскрибация речи будет записана в базу данных.
-                if user_id and not (audio_bytes or is_streaming):
+                # Сразу транслируем сообщение пользователя на все другие устройства,
+                # чтобы на них пузырь пользователя гарантированно создавался ПЕРВЫМ (до ответа бота).
+                if user_id:
                     await broadcast_to_user(user_id, {
                         "type": "new_message",
                         "dialog_id": dialog_id,
@@ -309,9 +308,10 @@ async def handle_command(websocket, data):
                         "actions": []
                     }, exclude_ws=websocket)
 
+                # Строгая хронологическая сортировка по id ASC (гарантирует порядок)
                 await cursor.execute("""
                     SELECT sender, text FROM messages
-                    WHERE dialog_id = %s AND id < %s ORDER BY created_at ASC
+                    WHERE dialog_id = %s AND id < %s ORDER BY id ASC
                 """, (dialog_id, user_msg_id))
                 
                 raw_history = await cursor.fetchall()
@@ -530,8 +530,21 @@ async def handle_command(websocket, data):
         if dialog_id and user_msg_id and bot_message_id:
             if (audio_bytes or is_streaming):
                 if final_user_text_full.strip():
-                    await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
-                    # Синхронизируем распознанный голос на другие устройства
+                    # Сохраняем исходное created_at, предотвращая авто-сдвиг даты в MySQL при UPDATE
+                    await cursor.execute("UPDATE messages SET text = %s, created_at = created_at WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
+                    # Обновляем текст на устройстве-инициаторе
+                    if sender_ws:
+                        await async_send(sender_ws, {
+                            "type": "new_message",
+                            "dialog_id": dialog_id,
+                            "message_id": user_msg_id,
+                            "ui_msg_id": ui_msg_id,
+                            "sender": "Вы",
+                            "device_name": sender_name,
+                            "text": final_user_text_full.strip(),
+                            "actions": []
+                        })
+                    # Синхронизируем распознанный голос на другие устройства (обновление заготовки)
                     if user_id:
                         await broadcast_to_user(user_id, {
                             "type": "new_message",
@@ -550,7 +563,8 @@ async def handle_command(websocket, data):
                 if audio_chunks_count == 0 and not has_commands:
                     await cursor.execute("DELETE FROM messages WHERE id = %s", (user_msg_id,))
             else:
-                await cursor.execute("UPDATE messages SET text = %s WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
+                # Сохраняем исходное created_at
+                await cursor.execute("UPDATE messages SET text = %s, created_at = created_at WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             await conn.commit()
             
         if not dialog_id:
@@ -649,7 +663,7 @@ async def handle_antigravity_get_messages(websocket, data):
         cursor = await conn.cursor(aiomysql.DictCursor)
         
         await cursor.execute(
-            "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
+            "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
             (chat_uid,)
         )
         msgs = await cursor.fetchall()
@@ -817,7 +831,7 @@ async def handle_antigravity_task(websocket, data):
         logger.info(f"📋 [DB STATE] Чат: {chat_uid} | Ключ #{assigned_key} | prev_id: {prev_interaction_id[:12] if prev_interaction_id else 'None'} | env: {environment_id[:12] if environment_id else 'None'}")
 
         await cursor.execute(
-            "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY created_at ASC",
+            "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
             (chat_uid,)
         )
         recent_history = await cursor.fetchall() or []

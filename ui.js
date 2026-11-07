@@ -152,7 +152,7 @@ function addMessage(role, content, skipHistory = false, msgId = null) {
     const timeString = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     function escapeHtml(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;"); }
     
-    let actionsHtml = (!content.includes('🎤') && !content.includes('⏳')) ? `<div class="message-actions"><button onclick="editMessage('${actualMsgId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button><button onclick="deleteMessage('${actualMsgId}')" title="Удалить"><i class="fas fa-trash"></i></button></div>` : '';
+    let actionsHtml = (!content.includes('🎤') && !content.includes('⏳')) ? `<div class="message-actions"><button onclick="editMessage('${actualMsgId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button><button onclick="deleteMessage('${actualId}')" title="Удалить"><i class="fas fa-trash"></i></button></div>` : '';
     messageElement.innerHTML = `<div>${escapeHtml(content)}</div><div class="message-time">${timeString}</div>${actionsHtml}`;
     chatMessages.appendChild(messageElement); chatMessages.scrollTop = chatMessages.scrollHeight;
     
@@ -202,13 +202,16 @@ function handleIncomingStreamData(data) {
     }
 
     if (data.type === 'user_transcription') {
-        updatePendingBubble(data.text);
-        const b = document.getElementById(pendingBubbleId);
-        if (b && !data.text.includes('Аудиосообщение')) {
-            const actualId = pendingBubbleId.replace('msg_', '');
-            if(!b.querySelector('.message-actions')) b.insertAdjacentHTML('beforeend', `<div class="message-actions"><button onclick="editMessage('${actualId}')"><i class="fas fa-pencil-alt"></i></button><button onclick="deleteMessage('${actualId}')"><i class="fas fa-trash"></i></button></div>`);
+        const bubble = (pendingBubbleId ? document.getElementById(pendingBubbleId) : null) || 
+                       (data.ui_msg_id ? document.getElementById('msg_' + data.ui_msg_id) : null);
+        if (bubble) {
+            let firstDiv = bubble.querySelector('div:first-child');
+            if (firstDiv) firstDiv.textContent = data.text;
+            const actualId = bubble.id.replace('msg_', '');
+            if (!bubble.querySelector('.message-actions') && !data.text.includes('🎤') && !data.text.includes('⏳')) {
+                bubble.insertAdjacentHTML('beforeend', `<div class="message-actions"><button onclick="editMessage('${actualId}')" title="Редактировать"><i class="fas fa-pencil-alt"></i></button><button onclick="deleteMessage('${actualId}')" title="Удалить"><i class="fas fa-trash"></i></button></div>`);
+            }
         }
-        if(!data.text.includes('🎤')) pendingBubbleId = null; 
     }
     
     if (data.actions && Array.isArray(data.actions)) {
@@ -238,6 +241,7 @@ function handleIncomingStreamData(data) {
         
         if (isFinal) {
             vadState = 'idle';
+            pendingBubbleId = null;
             if (!window.streamAudioContext || window.streamAudioContext.currentTime >= window.nextPlayTime) {
                 isPlaying = false;
             }
@@ -246,6 +250,13 @@ function handleIncomingStreamData(data) {
         if (data.text && msgId !== ignoredMessageId) {
             const bubbleId = msgId ? 'msg_' + msgId : null;
             let existingBubble = bubbleId ? document.getElementById(bubbleId) : null;
+            // Если это сообщение пользователя и есть незавершённый пузырь — привязываем к нему
+            if (!existingBubble && data.sender === 'Вы' && pendingBubbleId) {
+                existingBubble = document.getElementById(pendingBubbleId);
+                if (existingBubble && msgId) {
+                    existingBubble.id = 'msg_' + msgId;
+                }
+            }
             if (existingBubble) {
                 let firstDiv = existingBubble.querySelector('div:first-child');
                 let currentText = firstDiv.textContent;
