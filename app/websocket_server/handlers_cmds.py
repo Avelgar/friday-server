@@ -294,17 +294,20 @@ async def handle_command(websocket, data):
                 bot_message_id = cursor.lastrowid
                 await conn.commit()
 
-                # Мгновенно синхронизируем отправленное пользователем сообщение на все остальные его устройства
-                await broadcast_to_user(user_id, {
-                    "type": "new_message",
-                    "dialog_id": dialog_id,
-                    "message_id": user_msg_id,
-                    "ui_msg_id": ui_msg_id,
-                    "sender": "Вы",
-                    "device_name": sender_name,
-                    "text": db_user_text,
-                    "actions": []
-                }, exclude_ws=websocket)
+                # Синхронизируем сразу только текстовые сообщения.
+                # Для аудиосообщений отправка на другие устройства произойдет строго ПОСЛЕ того,
+                # как транскрибация речи будет записана в базу данных.
+                if user_id and not (audio_bytes or is_streaming):
+                    await broadcast_to_user(user_id, {
+                        "type": "new_message",
+                        "dialog_id": dialog_id,
+                        "message_id": user_msg_id,
+                        "ui_msg_id": ui_msg_id,
+                        "sender": "Вы",
+                        "device_name": sender_name,
+                        "text": db_user_text,
+                        "actions": []
+                    }, exclude_ws=websocket)
 
                 await cursor.execute("""
                     SELECT sender, text FROM messages

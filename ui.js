@@ -247,7 +247,13 @@ function handleIncomingStreamData(data) {
             const bubbleId = msgId ? 'msg_' + msgId : null;
             let existingBubble = bubbleId ? document.getElementById(bubbleId) : null;
             if (existingBubble) {
-                existingBubble.querySelector('div:first-child').textContent += data.text; 
+                let firstDiv = existingBubble.querySelector('div:first-child');
+                let currentText = firstDiv.textContent;
+                if (data.sender === 'Вы' || currentText.includes('[Аудиосообщение]') || currentText.includes('⏳') || currentText.includes('🎤')) {
+                    firstDiv.textContent = data.text;
+                } else {
+                    firstDiv.textContent += data.text;
+                }
                 document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
                 if (!localStorage.getItem('token') && messageHistory.length > 0 && messageHistory[messageHistory.length - 1].role === 'assistant') {
                     messageHistory[messageHistory.length - 1].content += data.text; localStorage.setItem('guestMessageHistory', JSON.stringify(messageHistory));
