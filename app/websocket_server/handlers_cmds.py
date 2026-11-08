@@ -36,7 +36,7 @@ ACTION_DESCRIPTIONS = {
     "уведомление": "текст уведомления",
     "музыка": "строго одно из: 'включить', 'выключить', 'следующий', 'предыдущий'",
     "смена голоса": "строго одно из: Aoede, Puck, Kore, Charon",
-    "изменение громкости": "целое число от 0 до 100",
+    "изменение громкости": "целое число от 0 до 100 (например 20, 50, 80)",
     "изменение яркости": "целое число от 0 до 100",
     "выключить микрофон": "любой текст (доступно только на веб-сайте)",
     "название диалога": "краткое название для текущего диалога (1-3 слова)",
@@ -273,7 +273,13 @@ async def handle_command(websocket, data):
                 if not await cursor.fetchone(): create_new = True
                 else: dialog_id = client_dialog_id
             elif norm_type == 'robot' and session.get('robot_dialog_id'):
-                dialog_id = session['robot_dialog_id']
+                # Важно: проверяем, что робот не ссылается на удаленный диалог в БД!
+                await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (session['robot_dialog_id'], user_id))
+                if await cursor.fetchone():
+                    dialog_id = session['robot_dialog_id']
+                else:
+                    session.pop('robot_dialog_id', None)
+                    create_new = True
             else:
                 await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
                 dlg = await cursor.fetchone()

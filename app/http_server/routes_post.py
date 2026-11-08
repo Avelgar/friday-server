@@ -273,12 +273,20 @@ def do_POST(self):
             try:
                 payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
                 user_id = payload['user_id']
+                cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
+                if not cursor.fetchone():
+                    return self.send_json(403, {"status": "error", "message": "Нет доступа к этому диалогу"})
+
+                # 1. Удаляем все сообщения диалога (защита от Foreign Key Constraint)
+                cursor.execute("DELETE FROM messages WHERE dialog_id = %s", (dialog_id,))
+                # 2. Удаляем сам диалог
                 cursor.execute("DELETE FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
                 conn.commit()
                 notify_ws(user_id, {"type": "dialog_deleted", "dialog_id": dialog_id})
                 self.send_json(200, {"status": "success", "message": "Диалог удален"})
-            except Exception:
-                self.send_json(401, {"status": "error", "message": "Недействительный токен"})
+            except Exception as e:
+                logger.error(f"Error in delete_dialog: {e}")
+                self.send_json(500, {"status": "error", "message": str(e)})
 
         elif self.path == '/register':
             email = data.get('email')
