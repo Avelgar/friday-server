@@ -19,7 +19,7 @@ import urllib.parse
 logger = logging.getLogger("HTTP_Server")
 
 CAP_WEB = "смена голоса (принимает СТРОГО одно из имен: Aoede/Puck/Kore/Charon), выключить микрофон (принимает любой текст), очистка истории (любой текст)"
-ACT_WEB = "смена голоса, выключить микрофон, очистка истории, check_network_devices"
+ACT_WEB = "смена голоса, выключить микрофон, очистка истории"
 
 def notify_ws(user_id, payload):
     """Межпроцессное мгновенное уведомление WebSocket-сервера для синхронизации всех устройств пользователя."""
@@ -186,6 +186,25 @@ def do_POST(self):
                     self.wfile.flush()
                 except Exception: pass
             return 
+
+        elif self.path == '/clear_history':
+            token = data.get('token')
+            dialog_id = data.get('dialog_id')
+            if not token:
+                return self.send_json(401, {"status": "error", "message": "Токен обязателен"})
+            try:
+                payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+                user_id = payload['user_id']
+                if dialog_id:
+                    cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (dialog_id, user_id))
+                    if not cursor.fetchone():
+                        return self.send_json(403, {"status": "error", "message": "Нет доступа к этому диалогу"})
+                    cursor.execute("DELETE FROM messages WHERE dialog_id = %s", (dialog_id,))
+                    conn.commit()
+                    notify_ws(user_id, {"type": "history_cleared", "dialog_id": dialog_id})
+                self.send_json(200, {"status": "success", "message": "История очищена"})
+            except Exception:
+                self.send_json(401, {"status": "error", "message": "Недействительный токен"})
 
         elif self.path == '/api/get_dialogs':
             token = data.get('token')
