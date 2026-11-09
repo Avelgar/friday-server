@@ -12,6 +12,9 @@ logging.basicConfig(
 JWT_SECRET = os.environ.get('JWT_SECRET', '')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY', '')
 
+# Единый прокси для внешних API (Gemini Live, Antigravity и др.)
+PROXY_URL = os.environ.get('PROXY_URL') or os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY') or ''
+
 # Настройки БД
 DB_CONFIG = {
     'user': os.environ.get('DB_USER', 'friday_user'),

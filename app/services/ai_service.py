@@ -22,7 +22,17 @@ try:
     from app.config.secrets import GEMINI_KEYS
 except ImportError:
     GEMINI_KEYS = []
-PROXY_URL = "http://80.249.144.187:25504"
+
+try:
+    from app.config.settings import PROXY_URL
+except ImportError:
+    PROXY_URL = os.environ.get('PROXY_URL') or os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY') or ''
+
+if PROXY_URL:
+    logger.info(f"🌐 [AI_Service] Используется PROXY: {PROXY_URL.split('@')[-1] if '@' in PROXY_URL else PROXY_URL}")
+else:
+    logger.info("🌐 [AI_Service] Прямое подключение без прокси (PROXY_URL не задан)")
+
 class GeminiKeyPool:
     def __init__(self, keys: list[str]):
         self.keys = keys or []
@@ -72,28 +82,35 @@ class AIService:
         self.antigravity_sessions = {}
         self.key_pool = GeminiKeyPool(self.api_keys)
 
+    def _get_http_options(self, timeout=60000):
+        client_args = {}
+        async_client_args = {}
+        if PROXY_URL:
+            client_args["proxy"] = PROXY_URL
+            async_client_args["proxy"] = PROXY_URL
+
+        return types.HttpOptions(
+            api_version="v1beta",
+            timeout=timeout,
+            client_args=client_args or None,
+            async_client_args=async_client_args or None
+        )
+
     def _get_client(self, key_index=None):
         idx = key_index if key_index is not None else self.current_key_index
+        api_key = self.api_keys[idx] if self.api_keys and idx < len(self.api_keys) else None
         return genai.Client(
-            http_options=types.HttpOptions(
-                api_version="v1beta",
-                timeout=60000,
-                client_args={"proxy": PROXY_URL},
-                async_client_args={"proxy": PROXY_URL}
-            ),
-            api_key=self.api_keys[idx]
+            http_options=self._get_http_options(timeout=60000),
+            api_key=api_key
         )
 
     def _get_live_client(self):
         live_key = self.api_keys[0] if self.api_keys else None
         return genai.Client(
-            http_options=types.HttpOptions(
-                api_version="v1beta",
-                client_args={"proxy": PROXY_URL},
-                async_client_args={"proxy": PROXY_URL}
-            ),
+            http_options=self._get_http_options(timeout=None),
             api_key=live_key
         )
+
     def _rotate_key(self):
         if len(self.api_keys) <= 1: return False
         self.current_key_index = self.key_pool.get_next_key(exclude_index=self.current_key_index)
