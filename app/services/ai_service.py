@@ -74,8 +74,7 @@ class AIService:
         return genai.Client(
             http_options={
                 "api_version": "v1beta", 
-                "timeout": 60000,
-                "proxy": PROXY_URL
+                "timeout": 60000
             }, 
             api_key=self.api_keys[idx]
         )
@@ -83,10 +82,7 @@ class AIService:
     def _get_live_client(self):
         live_key = self.api_keys[0] if self.api_keys else None
         return genai.Client(
-            http_options={
-                "api_version": "v1beta",
-                "proxy": PROXY_URL
-            }, 
+            http_options={"api_version": "v1beta"}, 
             api_key=live_key
         )
 
