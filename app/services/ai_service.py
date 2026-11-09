@@ -13,6 +13,13 @@ import urllib.parse
 import os
 import re
 
+# Гарантируем, что переменные прокси из systemd (любого регистра) доступны всем библиотекам (httpx, websockets, urllib, aiohttp)
+for _p_var in ['http_proxy', 'https_proxy', 'all_proxy', 'no_proxy', 'ws_proxy', 'wss_proxy']:
+    _p_val = os.environ.get(_p_var) or os.environ.get(_p_var.upper())
+    if _p_val:
+        os.environ[_p_var] = _p_val
+        os.environ[_p_var.upper()] = _p_val
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("AI_Service")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -21,7 +28,7 @@ try:
     from app.config.secrets import GEMINI_KEYS
 except ImportError:
     GEMINI_KEYS = []
-PROXY_URL = "http://80.249.144.187:25504"
+
 class GeminiKeyPool:
     def __init__(self, keys: list[str]):
         self.keys = keys or []
@@ -73,9 +80,7 @@ class AIService:
         return genai.Client(
             http_options=types.HttpOptions(
                 api_version="v1beta",
-                timeout=60000,
-                client_args={"proxy": PROXY_URL},
-                async_client_args={"proxy": PROXY_URL}
+                timeout=60000
             ),
             api_key=self.api_keys[idx]
         )
@@ -84,9 +89,7 @@ class AIService:
         live_key = self.api_keys[0] if self.api_keys else None
         return genai.Client(
             http_options=types.HttpOptions(
-                api_version="v1beta",
-                client_args={"proxy": PROXY_URL},
-                async_client_args={"proxy": PROXY_URL}
+                api_version="v1beta"
             ),
             api_key=live_key
         )
