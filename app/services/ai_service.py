@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("AI_Service")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-
+PROXY_URL = "http://fridayuser:asdjksahdhsaofg@80.249.144.187:25504"
 try:
     from app.config.secrets import GEMINI_KEYS
 except ImportError:
@@ -72,13 +72,23 @@ class AIService:
     def _get_client(self, key_index=None):
         idx = key_index if key_index is not None else self.current_key_index
         return genai.Client(
-            http_options={"api_version": "v1beta", "timeout": 60000}, 
+            http_options={
+                "api_version": "v1beta", 
+                "timeout": 60000,
+                "proxy": PROXY_URL
+            }, 
             api_key=self.api_keys[idx]
         )
 
     def _get_live_client(self):
         live_key = self.api_keys[0] if self.api_keys else None
-        return genai.Client(http_options={"api_version": "v1beta"}, api_key=live_key)
+        return genai.Client(
+            http_options={
+                "api_version": "v1beta",
+                "proxy": PROXY_URL
+            }, 
+            api_key=live_key
+        )
 
     def _rotate_key(self):
         if len(self.api_keys) <= 1: return False
