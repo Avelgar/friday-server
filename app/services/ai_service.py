@@ -22,7 +22,7 @@ try:
     from app.config.secrets import GEMINI_KEYS
 except ImportError:
     GEMINI_KEYS = []
-
+PROXY_URL = "http://80.249.144.187:25504"
 class GeminiKeyPool:
     def __init__(self, keys: list[str]):
         self.keys = keys or []
@@ -77,20 +77,23 @@ class AIService:
         return genai.Client(
             http_options=types.HttpOptions(
                 api_version="v1beta",
-                timeout=60000
+                timeout=60000,
+                client_args={"proxy": PROXY_URL},
+                async_client_args={"proxy": PROXY_URL}
             ),
-            api_key=self.api_keys[idx] if self.api_keys else None
+            api_key=self.api_keys[idx]
         )
 
     def _get_live_client(self):
         live_key = self.api_keys[0] if self.api_keys else None
         return genai.Client(
             http_options=types.HttpOptions(
-                api_version="v1beta"
+                api_version="v1beta",
+                client_args={"proxy": PROXY_URL},
+                async_client_args={"proxy": PROXY_URL}
             ),
             api_key=live_key
         )
-
     def _rotate_key(self):
         if len(self.api_keys) <= 1: return False
         self.current_key_index = self.key_pool.get_next_key(exclude_index=self.current_key_index)
