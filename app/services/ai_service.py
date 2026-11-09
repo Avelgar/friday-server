@@ -17,12 +17,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("AI_Service")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
-PROXY_URL = "http://fridayuser:asdjksahdhsaofg@80.249.144.187:25504"
 try:
     from app.config.secrets import GEMINI_KEYS
 except ImportError:
     GEMINI_KEYS = []
-
+PROXY_URL = "http://80.249.144.187:25504"
 class GeminiKeyPool:
     def __init__(self, keys: list[str]):
         self.keys = keys or []
@@ -72,17 +71,23 @@ class AIService:
     def _get_client(self, key_index=None):
         idx = key_index if key_index is not None else self.current_key_index
         return genai.Client(
-            http_options={
-                "api_version": "v1beta", 
-                "timeout": 60000
-            }, 
+            http_options=types.HttpOptions(
+                api_version="v1beta",
+                timeout=60000,
+                client_args={"proxy": PROXY_URL},
+                async_client_args={"proxy": PROXY_URL}
+            ),
             api_key=self.api_keys[idx]
         )
 
     def _get_live_client(self):
         live_key = self.api_keys[0] if self.api_keys else None
         return genai.Client(
-            http_options={"api_version": "v1beta"}, 
+            http_options=types.HttpOptions(
+                api_version="v1beta",
+                client_args={"proxy": PROXY_URL},
+                async_client_args={"proxy": PROXY_URL}
+            ),
             api_key=live_key
         )
 
