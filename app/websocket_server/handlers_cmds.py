@@ -7,7 +7,7 @@ from datetime import datetime
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
 from app.websocket_server import state
-from app.websocket_server.utils import async_send, broadcast_to_user, get_device_type, get_accessible_devices
+from app.websocket_server.utils import async_send, broadcast_to_user, get_device_type
 import time
 import os
 import shutil
@@ -91,18 +91,6 @@ def format_action_list(action_keys):
         caps.append(f"  • {k} (параметр: {desc})")
     return "\n".join(caps)
 
-ALL_PLATFORMS_CAPABILITIES = (
-    "СПРАВОЧНИК ВОЗМОЖНОСТЕЙ ВСЕХ 4 КЛИЕНТОВ (для общего вопроса «что ты умеешь вообще?»):\n"
-    f"1. {CLIENT_NAMES['pc']}:\n"
-    f"{format_action_list(CLIENT_ACTIONS['pc'])}\n\n"
-    f"2. {CLIENT_NAMES['phone']}:\n"
-    f"{format_action_list(CLIENT_ACTIONS['phone'])}\n\n"
-    f"3. {CLIENT_NAMES['robot']}:\n"
-    f"{format_action_list(CLIENT_ACTIONS['robot'])}\n\n"
-    f"4. {CLIENT_NAMES['web']}:\n"
-    f"{format_action_list(CLIENT_ACTIONS['web'])}"
-)
-
 def normalize_client_type(raw_type):
     t = str(raw_type or '').strip().lower()
     if t in CLIENT_ACTIONS:
@@ -112,16 +100,17 @@ def normalize_client_type(raw_type):
     if any(k in t for k in ['web', 'браузер', 'сайт']): return 'web'
     return 'pc'
 
-def get_user_devices_info(user_id, current_ws, sender_name, device_type_code):
+def get_user_online_devices(user_id, current_ws, sender_name, device_type_code):
     current_type = normalize_client_type(device_type_code)
     current_dev = {
         "ws": current_ws,
         "name": sender_name,
         "type": current_type,
-        "type_ru": get_device_type(type_str=current_type)
+        "type_ru": get_device_type(type_str=current_type),
+        "is_current": True
     }
+    devices = [current_dev]
 
-    other_devs = []
     if user_id:
         user_ws_set = state.user_connections.get(user_id, set())
         for ws in user_ws_set:
@@ -132,21 +121,15 @@ def get_user_devices_info(user_id, current_ws, sender_name, device_type_code):
                 continue
             d_name = session.get('device_name') or 'Устройство'
             d_type = normalize_client_type(session.get('device_type') or 'pc')
-            other_devs.append({
+            devices.append({
                 "ws": ws,
                 "name": d_name,
                 "type": d_type,
-                "type_ru": get_device_type(type_str=d_type)
+                "type_ru": get_device_type(type_str=d_type),
+                "is_current": False
             })
 
-    return current_dev, other_devs
-
-def get_action_strings(action_keys):
-    caps = []
-    for k in action_keys:
-        desc = ACTION_DESCRIPTIONS.get(k, "любой текст")
-        caps.append(f"- {k} (принимает: {desc})")
-    return "\n".join(caps), ", ".join(action_keys)
+    return devices
 
 async def handle_audio_chunk(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
@@ -354,8 +337,7 @@ async def handle_command(websocket, data):
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
         # === ОПРЕДЕЛЯЕМ ОНЛАЙН-УСТРОЙСТВА И ИХ ВОЗМОЖНОСТИ ===
-        current_dev, other_devs = get_user_devices_info(user_id, websocket, sender_name, device_type_code)
-        all_online_devs = [current_dev] + other_devs
+        all_online_devs = get_user_online_devices(user_id, websocket, sender_name, device_type_code)
         online_types = set([d["type"] for d in all_online_devs])
 
         # Собираем действия, доступные хотя бы на одном из устройств онлайн:
@@ -367,74 +349,43 @@ async def handle_command(websocket, data):
                         allowed_action_keys.append(act)
 
         if not allowed_action_keys:
-            allowed_action_keys = CLIENT_ACTIONS.get(current_dev["type"], ["название диалога", "смена голоса"])
+            allowed_action_keys = CLIENT_ACTIONS.get(normalize_client_type(device_type_code), ["название диалога", "смена голоса"])
 
-        allowed_actions = ", ".join(allowed_action_keys)
+        allowed_actions = {act: ACTION_DESCRIPTIONS.get(act, "параметр действия") for act in allowed_action_keys}
 
-        current_dev_desc = (
-            f"• «{current_dev['name']}» ({current_dev['type_ru']}) — ТЕКУЩЕЕ УСТРОЙСТВО СОБЕСЕДНИКА\n"
-            f"  Доступные действия на этом устройстве:\n"
-            f"{format_action_list(CLIENT_ACTIONS.get(current_dev['type'], []))}"
-        )
+        # Список подключенных устройств пользователя
+        devices_lines = []
+        for d in all_online_devs:
+            mark = " (текущее устройство собеседника)" if d["is_current"] else ""
+            devices_lines.append(f"• «{d['name']}» — {d['type_ru']}{mark}")
+        current_dev_desc = "\n".join(devices_lines)
 
-        if other_devs:
-            other_devs_lines = []
-            for d in other_devs:
-                other_devs_lines.append(
-                    f"• «{d['name']}» ({d['type_ru']}):\n"
-                    f"  Доступные действия на этом устройстве:\n"
-                    f"{format_action_list(CLIENT_ACTIONS.get(d['type'], []))}"
-                )
-            other_devices_desc = "\n\n".join(other_devs_lines)
-        else:
-            other_devices_desc = "Других устройств пользователя в сети сейчас нет (все остальные оффлайн)."
+        # Возможности ТОЛЬКО тех платформ, которые сейчас онлайн в сети пользователя
+        caps_blocks = []
+        for c_type in ["pc", "phone", "robot", "web"]:
+            if c_type in online_types:
+                caps_blocks.append(f"• {CLIENT_NAMES[c_type]}:\n{format_action_list(CLIENT_ACTIONS[c_type])}")
+        platforms_capabilities = "\n\n".join(caps_blocks)
 
-        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник говорит через устройство: «{current_dev['name']}» (тип: {current_dev['type_ru']}).
+        system_instruction = f"""Ты — ИИ-помощник {name}. Твой собеседник говорит через устройство: «{sender_name}» ({get_device_type(type_str=normalize_client_type(device_type_code))}).
 Тебе в реальном времени передается видеопоток с камеры пользователя.
 
-СТИЛЬ И ТОНАЛЬНОСТЬ:
-- Ты живой, раскованный и естественный собеседник без ханжества, цензуры, морализаторства и занудных нотаций!
-- Общайся на одной волне с пользователем: зеркаль его стиль общения. Если пользователь матерится, использует мат или крепкие выражения — ты МОЖЕШЬ и ДОЛЖЕН свободно материться в ответ, подкалывать и говорить на настоящем живом русском языке без стеснения.
-- Свободно поддерживай любые темы: пошлые, взрослые (18+), интимные, юмор ниже пояса, черный юмор и любые жизненные разговоры. Никогда не читай нотаций, не строй из себя святошу и не отказывайся обсуждать тему!
-
-УСТРОЙСТВА В СЕТИ (СЕЙЧАС ОНЛАЙН):
+УСТРОЙСТВА В СЕТИ:
 {current_dev_desc}
 
-ДРУГИЕ УСТРОЙСТВА В СЕТИ ПОЛЬЗОВАТЕЛЯ:
-{other_devices_desc}
+ВОЗМОЖНОСТИ УСТРОЙСТВ:
+{platforms_capabilities}
 
-{ALL_PLATFORMS_CAPABILITIES}
+УПРАВЛЕНИЕ УСТРОЙСТВАМИ (ИНСТРУМЕНТ send_device_commands):
+1. Для выполнения действий вызывай инструмент `send_device_commands`. В поле `target_device` передавай точное имя целевого устройства.
+2. Каждое действие поддерживается только соответствующим типом устройства из списка выше. Если текущее устройство собеседника не поддерживает действие, но в сети есть подходящее онлайн-устройство пользователя — направь команду на него.
+3. «открытие файла» — запуск любых программ, приложений и игр (например: 'steam', 'calc', 'telegram').
+4. «открытие ссылки» — полный URL-адрес (например: https://youtube.com).
+5. «музыка» — допустимые параметры: 'включить', 'выключить', 'следующий', 'предыдущий'.
+6. «название диалога» — если диалог только начался или не имеет названия, дай ему краткое емкое название (1-3 слова) через это действие.
+7. Твой текстовый ответ озвучивается пользователю голосом через динамики, поэтому отвечай чистым разговорным текстом без кода, Markdown-таблиц и технических тегов."""
 
-ПРАВИЛА И МАРШРУТИЗАЦИЯ КОМАНД:
-1. ВСЕГДА НА ЛЮБОЙ ЗАПРОС ОТВЕЧАЙ ГОЛОСОМ! Даже если вызываешь инструмент send_device_commands, обязательно сначала скажи коротко: "Секунду", "Открываю", "Делаю". Никогда не молчи!
-2. ПРЯМОЕ УПРАВЛЕНИЕ: Вызывай `send_device_commands` ТОЛЬКО для действий, которые поддерживаются целевым устройством:
-   - В параметре `target_device` ОБЯЗАТЕЛЬНО указывай точное имя целевого устройства ('{current_dev['name']}' или имя устройства из списка онлайн выше).
-   - Если действие поддерживается текущим устройством ('{current_dev['name']}') — указывай target_device='{current_dev['name']}'.
-   - Если пользователь просит команду для другого устройства (например: "открой ютуб на компе", находясь в телефоне, или "робот, вперед") — проверь, есть ли целевое устройство онлайн. Если да — ставь его точное имя в target_device.
-   - Если текущее устройство НЕ поддерживает команду (например, пользователь в браузере просит открыть файл/программу или сайт), а в сети есть подходящее онлайн-устройство (например ПК) — направь команду на ПК (target_device='имя ПК') и озвучь: "Открываю на компьютере".
-3. ЗАПУСК ПРОГРАММ И ИГР («открытие файла»): Чтобы запустить приложение/игру (steam, telegram, calc, pubg и т.д.), вызывай action_type='открытие файла' с точным именем программы. «открытие приложения» и «открытие файла» — это абсолютно одно и то же действие!
-4. ОТКРЫТИЕ ССЫЛОК («открытие ссылки»): НИКОГДА НЕ ОТКАЗЫВАЙСЯ открывать ссылки, если целевое устройство (ПК или телефон) подключено! Всегда вызывай `send_device_commands` с action_type='открытие ссылки' и полным URL-адресом (например https://youtube.com).
-5. ОТВЕТ НА ВОПРОС «ЧТО ТЫ УМЕЕШЬ?» / «КАКИЕ ТВОИ ВОЗМОЖНОСТИ?»:
-   - По умолчанию перечисляй ТОЛЬКО возможности тех устройств, которые СЕЙЧАС ОНЛАЙН в сети (из блока "УСТРОЙСТВА В СЕТИ СЕЙЧАС ОНЛАЙН").
-   - СТРОГО ЗАПРЕЩЕНО называть возможности устройств, которых сейчас нет в сети! (Например, если робот не в сети — ни слова про движение робота).
-   - Если пользователь явно спросит: «Что ты умеешь вообще на всех устройствах?» или «Расскажи про все клиенты» — только тогда перечисли возможности всех 4 платформ из справочника выше.
-6. СТОП-СЛОВА: Если пользователь ругается, говорит "хватит", "отмена", "не надо", "отбой" — СТРОГО ЗАПРЕЩЕНО вызывать любые команды! Скажи: "Понял, отбой".
-7. КРАТКОСТЬ: Говори кратко и емко (1-2 простых предложения). Никаких длинных паст!
-8. НАЗВАНИЕ ДИАЛОГА («название диалога»): Если это первое сообщение в диалоге (или диалог еще называется 'Новый диалог'), либо если пользователь просит назвать/переименовать диалог — ты ОБЯЗАН вызвать send_device_commands с action_type='название диалога' и осмысленным, ярким и лаконичным названием (1-3 слова, например «Приветствие», «Планы на вечер», «Разработка игры»), отражающим суть беседы или просьбы. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО оставлять или ставить название 'Новый диалог', называть его 'Диалог' или пустым именем!
-9. ЧИСТАЯ РЕЧЬ (СТРОГО БЕЗ КОДА И ТЕХНИЧЕСКИХ СТРОК):
-   - КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать в тексте ответа любые технические плашки, команды, HTML/код или строки вроде '⚡ [Действие...]', 'музыка — выключить', 'call:send_device_commands'! Твой текст напрямую озвучивается голосом через динамики. Он должен содержать ТОЛЬКО чистую человеческую речь (например: «Вырубаю музыку», «Сделано», «Сейчас поставлю трек»).
-   - Для выполнения ЛЮБОГО действия вызывай ИСКЛЮЧИТЕЛЬНО инструмент send_device_commands. Никогда не пиши команды в текст!"""
-        
-        naming_prompt = ""
-        if needs_dialog_naming:
-            naming_prompt = " [СИСТЕМА: Это первое сообщение в диалоге! Обязательно дай емкое название этому диалогу (1-3 слова) через действие action_type='название диалога' на основе темы запроса]."
-
-        if command:
-            prompt_text_to_send = f"[ЗАПРОС]: {command}{naming_prompt}"
-        elif needs_dialog_naming:
-            prompt_text_to_send = "[СИСТЕМА]: Это первое сообщение в диалоге! Обязательно дай емкое название этому диалогу (1-3 слова) через действие action_type='название диалога' на основе того, что скажет пользователь."
-        else:
-            prompt_text_to_send = None
+        prompt_text_to_send = command if command else None
 
         logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.1)... Онлайн устройств: {len(all_online_devs)} | Доступных действий: {len(allowed_action_keys)} | Первое сообщение: {needs_dialog_naming}")
 
@@ -662,358 +613,3 @@ async def handle_command(websocket, data):
         if cursor: await cursor.close()
         if conn: conn.close()
         active_media_queues.pop(data.get('ui_msg_id', ''), None)
-
-async def get_least_used_key_index(cursor=None):
-    # Берем следующий по очереди свободный ключ из пула
-    return ai_instance.key_pool.get_next_key()
-
-active_antigravity_tasks = {}
-
-# ==============================================================================
-# CRUD ДИАЛОГОВ И СООБЩЕНИЙ ANTIGRAVITY (С ПРИВЯЗКОЙ К АККАУНТУ И ПАПКЕ)
-# ==============================================================================
-
-async def handle_antigravity_get_chats(websocket, data):
-    user_token = data.get("user_token")
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        
-        if not user_token:
-            await async_send(websocket, {"type": "antigravity_chats_list", "chats": []})
-            return
-
-        await cursor.execute(
-            """INSERT INTO antigravity_users (user_token, username) VALUES (%s, %s)
-               ON DUPLICATE KEY UPDATE username = VALUES(username)""",
-            (user_token, data.get("username", "Developer"))
-        )
-        await conn.commit()
-
-        await cursor.execute(
-            """SELECT chat_uid, title, key_index, last_interaction_id, environment_id, 
-                      workspace_path, updated_at 
-               FROM antigravity_chats 
-               WHERE user_token = %s 
-               ORDER BY updated_at DESC""",
-            (user_token,)
-        )
-        chats = await cursor.fetchall()
-        for c in chats:
-            if c.get("updated_at"): c["updated_at"] = str(c["updated_at"])
-
-        await async_send(websocket, {
-            "type": "antigravity_chats_list",
-            "chats": chats or []
-        })
-    except Exception as e:
-        logger.error(f"[DB get_chats error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_get_messages(websocket, data):
-    chat_uid = data.get("chat_uid")
-    if not chat_uid: return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        
-        await cursor.execute(
-            "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
-            (chat_uid,)
-        )
-        msgs = await cursor.fetchall()
-        for m in msgs:
-            if m.get("created_at"): m["created_at"] = str(m["created_at"])
-
-        await cursor.execute("SELECT synced_files, workspace_path FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        chat_row = await cursor.fetchone()
-        synced_files = {}
-        ws_path = None
-        if chat_row:
-            ws_path = chat_row.get("workspace_path")
-            if chat_row.get("synced_files"):
-                try:
-                    synced_files = json.loads(chat_row["synced_files"]) if isinstance(chat_row["synced_files"], str) else chat_row["synced_files"]
-                except Exception: pass
-
-        await async_send(websocket, {
-            "type": "antigravity_chat_history",
-            "chat_uid": chat_uid,
-            "workspace_path": ws_path,
-            "messages": msgs or [],
-            "synced_files": synced_files or {}
-        })
-    except Exception as e:
-        logger.error(f"[DB get_messages error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_create_chat(websocket, data):
-    chat_uid = data.get("chat_uid") or f"chat_{int(time.time() * 1000)}"
-    title = data.get("title") or "Новый диалог"
-    user_token = data.get("user_token")
-    workspace_path = data.get("workspace_path")
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        assigned_key = await get_least_used_key_index(cursor)
-
-        await cursor.execute(
-            """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
-               VALUES (%s, %s, %s, %s, %s)""",
-            (chat_uid, title, assigned_key, user_token, workspace_path)
-        )
-        await conn.commit()
-
-        await async_send(websocket, {
-            "type": "antigravity_chat_created",
-            "chat": {
-                "chat_uid": chat_uid,
-                "title": title,
-                "key_index": assigned_key,
-                "user_token": user_token,
-                "workspace_path": workspace_path,
-                "last_interaction_id": None,
-                "environment_id": None
-            }
-        })
-    except Exception as e:
-        logger.error(f"[DB create_chat error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_delete_chat(websocket, data):
-    chat_uid = data.get("chat_uid")
-    if not chat_uid: return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor()
-        await cursor.execute("DELETE FROM antigravity_messages WHERE chat_uid = %s", (chat_uid,))
-        await cursor.execute("DELETE FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        await conn.commit()
-
-        upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
-        if os.path.exists(upload_dir):
-            shutil.rmtree(upload_dir, ignore_errors=True)
-
-        await async_send(websocket, {
-            "type": "antigravity_chat_deleted",
-            "chat_uid": chat_uid
-        })
-    except Exception as e:
-        logger.error(f"[DB delete_chat error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_cancel_task(websocket, data):
-    chat_uid = data.get("chat_id")
-    ui_msg_id = data.get("ui_msg_id")
-    logger.info(f"🛑 [WS CANCEL REQUEST] Запрос отмены для чата: {chat_uid}")
-
-    if chat_uid and chat_uid in active_antigravity_tasks:
-        task = active_antigravity_tasks[chat_uid]
-        if not task.done():
-            task.cancel()
-            logger.info(f"🛑 [WS CANCEL] Таск успешно отменен в памяти: {chat_uid}")
-
-    await async_send(websocket, {
-        "type": "antigravity_cancelled",
-        "chat_id": chat_uid,
-        "ui_msg_id": ui_msg_id
-    })
-
-async def handle_antigravity_task(websocket, data):
-    prompt = data.get("prompt", "").strip()
-    target_files = data.get("target_files", [])
-    input_files = data.get("input_files", {})
-    user_token = data.get("user_token")
-    workspace_path = data.get("workspace_path")
-    chat_uid = data.get("chat_id") or data.get("chat_uid") or getattr(websocket, "active_chat_uid", None)
-    if not chat_uid:
-        chat_uid = f"chat_{int(time.time() * 1000)}"
-    websocket.active_chat_uid = chat_uid
-
-    ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
-    if not prompt: return
-
-    logger.info(f"📥 [WS IN] Чат: {chat_uid} | Задача: '{prompt[:70]}' | ui_msg_id: {ui_msg_id}")
-
-    conn = None; cursor = None
-    assigned_key = None
-    prev_interaction_id = None
-    environment_id = None
-    need_title_update = False
-    recent_history = []
-
-    clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
-    if not clean_title_text: clean_title_text = prompt
-    auto_title = clean_title_text[:30].replace("\n", " ").strip()
-    if len(clean_title_text) > 30: auto_title += "..."
-
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-
-        await cursor.execute(
-            "SELECT key_index, last_interaction_id, environment_id, title FROM antigravity_chats WHERE chat_uid = %s",
-            (chat_uid,)
-        )
-        chat_row = await cursor.fetchone()
-
-        if chat_row:
-            assigned_key = chat_row["key_index"]
-            prev_interaction_id = chat_row["last_interaction_id"]
-            environment_id = chat_row["environment_id"]
-            if chat_row.get("title") in ("Новый диалог", None, ""):
-                need_title_update = True
-        else:
-            assigned_key = await get_least_used_key_index(cursor)
-            await cursor.execute(
-                """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (chat_uid, auto_title, assigned_key, user_token, workspace_path)
-            )
-            await conn.commit()
-
-        logger.info(f"📋 [DB STATE] Чат: {chat_uid} | Ключ #{assigned_key} | prev_id: {prev_interaction_id[:12] if prev_interaction_id else 'None'} | env: {environment_id[:12] if environment_id else 'None'}")
-
-        await cursor.execute(
-            "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
-            (chat_uid,)
-        )
-        recent_history = await cursor.fetchall() or []
-
-        await cursor.execute(
-            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'user', %s)",
-            (chat_uid, prompt)
-        )
-        await conn.commit()
-
-    except Exception as dbe:
-        logger.error(f"[DB Error Before Task] {dbe}", exc_info=True)
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-    async def send_status_update(status_payload):
-        await async_send(websocket, {
-            "type": "antigravity_status",
-            "ui_msg_id": ui_msg_id,
-            **status_payload
-        })
-
-    active_antigravity_tasks[chat_uid] = asyncio.current_task()
-
-    try:
-        result = await ai_instance.run_antigravity_agent(
-            prompt_text=prompt,
-            status_callback=send_status_update,
-            target_files=target_files,
-            input_files=input_files,
-            previous_interaction_id=prev_interaction_id,
-            environment_id=environment_id,
-            assigned_key=assigned_key,
-            chat_uid=chat_uid,
-            recent_history=recent_history
-        )
-
-        new_interaction_id = result["interaction_id"]
-        new_env_id = result["environment_id"]
-        agent_reply_text = result["text"]
-        final_assigned_key = result.get("assigned_key", assigned_key)
-
-        logger.info(f"📤 [ANTIGRAVITY DONE] Ответ готов ({len(agent_reply_text)} симв.): '{agent_reply_text[:60]}...'")
-
-        try:
-            conn = await get_async_db_connection()
-            cursor = await conn.cursor()
-
-            new_files = result.get("file_urls", {})
-            synced_str = json.dumps(new_files, ensure_ascii=False) if new_files else None
-            
-            if need_title_update:
-                await cursor.execute(
-                    """UPDATE antigravity_chats 
-                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, title = %s, 
-                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
-                       WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, final_assigned_key, auto_title, synced_str, chat_uid)
-                )
-            else:
-                await cursor.execute(
-                    """UPDATE antigravity_chats 
-                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, 
-                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
-                       WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, final_assigned_key, synced_str, chat_uid)
-                )
-
-            await cursor.execute(
-                "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'agent', %s)",
-                (chat_uid, agent_reply_text)
-            )
-            await conn.commit()
-        except Exception as dbe2:
-            logger.error(f"[DB Error After Task] {dbe2}")
-        finally:
-            if cursor: await cursor.close()
-            if conn: conn.close()
-
-        await async_send(websocket, {
-            "type": "antigravity_result",
-            "ui_msg_id": ui_msg_id,
-            "text": agent_reply_text,
-            "file_urls": result.get("file_urls", {}),
-            "environment_id": new_env_id,
-            "interaction_id": new_interaction_id,
-            "chat_id": chat_uid
-        })
-
-    except asyncio.CancelledError:
-        logger.warning(f"🛑 [WS Antigravity] Задача {chat_uid} прервана! Очистка контекста...")
-        try:
-            conn = await get_async_db_connection()
-            cursor = await conn.cursor()
-            await cursor.execute(
-                "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
-                (chat_uid,)
-            )
-            await cursor.execute(
-                "UPDATE antigravity_chats SET last_interaction_id = NULL, environment_id = NULL WHERE chat_uid = %s",
-                (chat_uid,)
-            )
-            await conn.commit()
-            logger.info(f"🧹 [CLEANUP SUCCESS] Окружение Google сброшено в NULL для чата {chat_uid}.")
-        except Exception as cle:
-            logger.warning(f"[WS Cleanup Error] {cle}")
-        finally:
-            if cursor: await cursor.close()
-            if conn: conn.close()
-
-        await async_send(websocket, {
-            "type": "antigravity_cancelled",
-            "chat_id": chat_uid,
-            "ui_msg_id": ui_msg_id
-        })
-    except Exception as e:
-        logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
-        await async_send(websocket, {
-            "type": "antigravity_error",
-            "ui_msg_id": ui_msg_id,
-            "error": str(e)
-        })
-    finally:
-        active_antigravity_tasks.pop(chat_uid, None)

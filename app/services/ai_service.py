@@ -180,6 +180,56 @@ class AIService:
                 try: await asyncio.wait_for(cm.__aexit__(None, None, None), timeout=3.0)
                 except: pass
 
+    def _build_device_control_tool(self, allowed_actions):
+        if isinstance(allowed_actions, dict):
+            action_names = list(allowed_actions.keys())
+            descriptions = "; ".join([f"'{k}' ({v})" for k, v in allowed_actions.items()])
+            value_desc = f"Параметр действия. Формат значений: {descriptions}"
+        elif isinstance(allowed_actions, list):
+            action_names = allowed_actions
+            value_desc = "Значение/параметр действия"
+        else:
+            action_names = [a.strip() for a in str(allowed_actions).split(",") if a.strip()]
+            value_desc = "Значение/параметр действия"
+
+        return types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="send_device_commands",
+                    description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот, веб).",
+                    parameters=types.Schema(
+                        type=types.Type.OBJECT,
+                        properties={
+                            "target_device": types.Schema(
+                                type=types.Type.STRING, 
+                                description="Имя целевого устройства из списка онлайн-устройств"
+                            ),
+                            "actions": types.Schema(
+                                type=types.Type.ARRAY,
+                                description="Список действий для выполнения на целевом устройстве",
+                                items=types.Schema(
+                                    type=types.Type.OBJECT,
+                                    properties={
+                                        "action_type": types.Schema(
+                                            type=types.Type.STRING, 
+                                            enum=action_names if action_names else None,
+                                            description="Тип выполняемого действия"
+                                        ),
+                                        "action_value": types.Schema(
+                                            type=types.Type.STRING, 
+                                            description=value_desc
+                                        )
+                                    },
+                                    required=["action_type", "action_value"]
+                                )
+                            )
+                        },
+                        required=["target_device", "actions"]
+                    )
+                )
+            ]
+        )
+
     # ==============================================================================
     # 2. ФАСАД (Gemini 3.1 Flash Live) — ЕДИНЫЙ ГОЛОСОВОЙ ИНТЕРФЕЙС
     # ==============================================================================
@@ -191,32 +241,7 @@ class AIService:
         
         try:
             client = self._get_live_client()
-            device_control_tool = types.Tool(
-                function_declarations=[
-                    types.FunctionDeclaration(
-                        name="send_device_commands",
-                        description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот, веб).",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства из списка онлайн-устройств"),
-                                "actions": types.Schema(
-                                    type=types.Type.ARRAY,
-                                    items=types.Schema(
-                                        type=types.Type.OBJECT,
-                                        properties={
-                                            "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение/параметр действия")
-                                        },
-                                        required=["action_type", "action_value"]
-                                    )
-                                )
-                            },
-                            required=["target_device", "actions"]
-                        )
-                    )
-                ]
-            )
+            device_control_tool = self._build_device_control_tool(allowed_actions)
 
             config_kwargs = dict(
                 response_modalities=["AUDIO"],
@@ -330,7 +355,6 @@ class AIService:
         valid_voices = ["Aoede", "Puck", "Kore", "Charon", "Zephyr", "Fenrir"]
         mapped_voice = voice_clean if voice_clean in valid_voices else "Aoede"
         
-        system_instruction += "\n\nCRITICAL RULE: You MUST speak a short voice confirmation (like 'Секунду', 'Готово') BEFORE calling any tools. Never call a tool silently!"
         session_audio_cache = bytearray()
         last_video_frame = None
         has_reached_stream_end = False
@@ -338,32 +362,7 @@ class AIService:
         
         try:
             client = self._get_live_client()
-            device_control_tool = types.Tool(
-                function_declarations=[
-                    types.FunctionDeclaration(
-                        name="send_device_commands",
-                        description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот, веб).",
-                        parameters=types.Schema(
-                            type=types.Type.OBJECT,
-                            properties={
-                                "target_device": types.Schema(type=types.Type.STRING, description="Имя целевого устройства из списка онлайн-устройств"),
-                                "actions": types.Schema(
-                                    type=types.Type.ARRAY,
-                                    items=types.Schema(
-                                        type=types.Type.OBJECT,
-                                        properties={
-                                            "action_type": types.Schema(type=types.Type.STRING, description=f"СТРОГО ОДИН ИЗ: {allowed_actions}"),
-                                            "action_value": types.Schema(type=types.Type.STRING, description="Значение/параметр действия")
-                                        },
-                                        required=["action_type", "action_value"]
-                                    )
-                                )
-                            },
-                            required=["target_device", "actions"]
-                        )
-                    )
-                ]
-            )
+            device_control_tool = self._build_device_control_tool(allowed_actions)
 
             config_kwargs = dict(
                 response_modalities=["AUDIO"],
