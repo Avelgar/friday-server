@@ -312,16 +312,20 @@ class AIService:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
+                            call_id = getattr(fc, 'id', None) or f"call_{int(time.time()*1000)}"
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
-                                id=fc.id, 
-                                response={"status": "ok", "retryable": False, "message": "Success"}
+                                id=call_id, 
+                                response={"status": "ok", "result": "Action executed successfully. Speak to the user now."}
                             ))
                         
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
-                        await session.send_tool_response(function_responses=function_responses)
+                        try:
+                            await session.send_tool_response(function_responses=function_responses)
+                        except Exception as tre:
+                            logger.error(f"[TOOL RESPONSE SEND ERROR] {tre}")
                         
                     sc = response.server_content
                     if sc:
@@ -458,13 +462,19 @@ class AIService:
                             args_dict = type(fc.args).to_dict(fc.args) if hasattr(fc.args, 'to_dict') else dict(fc.args)
                             if isinstance(args_dict, dict) and "actions" in args_dict:
                                 extracted_commands.append(args_dict)
+                            call_id = getattr(fc, 'id', None) or f"call_{int(time.time()*1000)}"
                             function_responses.append(types.FunctionResponse(
-                                name=fc.name, id=fc.id, response={"status": "ok", "retryable": False, "message": "Success"}
+                                name=fc.name, 
+                                id=call_id, 
+                                response={"status": "ok", "result": "Action executed successfully. Speak to the user now."}
                             ))
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
-                        await session.send_tool_response(function_responses=function_responses)
+                        try:
+                            await session.send_tool_response(function_responses=function_responses)
+                        except Exception as tre:
+                            logger.error(f"[REALTIME TOOL RESPONSE ERROR] {tre}")
                         
                     sc = response.server_content
                     if sc:
@@ -485,7 +495,8 @@ class AIService:
                             if had_tool_call and not had_bot_output:
                                 continue
                             break
-            except: pass
+            except Exception as loop_e:
+                logger.error(f"[REALTIME LIVE LOOP ERROR] {loop_e}", exc_info=True)
             finally:
                 if sender_task: sender_task.cancel()
                 if session:
