@@ -613,3 +613,358 @@ async def handle_command(websocket, data):
         if cursor: await cursor.close()
         if conn: conn.close()
         active_media_queues.pop(data.get('ui_msg_id', ''), None)
+
+async def get_least_used_key_index(cursor=None):
+    # Берем следующий по очереди свободный ключ из пула
+    return ai_instance.key_pool.get_next_key()
+
+active_antigravity_tasks = {}
+
+# ==============================================================================
+# CRUD ДИАЛОГОВ И СООБЩЕНИЙ ANTIGRAVITY (С ПРИВЯЗКОЙ К АККАУНТУ И ПАПКЕ)
+# ==============================================================================
+
+async def handle_antigravity_get_chats(websocket, data):
+    user_token = data.get("user_token")
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        
+        if not user_token:
+            await async_send(websocket, {"type": "antigravity_chats_list", "chats": []})
+            return
+
+        await cursor.execute(
+            """INSERT INTO antigravity_users (user_token, username) VALUES (%s, %s)
+               ON DUPLICATE KEY UPDATE username = VALUES(username)""",
+            (user_token, data.get("username", "Developer"))
+        )
+        await conn.commit()
+
+        await cursor.execute(
+            """SELECT chat_uid, title, key_index, last_interaction_id, environment_id, 
+                      workspace_path, updated_at 
+               FROM antigravity_chats 
+               WHERE user_token = %s 
+               ORDER BY updated_at DESC""",
+            (user_token,)
+        )
+        chats = await cursor.fetchall()
+        for c in chats:
+            if c.get("updated_at"): c["updated_at"] = str(c["updated_at"])
+
+        await async_send(websocket, {
+            "type": "antigravity_chats_list",
+            "chats": chats or []
+        })
+    except Exception as e:
+        logger.error(f"[DB get_chats error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_get_messages(websocket, data):
+    chat_uid = data.get("chat_uid")
+    if not chat_uid: return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        
+        await cursor.execute(
+            "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
+            (chat_uid,)
+        )
+        msgs = await cursor.fetchall()
+        for m in msgs:
+            if m.get("created_at"): m["created_at"] = str(m["created_at"])
+
+        await cursor.execute("SELECT synced_files, workspace_path FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        chat_row = await cursor.fetchone()
+        synced_files = {}
+        ws_path = None
+        if chat_row:
+            ws_path = chat_row.get("workspace_path")
+            if chat_row.get("synced_files"):
+                try:
+                    synced_files = json.loads(chat_row["synced_files"]) if isinstance(chat_row["synced_files"], str) else chat_row["synced_files"]
+                except Exception: pass
+
+        await async_send(websocket, {
+            "type": "antigravity_chat_history",
+            "chat_uid": chat_uid,
+            "workspace_path": ws_path,
+            "messages": msgs or [],
+            "synced_files": synced_files or {}
+        })
+    except Exception as e:
+        logger.error(f"[DB get_messages error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_create_chat(websocket, data):
+    chat_uid = data.get("chat_uid") or f"chat_{int(time.time() * 1000)}"
+    title = data.get("title") or "Новый диалог"
+    user_token = data.get("user_token")
+    workspace_path = data.get("workspace_path")
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        assigned_key = await get_least_used_key_index(cursor)
+
+        await cursor.execute(
+            """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
+               VALUES (%s, %s, %s, %s, %s)""",
+            (chat_uid, title, assigned_key, user_token, workspace_path)
+        )
+        await conn.commit()
+
+        await async_send(websocket, {
+            "type": "antigravity_chat_created",
+            "chat": {
+                "chat_uid": chat_uid,
+                "title": title,
+                "key_index": assigned_key,
+                "user_token": user_token,
+                "workspace_path": workspace_path,
+                "last_interaction_id": None,
+                "environment_id": None
+            }
+        })
+    except Exception as e:
+        logger.error(f"[DB create_chat error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_delete_chat(websocket, data):
+    chat_uid = data.get("chat_uid")
+    if not chat_uid: return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor()
+        await cursor.execute("DELETE FROM antigravity_messages WHERE chat_uid = %s", (chat_uid,))
+        await cursor.execute("DELETE FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        await conn.commit()
+
+        upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
+        if os.path.exists(upload_dir):
+            shutil.rmtree(upload_dir, ignore_errors=True)
+
+        await async_send(websocket, {
+            "type": "antigravity_chat_deleted",
+            "chat_uid": chat_uid
+        })
+    except Exception as e:
+        logger.error(f"[DB delete_chat error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_cancel_task(websocket, data):
+    chat_uid = data.get("chat_id")
+    ui_msg_id = data.get("ui_msg_id")
+    logger.info(f"🛑 [WS CANCEL REQUEST] Запрос отмены для чата: {chat_uid}")
+
+    if chat_uid and chat_uid in active_antigravity_tasks:
+        task = active_antigravity_tasks[chat_uid]
+        if not task.done():
+            task.cancel()
+            logger.info(f"🛑 [WS CANCEL] Таск успешно отменен в памяти: {chat_uid}")
+
+    await async_send(websocket, {
+        "type": "antigravity_cancelled",
+        "chat_id": chat_uid,
+        "ui_msg_id": ui_msg_id
+    })
+
+async def handle_antigravity_task(websocket, data):
+    prompt = data.get("prompt", "").strip()
+    target_files = data.get("target_files", [])
+    input_files = data.get("input_files", {})
+    user_token = data.get("user_token")
+    workspace_path = data.get("workspace_path")
+    chat_uid = data.get("chat_id") or data.get("chat_uid") or getattr(websocket, "active_chat_uid", None)
+    if not chat_uid:
+        chat_uid = f"chat_{int(time.time() * 1000)}"
+    websocket.active_chat_uid = chat_uid
+
+    ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
+    if not prompt: return
+
+    logger.info(f"📥 [WS IN] Чат: {chat_uid} | Задача: '{prompt[:70]}' | ui_msg_id: {ui_msg_id}")
+
+    conn = None; cursor = None
+    assigned_key = None
+    prev_interaction_id = None
+    environment_id = None
+    need_title_update = False
+    recent_history = []
+
+    clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
+    if not clean_title_text: clean_title_text = prompt
+    auto_title = clean_title_text[:30].replace("\n", " ").strip()
+    if len(clean_title_text) > 30: auto_title += "..."
+
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+
+        await cursor.execute(
+            "SELECT key_index, last_interaction_id, environment_id, title FROM antigravity_chats WHERE chat_uid = %s",
+            (chat_uid,)
+        )
+        chat_row = await cursor.fetchone()
+
+        if chat_row:
+            assigned_key = chat_row["key_index"]
+            prev_interaction_id = chat_row["last_interaction_id"]
+            environment_id = chat_row["environment_id"]
+            if chat_row.get("title") in ("Новый диалог", None, ""):
+                need_title_update = True
+        else:
+            assigned_key = await get_least_used_key_index(cursor)
+            await cursor.execute(
+                """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (chat_uid, auto_title, assigned_key, user_token, workspace_path)
+            )
+            await conn.commit()
+
+        logger.info(f"📋 [DB STATE] Чат: {chat_uid} | Ключ #{assigned_key} | prev_id: {prev_interaction_id[:12] if prev_interaction_id else 'None'} | env: {environment_id[:12] if environment_id else 'None'}")
+
+        await cursor.execute(
+            "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
+            (chat_uid,)
+        )
+        recent_history = await cursor.fetchall() or []
+
+        await cursor.execute(
+            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'user', %s)",
+            (chat_uid, prompt)
+        )
+        await conn.commit()
+
+    except Exception as dbe:
+        logger.error(f"[DB Error Before Task] {dbe}", exc_info=True)
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+    async def send_status_update(status_payload):
+        await async_send(websocket, {
+            "type": "antigravity_status",
+            "ui_msg_id": ui_msg_id,
+            **status_payload
+        })
+
+    active_antigravity_tasks[chat_uid] = asyncio.current_task()
+
+    try:
+        result = await ai_instance.run_antigravity_agent(
+            prompt_text=prompt,
+            status_callback=send_status_update,
+            target_files=target_files,
+            input_files=input_files,
+            previous_interaction_id=prev_interaction_id,
+            environment_id=environment_id,
+            assigned_key=assigned_key,
+            chat_uid=chat_uid,
+            recent_history=recent_history
+        )
+
+        new_interaction_id = result["interaction_id"]
+        new_env_id = result["environment_id"]
+        agent_reply_text = result["text"]
+        final_assigned_key = result.get("assigned_key", assigned_key)
+
+        logger.info(f"📤 [ANTIGRAVITY DONE] Ответ готов ({len(agent_reply_text)} симв.): '{agent_reply_text[:60]}...'")
+
+        try:
+            conn = await get_async_db_connection()
+            cursor = await conn.cursor()
+
+            new_files = result.get("file_urls", {})
+            synced_str = json.dumps(new_files, ensure_ascii=False) if new_files else None
+            
+            if need_title_update:
+                await cursor.execute(
+                    """UPDATE antigravity_chats 
+                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, title = %s, 
+                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
+                       WHERE chat_uid = %s""",
+                    (new_interaction_id, new_env_id, final_assigned_key, auto_title, synced_str, chat_uid)
+                )
+            else:
+                await cursor.execute(
+                    """UPDATE antigravity_chats 
+                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, 
+                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
+                       WHERE chat_uid = %s""",
+                    (new_interaction_id, new_env_id, final_assigned_key, synced_str, chat_uid)
+                )
+
+            await cursor.execute(
+                "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'agent', %s)",
+                (chat_uid, agent_reply_text)
+            )
+            await conn.commit()
+        except Exception as dbe2:
+            logger.error(f"[DB Error After Task] {dbe2}")
+        finally:
+            if cursor: await cursor.close()
+            if conn: conn.close()
+
+        await async_send(websocket, {
+            "type": "antigravity_result",
+            "ui_msg_id": ui_msg_id,
+            "text": agent_reply_text,
+            "file_urls": result.get("file_urls", {}),
+            "environment_id": new_env_id,
+            "interaction_id": new_interaction_id,
+            "chat_id": chat_uid
+        })
+
+    except asyncio.CancelledError:
+        logger.warning(f"🛑 [WS Antigravity] Задача {chat_uid} прервана! Очистка контекста...")
+        try:
+            conn = await get_async_db_connection()
+            cursor = await conn.cursor()
+            await cursor.execute(
+                "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
+                (chat_uid,)
+            )
+            await cursor.execute(
+                "UPDATE antigravity_chats SET last_interaction_id = NULL, environment_id = NULL WHERE chat_uid = %s",
+                (chat_uid,)
+            )
+            await conn.commit()
+            logger.info(f"🧹 [CLEANUP SUCCESS] Окружение Google сброшено в NULL для чата {chat_uid}.")
+        except Exception as cle:
+            logger.warning(f"[WS Cleanup Error] {cle}")
+        finally:
+            if cursor: await cursor.close()
+            if conn: conn.close()
+
+        await async_send(websocket, {
+            "type": "antigravity_cancelled",
+            "chat_id": chat_uid,
+            "ui_msg_id": ui_msg_id
+        })
+    except Exception as e:
+        logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
+        await async_send(websocket, {
+            "type": "antigravity_error",
+            "ui_msg_id": ui_msg_id,
+            "error": str(e)
+        })
+    finally:
+        active_antigravity_tasks.pop(chat_uid, None)
