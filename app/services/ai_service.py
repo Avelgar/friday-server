@@ -301,9 +301,22 @@ class AIService:
 
                 had_tool_call = False
                 had_bot_output = False
+                waiting_for_tool_continuation = False
 
                 while True:
-                    response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
+                    try:
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
+                    except StopAsyncIteration:
+                        if waiting_for_tool_continuation:
+                            waiting_for_tool_continuation = False
+                            receive_iterator = session.receive().__aiter__()
+                            continue
+                        break
+                    except (asyncio.TimeoutError, TimeoutError):
+                        if has_yielded_data:
+                            break
+                        raise
+
                     if response.tool_call:
                         had_tool_call = True
                         extracted_commands = []
@@ -316,7 +329,7 @@ class AIService:
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=call_id, 
-                                response={"status": "ok", "result": "Action executed successfully. Speak to the user now."}
+                                response={"status": "ok", "result": "Action executed successfully. Continue speaking to the user now."}
                             ))
                         
                         if extracted_commands:
@@ -324,6 +337,7 @@ class AIService:
                             yield {"type": "commands", "commands": extracted_commands}
                         try:
                             await session.send_tool_response(function_responses=function_responses)
+                            waiting_for_tool_continuation = True
                         except Exception as tre:
                             logger.error(f"[TOOL RESPONSE SEND ERROR] {tre}")
                         
@@ -343,7 +357,9 @@ class AIService:
                                     had_bot_output = True
                                     yield {"type": "audio", "data": part.inline_data.data}
                         if sc.turn_complete:
-                            if had_tool_call and not had_bot_output:
+                            if waiting_for_tool_continuation:
+                                waiting_for_tool_continuation = False
+                                receive_iterator = session.receive().__aiter__()
                                 continue
                             break
             except (asyncio.TimeoutError, TimeoutError):
@@ -451,9 +467,22 @@ class AIService:
 
                 had_tool_call = False
                 had_bot_output = False
+                waiting_for_tool_continuation = False
 
                 while True:
-                    response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
+                    try:
+                        response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
+                    except StopAsyncIteration:
+                        if waiting_for_tool_continuation:
+                            waiting_for_tool_continuation = False
+                            receive_iterator = session.receive().__aiter__()
+                            continue
+                        break
+                    except (asyncio.TimeoutError, TimeoutError):
+                        if has_yielded_data:
+                            break
+                        raise
+
                     if response.tool_call:
                         had_tool_call = True
                         extracted_commands = []
@@ -466,13 +495,14 @@ class AIService:
                             function_responses.append(types.FunctionResponse(
                                 name=fc.name, 
                                 id=call_id, 
-                                response={"status": "ok", "result": "Action executed successfully. Speak to the user now."}
+                                response={"status": "ok", "result": "Action executed successfully. Continue speaking to the user now."}
                             ))
                         if extracted_commands:
                             has_yielded_data = True
                             yield {"type": "commands", "commands": extracted_commands}
                         try:
                             await session.send_tool_response(function_responses=function_responses)
+                            waiting_for_tool_continuation = True
                         except Exception as tre:
                             logger.error(f"[REALTIME TOOL RESPONSE ERROR] {tre}")
                         
@@ -492,9 +522,15 @@ class AIService:
                                     had_bot_output = True
                                     yield {"type": "audio", "data": part.inline_data.data}
                         if sc.turn_complete:
-                            if had_tool_call and not had_bot_output:
+                            if waiting_for_tool_continuation:
+                                waiting_for_tool_continuation = False
+                                receive_iterator = session.receive().__aiter__()
                                 continue
                             break
+            except (asyncio.TimeoutError, TimeoutError):
+                if has_yielded_data: return
+            except StopAsyncIteration:
+                pass
             except Exception as loop_e:
                 logger.error(f"[REALTIME LIVE LOOP ERROR] {loop_e}", exc_info=True)
             finally:
