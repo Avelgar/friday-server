@@ -197,6 +197,7 @@ class AIService:
                 types.FunctionDeclaration(
                     name="send_device_commands",
                     description="Отправляет системные команды на целевые устройства пользователя (ПК, телефон, робот, веб).",
+                    behavior="NON_BLOCKING",
                     parameters=types.Schema(
                         type=types.Type.OBJECT,
                         properties={
@@ -250,6 +251,7 @@ class AIService:
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                 ),
+                thinking_config=types.ThinkingConfig(thinking_level="medium"),
                 input_audio_transcription={},
                 output_audio_transcription={},
                 realtime_input_config=types.RealtimeInputConfig(
@@ -261,7 +263,7 @@ class AIService:
                 config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
 
             config = types.LiveConnectConfig(**config_kwargs)
-            cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
+            cm = client.aio.live.connect(model="models/gemini-3.8-live-extended-thinking", config=config)
             session = None
             sender_task = None
             
@@ -356,7 +358,13 @@ class AIService:
                                     has_yielded_data = True
                                     had_bot_output = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                        if sc.turn_complete:
+                        is_idle = True
+                        if sc.interaction_status is not None and sc.interaction_status != types.InteractionStatus.INTERACTION_STATUS_UNSPECIFIED:
+                            is_idle = (sc.interaction_status == types.InteractionStatus.IDLE)
+                        else:
+                            is_idle = bool(sc.turn_complete)
+
+                        if is_idle:
                             if waiting_for_tool_continuation:
                                 waiting_for_tool_continuation = False
                                 receive_iterator = session.receive().__aiter__()
@@ -400,6 +408,7 @@ class AIService:
                 speech_config=types.SpeechConfig(
                     voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=mapped_voice))
                 ),
+                thinking_config=types.ThinkingConfig(thinking_level="medium"),
                 input_audio_transcription={},
                 output_audio_transcription={},
                 realtime_input_config=types.RealtimeInputConfig(
@@ -411,7 +420,7 @@ class AIService:
                 config_kwargs["history_config"] = types.HistoryConfig(initial_history_in_client_content=True)
 
             config = types.LiveConnectConfig(**config_kwargs)
-            cm = client.aio.live.connect(model="models/gemini-3.8-live", config=config)
+            cm = client.aio.live.connect(model="models/gemini-3.8-live-extended-thinking", config=config)
             session = None
             sender_task = None
             
@@ -521,7 +530,13 @@ class AIService:
                                     has_yielded_data = True
                                     had_bot_output = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                        if sc.turn_complete:
+                        is_idle = True
+                        if sc.interaction_status is not None and sc.interaction_status != types.InteractionStatus.INTERACTION_STATUS_UNSPECIFIED:
+                            is_idle = (sc.interaction_status == types.InteractionStatus.IDLE)
+                        else:
+                            is_idle = bool(sc.turn_complete)
+
+                        if is_idle:
                             if waiting_for_tool_continuation:
                                 waiting_for_tool_continuation = False
                                 receive_iterator = session.receive().__aiter__()
