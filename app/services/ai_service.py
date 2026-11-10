@@ -299,9 +299,13 @@ class AIService:
                 sender_task = asyncio.create_task(send_input_task())
                 receive_iterator = session.receive().__aiter__()
 
+                had_tool_call = False
+                had_bot_output = False
+
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     if response.tool_call:
+                        had_tool_call = True
                         extracted_commands = []
                         function_responses = []
                         for fc in response.tool_call.function_calls:
@@ -326,13 +330,18 @@ class AIService:
                             yield {"type": "user_text", "text": sc.input_transcription.text}
                         if sc.output_transcription:
                             has_yielded_data = True
+                            had_bot_output = True
                             yield {"type": "bot_text", "text": sc.output_transcription.text}
                         if sc.model_turn:
                             for part in sc.model_turn.parts:
                                 if part.inline_data:
                                     has_yielded_data = True
+                                    had_bot_output = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                        if sc.turn_complete: break
+                        if sc.turn_complete:
+                            if had_tool_call and not had_bot_output:
+                                continue
+                            break
             except (asyncio.TimeoutError, TimeoutError):
                 if has_yielded_data: return 
             except StopAsyncIteration: pass
@@ -436,9 +445,13 @@ class AIService:
                 sender_task = asyncio.create_task(send_input_task())
                 receive_iterator = session.receive().__aiter__()
 
+                had_tool_call = False
+                had_bot_output = False
+
                 while True:
                     response = await asyncio.wait_for(receive_iterator.__anext__(), timeout=30.0)
                     if response.tool_call:
+                        had_tool_call = True
                         extracted_commands = []
                         function_responses = []
                         for fc in response.tool_call.function_calls:
@@ -460,13 +473,18 @@ class AIService:
                             yield {"type": "user_text", "text": sc.input_transcription.text}
                         if sc.output_transcription:
                             has_yielded_data = True
+                            had_bot_output = True
                             yield {"type": "bot_text", "text": sc.output_transcription.text}
                         if sc.model_turn:
                             for part in sc.model_turn.parts:
                                 if part.inline_data:
                                     has_yielded_data = True
+                                    had_bot_output = True
                                     yield {"type": "audio", "data": part.inline_data.data}
-                        if sc.turn_complete: break
+                        if sc.turn_complete:
+                            if had_tool_call and not had_bot_output:
+                                continue
+                            break
             except: pass
             finally:
                 if sender_task: sender_task.cancel()
