@@ -398,7 +398,7 @@ async def handle_command(websocket, data):
 
         prompt_text_to_send = command if command else None
 
-        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.8 Extended Thinking)... Онлайн устройств: {len(all_online_devs)} | Доступных действий: {len(allowed_action_keys)} | Первое сообщение: {needs_dialog_naming}")
+        logger.info(f"[API] Отправляю в Фасад (Gemini Live 3.8)... Онлайн устройств: {len(all_online_devs)} | Доступных действий: {len(allowed_action_keys)} | Первое сообщение: {needs_dialog_naming}")
 
         if is_streaming and media_queue:
             generator = ai_instance.generate_audio_stream_realtime(
