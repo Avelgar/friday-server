@@ -604,14 +604,23 @@ class AIService:
                 if status_callback:
                     await status_callback({"status": f"Подключение к Google (ключ #{assigned_key})..."})
 
+                tools = [
+                    {'type': 'code_execution'},
+                    {'type': 'google_search'},
+                    {'type': 'url_context'},
+                ]
+
+                # ТОЛЬКО agent, а модель СТРОГО внутри agent_config:
                 kwargs = {
                     "agent": "antigravity-preview-09-2026",
-                    "model": "gemini-3.8-flash",
+                    "background": True,
+                    "tools": tools,
                     "agent_config": {
                         "type": "antigravity",
                         "model": "gemini-3.8-flash",
                     }
                 }
+
                 current_input_prompt = prompt_text
 
                 if previous_interaction_id and environment_id:
@@ -621,7 +630,10 @@ class AIService:
                     logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Flash | Ключ #{assigned_key}")
                 else:
                     kwargs["system_instruction"] = agent_system_instruction
-                    kwargs["environment"] = "remote"
+                    kwargs["environment"] = {
+                        "type": "remote",
+                        "network": "disabled",
+                    }
 
                     if recent_history:
                         history_parts = []
@@ -637,12 +649,11 @@ class AIService:
                                 f"# История недавних сообщений диалога:\n" + "\n".join(history_parts) + f"\n\n# Текущее задание:\n{prompt_text}"
                             )
                     kwargs["input"] = current_input_prompt
-                    logger.info(f"✨ [GOOGLE CALL] Старт нового окружения | Flash | Ключ #{assigned_key}")
+                    logger.info(f"✨ [GOOGLE CALL] Чистый старт в новом окружении | Flash | Ключ #{assigned_key}")
 
-                # Без background=True создание сразу ждет результат или выполняется с высоким приоритетом!
                 interaction = await asyncio.wait_for(
                     asyncio.to_thread(client.interactions.create, **kwargs),
-                    timeout=180.0
+                    timeout=65.0
                 )
                 
                 new_interaction_id = interaction.id
