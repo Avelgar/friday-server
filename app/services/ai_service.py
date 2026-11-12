@@ -672,80 +672,19 @@ class AIService:
                         timeout=30.0
                     )
 
-                    # На 2-м опросе (через 5 секунд) печатаем все реальные атрибуты interaction в лог
-                    if poll_count == 2:
-                        try:
-                            # Смотрим доступные ключи/свойства объекта Google
-                            attrs = {k: str(getattr(interaction, k))[:120] for k in dir(interaction) if not k.startswith('_')}
-                            logger.info(f"🔍 [GOOGLE DUMP] Атрибуты ответа: {attrs}")
-                        except Exception: pass
+                    status_raw = str(getattr(interaction, 'status', '')).lower().strip()
 
-                    current_step_desc = f"Статус: {interaction.status}"
-                    try:
-                        # 1. Проверяем последние события (events)
-                        if getattr(interaction, 'events', None):
-                            last_ev = interaction.events[-1]
-                            
-                            # Если модель вызывает инструмент / консоль
-                            if getattr(last_ev, 'call', None):
-                                call_name = getattr(last_ev.call, 'name', 'команды')
-                                current_step_desc = f"⚙️ Выполняет: {call_name}"
-                            
-                            # Если модель размышляет (thoughts / reasoning)
-                            elif getattr(last_ev, 'content', None):
-                                content = last_ev.content
-                                text_val = ""
-                                if hasattr(content, 'parts') and content.parts:
-                                    for p in content.parts:
-                                        if getattr(p, 'thought', False) or getattr(p, 'thought', None):
-                                            text_val = str(getattr(p, 'text', '') or getattr(p, 'thought', ''))
-                                        elif getattr(p, 'text', None):
-                                            text_val = p.text
-                                elif isinstance(content, str):
-                                    text_val = content
-
-                                if text_val:
-                                    # Очищаем переводы строк и берём последние 80 символов мысли
-                                    clean_thought = text_val.strip().replace("\n", " ")
-                                    current_step_desc = f"💭 {clean_thought[-80:]}"
-
-                        # 2. Если events ещё пустые, смотрим steps
-                        elif getattr(interaction, 'steps', None) and len(interaction.steps) > 0:
-                            last_step = interaction.steps[-1]
-                            current_step_desc = f"Шаг: {str(last_step)[:75]}"
-                        else:
-                            current_step_desc = f"Статус: {interaction.status}"
-                    except Exception as parse_err:
-                        current_step_desc = f"Обработка ({interaction.status})"
-
-                    # Логируем в консоль сервера раз в 15 секунд
+                    # Раз в 15 секунд логируем
                     if poll_count % 5 == 0:
-                        logger.info(f"⏳ [ANTIGRAVITY POLLING] Статус: {interaction.status} | Детали: {current_step_desc}")
+                        logger.info(f"⏳ [ANTIGRAVITY POLLING] Статус: {status_raw} (шаг {poll_count})")
 
                     if status_callback:
-                        await status_callback({"status": current_step_desc})
+                        await status_callback({"status": f"Агент думает ({poll_count * 2.5:.0f}с)..."})
 
-                    # Если interaction уже completed (без background=True он часто сразу возвращается готовым)
-                    if interaction.status in ("completed", "failed"):
-                        pass
-                    else:
-                        poll_count = 0
-                        while True:
-                            await asyncio.sleep(2.5)
-                            poll_count += 1
-                            interaction = await asyncio.wait_for(
-                                asyncio.to_thread(client.interactions.get, id=new_interaction_id),
-                                timeout=30.0
-                            )
-
-                            current_step_desc = f"Агент думает ({poll_count * 2.5:.0f}с)..."
-                            if status_callback:
-                                await status_callback({"status": current_step_desc})
-
-                            status_raw = str(getattr(interaction, 'status', '')).lower().strip()
-                            if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
-                                logger.info(f"🏁 [ANTIGRAVITY DONE] Фиксация завершения, статус: {status_raw}")
-                                break
+                    # Гарантированный выход СРАЗУ, как только Google завершил задачу
+                    if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
+                        logger.info(f"🏁 [ANTIGRAVITY DONE] Выход из цикла, статус: {status_raw}")
+                        break
 
                 if interaction.status == "failed":
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
