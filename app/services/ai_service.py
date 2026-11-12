@@ -606,25 +606,19 @@ class AIService:
 
                 kwargs = {
                     "agent": "antigravity-preview-09-2026",
-                    "background": True,
+                    "model": "gemini-3.8-flash",
                     "agent_config": {
                         "type": "antigravity",
                         "model": "gemini-3.8-flash",
-                    },
-                    "tools": [
-                        {"type": "code_execution"},
-                        {"type": "google_search"},
-                        {"type": "url_context"},
-                    ]
+                    }
                 }
-
                 current_input_prompt = prompt_text
 
                 if previous_interaction_id and environment_id:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
                     kwargs["input"] = current_input_prompt
-                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Ключ #{assigned_key}")
+                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Flash | Ключ #{assigned_key}")
                 else:
                     kwargs["system_instruction"] = agent_system_instruction
                     kwargs["environment"] = "remote"
@@ -643,11 +637,12 @@ class AIService:
                                 f"# История недавних сообщений диалога:\n" + "\n".join(history_parts) + f"\n\n# Текущее задание:\n{prompt_text}"
                             )
                     kwargs["input"] = current_input_prompt
-                    logger.info(f"✨ [GOOGLE CALL] Старт нового окружения на ключе #{assigned_key}")
+                    logger.info(f"✨ [GOOGLE CALL] Старт нового окружения | Flash | Ключ #{assigned_key}")
 
+                # Без background=True создание сразу ждет результат или выполняется с высоким приоритетом!
                 interaction = await asyncio.wait_for(
                     asyncio.to_thread(client.interactions.create, **kwargs),
-                    timeout=65.0
+                    timeout=180.0
                 )
                 
                 new_interaction_id = interaction.id
@@ -719,8 +714,25 @@ class AIService:
                     if status_callback:
                         await status_callback({"status": current_step_desc})
 
+                    # Если interaction уже completed (без background=True он часто сразу возвращается готовым)
                     if interaction.status in ("completed", "failed"):
-                        break
+                        pass
+                    else:
+                        poll_count = 0
+                        while True:
+                            await asyncio.sleep(2.5)
+                            poll_count += 1
+                            interaction = await asyncio.wait_for(
+                                asyncio.to_thread(client.interactions.get, id=new_interaction_id),
+                                timeout=30.0
+                            )
+
+                            current_step_desc = f"Агент думает ({poll_count * 2.5:.0f}с)..."
+                            if status_callback:
+                                await status_callback({"status": current_step_desc})
+
+                            if interaction.status in ("completed", "failed"):
+                                break
 
                 if interaction.status == "failed":
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {interaction.error}")
