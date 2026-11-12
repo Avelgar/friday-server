@@ -742,7 +742,9 @@ class AIService:
                             if status_callback:
                                 await status_callback({"status": current_step_desc})
 
-                            if interaction.status in ("completed", "failed"):
+                            status_raw = str(getattr(interaction, 'status', '')).lower().strip()
+                            if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
+                                logger.info(f"🏁 [ANTIGRAVITY DONE] Фиксация завершения, статус: {status_raw}")
                                 break
 
                 if interaction.status == "failed":
