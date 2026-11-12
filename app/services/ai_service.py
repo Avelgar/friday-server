@@ -605,19 +605,18 @@ class AIService:
                     await status_callback({"status": f"Подключение к Google (ключ #{assigned_key})..."})
 
                 tools = [
-                    {'type': 'code_execution'},
-                    {'type': 'google_search'},
-                    {'type': 'url_context'},
+                    {"type": "code_execution"},
+                    {"type": "google_search"},
+                    {"type": "url_context"},
                 ]
 
-                # ТОЛЬКО agent, а модель СТРОГО внутри agent_config:
                 kwargs = {
                     "agent": "antigravity-preview-09-2026",
                     "background": True,
                     "tools": tools,
                     "agent_config": {
                         "type": "antigravity",
-                        "model": "gemini-3.5-flash-lite",
+                        "model": "gemini-4-hydrogen",
                     }
                 }
 
@@ -627,14 +626,13 @@ class AIService:
                     kwargs["previous_interaction_id"] = previous_interaction_id
                     kwargs["environment"] = environment_id
                     kwargs["input"] = current_input_prompt
-                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Flash | Ключ #{assigned_key}")
+                    logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Hydrogen | Ключ #{assigned_key}")
                 else:
                     kwargs["system_instruction"] = agent_system_instruction
                     kwargs["environment"] = {
-                        "type": "remote",
-                        "network": "disabled",
+                        "type": "remote"
+                        # Без network="disabled" выход в интернет открыт по умолчанию!
                     }
-
                     if recent_history:
                         history_parts = []
                         for m in recent_history[-8:]:
