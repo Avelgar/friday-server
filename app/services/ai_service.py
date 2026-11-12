@@ -666,7 +666,15 @@ class AIService:
                         timeout=30.0
                     )
 
-                    current_step_desc = "Агент думает..."
+                    # На 2-м опросе (через 5 секунд) печатаем все реальные атрибуты interaction в лог
+                    if poll_count == 2:
+                        try:
+                            # Смотрим доступные ключи/свойства объекта Google
+                            attrs = {k: str(getattr(interaction, k))[:120] for k in dir(interaction) if not k.startswith('_')}
+                            logger.info(f"🔍 [GOOGLE DUMP] Атрибуты ответа: {attrs}")
+                        except Exception: pass
+
+                    current_step_desc = f"Статус: {interaction.status}"
                     try:
                         # 1. Проверяем последние события (events)
                         if getattr(interaction, 'events', None):
