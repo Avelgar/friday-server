@@ -617,7 +617,7 @@ class AIService:
                     "tools": tools,
                     "agent_config": {
                         "type": "antigravity",
-                        "model": "gemini-4-argon",
+                        "model": "gemini-3.5-flash-lite",
                     }
                 }
 
