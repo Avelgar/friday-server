@@ -607,6 +607,15 @@ class AIService:
                 kwargs = {
                     "agent": "antigravity-preview-09-2026",
                     "background": True,
+                    "agent_config": {
+                        "type": "antigravity",
+                        "model": "gemini-3.8-flash",
+                    },
+                    "tools": [
+                        {"type": "code_execution"},
+                        {"type": "google_search"},
+                        {"type": "url_context"},
+                    ]
                 }
 
                 current_input_prompt = prompt_text
@@ -648,24 +657,56 @@ class AIService:
                 if status_callback:
                     await status_callback({"status": "Агент думает (контейнер запущен)...", "interaction_id": new_interaction_id})
 
+                poll_count = 0
                 while True:
                     await asyncio.sleep(2.5)
+                    poll_count += 1
                     interaction = await asyncio.wait_for(
                         asyncio.to_thread(client.interactions.get, id=new_interaction_id),
-                        timeout=25.0
+                        timeout=30.0
                     )
-                    
-                    current_step_desc = interaction.status
+
+                    current_step_desc = "Агент думает..."
                     try:
-                        if hasattr(interaction, 'events') and interaction.events:
-                            last_event = interaction.events[-1]
-                            if hasattr(last_event, 'content') and last_event.content:
-                                current_step_desc = str(last_event.content)[:90]
-                            elif hasattr(last_event, 'call') and last_event.call:
-                                current_step_desc = f"Запуск: {last_event.call.name}"
-                        elif hasattr(interaction, 'steps') and interaction.steps:
-                            current_step_desc = str(interaction.steps[-1])[:90]
-                    except Exception: pass
+                        # 1. Проверяем последние события (events)
+                        if getattr(interaction, 'events', None):
+                            last_ev = interaction.events[-1]
+                            
+                            # Если модель вызывает инструмент / консоль
+                            if getattr(last_ev, 'call', None):
+                                call_name = getattr(last_ev.call, 'name', 'команды')
+                                current_step_desc = f"⚙️ Выполняет: {call_name}"
+                            
+                            # Если модель размышляет (thoughts / reasoning)
+                            elif getattr(last_ev, 'content', None):
+                                content = last_ev.content
+                                text_val = ""
+                                if hasattr(content, 'parts') and content.parts:
+                                    for p in content.parts:
+                                        if getattr(p, 'thought', False) or getattr(p, 'thought', None):
+                                            text_val = str(getattr(p, 'text', '') or getattr(p, 'thought', ''))
+                                        elif getattr(p, 'text', None):
+                                            text_val = p.text
+                                elif isinstance(content, str):
+                                    text_val = content
+
+                                if text_val:
+                                    # Очищаем переводы строк и берём последние 80 символов мысли
+                                    clean_thought = text_val.strip().replace("\n", " ")
+                                    current_step_desc = f"💭 {clean_thought[-80:]}"
+
+                        # 2. Если events ещё пустые, смотрим steps
+                        elif getattr(interaction, 'steps', None) and len(interaction.steps) > 0:
+                            last_step = interaction.steps[-1]
+                            current_step_desc = f"Шаг: {str(last_step)[:75]}"
+                        else:
+                            current_step_desc = f"Статус: {interaction.status}"
+                    except Exception as parse_err:
+                        current_step_desc = f"Обработка ({interaction.status})"
+
+                    # Логируем в консоль сервера раз в 15 секунд
+                    if poll_count % 5 == 0:
+                        logger.info(f"⏳ [ANTIGRAVITY POLLING] Статус: {interaction.status} | Детали: {current_step_desc}")
 
                     if status_callback:
                         await status_callback({"status": current_step_desc})
