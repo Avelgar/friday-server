@@ -904,7 +904,17 @@ async def handle_antigravity_task(websocket, data):
             cursor = await conn.cursor()
 
             new_files = result.get("file_urls", {})
-            synced_str = json.dumps(new_files, ensure_ascii=False) if new_files else None
+            synced_str = None
+            if new_files:
+                await cursor.execute("SELECT synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+                row_sf = await cursor.fetchone()
+                merged_files = {}
+                if row_sf and row_sf[0]:
+                    try:
+                        merged_files = json.loads(row_sf[0]) if isinstance(row_sf[0], str) else row_sf[0]
+                    except Exception: pass
+                merged_files.update(new_files)
+                synced_str = json.dumps(merged_files, ensure_ascii=False)
             
             if need_title_update:
                 await cursor.execute(
