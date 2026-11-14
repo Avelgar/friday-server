@@ -583,7 +583,7 @@ class AIService:
 ДОСТУПНЫЕ ТЕГИ КЛИЕНТА (не ищи их среди MCP/bash инструментов — это текстовый протокол с IDE):
 1. [GET_TREE] — запросить структуру папок и файлов на компьютере пользователя.
 2. [GET_FILES: путь1, путь2] — получить содержимое файлов (или ссылки для скачивания фото/бинарников) с компьютера пользователя.
-3. [SYNC: относительный_путь] — передать созданный или изменённый тобой файл из твоей песочницы на компьютер пользователя. Сначала создай и проверь файл у себя в текущей рабочей директории, затем выведи [SYNC: путь].
+3. [SYNC: относительный_путь] — передать созданный или изменённый тобой файл из твоей песочницы на компьютер пользователя. Создавай/изменяй файлы строго внутри `/workspace/` (например `/workspace/app/core/prompts.py`), проверь наличие через `ls -la`, а в теге пиши путь без `/workspace/`: [SYNC: app/core/prompts.py].
 4. [RUN_COMMAND: команда] — выполнить команду в терминале Windows на компьютере пользователя (используй `python`, а не `python3`).
 5. [ASK_USER: Вопрос | Вариант 1 | Вариант 2] — задать вопрос с кнопками.
 6. [DELETE: относительный_путь] — удалить файл на компьютере пользователя.
@@ -726,7 +726,7 @@ class AIService:
                                 with open(local_server_path, 'wb') as sf:
                                     sf.write(content)
 
-                                file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(clean_path)}"
+                                file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(clean_path)}?v={int(time.time())}"
                                 file_urls[clean_path] = file_url
                                 logger.info(f"✅ [SYNC OK] Быстрое скачивание '{cp}' ({len(content)} байт)")
                                 download_success = True
