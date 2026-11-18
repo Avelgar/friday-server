@@ -96,11 +96,11 @@ class AIService:
             async_client_args=async_client_args or None
         )
 
-    def _get_client(self, key_index=None):
+    def _get_client(self, key_index=None, timeout=180000):
         idx = key_index if key_index is not None else self.current_key_index
         api_key = self.api_keys[idx] if self.api_keys and idx < len(self.api_keys) else None
         return genai.Client(
-            http_options=self._get_http_options(timeout=60000),
+            http_options=self._get_http_options(timeout=timeout),
             api_key=api_key
         )
 
@@ -709,6 +709,32 @@ class AIService:
                     save_dir = os.path.join('/opt/friday/storage/uploads', chat_uid or 'common')
                     os.makedirs(save_dir, exist_ok=True)
 
+                    dl_api_key = self.api_keys[assigned_key] if self.api_keys and assigned_key < len(self.api_keys) else None
+
+                    async def try_download_path(path_to_get: str):
+                        for retry in range(3):
+                            try:
+                                # Отдельный клиент с увеличенным таймаутом 180с (3 минуты) для тяжёлых файлов
+                                dl_client = genai.Client(
+                                    http_options=self._get_http_options(timeout=180000),
+                                    api_key=dl_api_key
+                                )
+                                file_data = await asyncio.wait_for(
+                                    asyncio.to_thread(dl_client.environments.files.download, environment=env_id, path=path_to_get),
+                                    timeout=180.0
+                                )
+                                content = file_data.read() if hasattr(file_data, "read") else file_data
+                                if hasattr(content, "content"): content = content.content
+                                return content
+                            except Exception as dl_err:
+                                err_txt = str(dl_err).lower()
+                                if "404" in err_txt or "not_found" in err_txt or "not found" in err_txt:
+                                    logger.warning(f"⚠️ [SYNC MISS] '{path_to_get}': 404 (нет по этому пути)")
+                                    return None
+                                logger.warning(f"⚠️ [SYNC RETRY {retry+1}/3] '{path_to_get}': {type(dl_err).__name__}: {dl_err}")
+                                await asyncio.sleep(1.5)
+                        return None
+
                     real_paths_in_env = None  # Ленивый поиск — запускаем только если прямой путь не сработал
                     SYS_DIRS = {".", "..", "usr", "bin", "lib", "lib64", "lib32", "libx32", "sbin", "proc", "sys", "dev", "etc", "var", "boot", "run", "srv", "snap", "media", "mnt"}
 
@@ -717,17 +743,13 @@ class AIService:
                         fname = os.path.basename(clean_path)
                         download_success = False
 
-                        # 1. Быстрая попытка по прямым путям (без list)
-                        direct_candidates = [clean_path, f"workspace/{clean_path}"]
-                        for cp in direct_candidates:
-                            try:
-                                file_data = await asyncio.wait_for(
-                                    asyncio.to_thread(client.environments.files.download, environment=env_id, path=cp),
-                                    timeout=20.0
-                                )
-                                content = file_data.read() if hasattr(file_data, "read") else file_data
-                                if hasattr(content, "content"): content = content.content
+                        # 1. Быстрая попытка по прямым путям (сначала workspace/, потом корень)
+                        direct_candidates = [f"workspace/{clean_path}", clean_path]
+                        failed_404_paths = set()
 
+                        for cp in direct_candidates:
+                            content = await try_download_path(cp)
+                            if content is not None:
                                 local_server_path = os.path.join(save_dir, clean_path)
                                 os.makedirs(os.path.dirname(local_server_path), exist_ok=True)
                                 with open(local_server_path, 'wb') as sf:
@@ -738,8 +760,8 @@ class AIService:
                                 logger.info(f"✅ [SYNC OK] Быстрое скачивание '{cp}' ({len(content)} байт)")
                                 download_success = True
                                 break
-                            except Exception as dl_err:
-                                logger.warning(f"⚠️ [SYNC MISS] '{cp}': {dl_err}")
+                            else:
+                                failed_404_paths.add(cp)
 
                         if download_success:
                             continue
@@ -750,7 +772,7 @@ class AIService:
                             try:
                                 top_resp = await asyncio.wait_for(
                                     asyncio.to_thread(client.environments.files.list, environment=env_id, path="", recursive=False),
-                                    timeout=15.0
+                                    timeout=30.0
                                 )
                                 for top_f in getattr(top_resp, "files", []) or []:
                                     tname = (getattr(top_f, "name", "") or "").strip("/")
@@ -762,7 +784,7 @@ class AIService:
                                     else:
                                         sub_resp = await asyncio.wait_for(
                                             asyncio.to_thread(client.environments.files.list, environment=env_id, path=tname, recursive=True),
-                                            timeout=15.0
+                                            timeout=30.0
                                         )
                                         for sf_item in getattr(sub_resp, "files", []) or []:
                                             if "dir" in str(getattr(sf_item, "type", "")).lower():
@@ -772,40 +794,31 @@ class AIService:
                                                 real_paths_in_env.append(spath)
                                 logger.info(f"📂 [ENV FILES] Пользовательские файлы в контейнере: {real_paths_in_env[:30]}")
                             except Exception as le:
-                                logger.warning(f"⚠️ [ENV FILES] Ошибка поиска файлов: {le}")
+                                logger.warning(f"⚠️ [ENV FILES] Ошибка поиска файлов: {type(le).__name__}: {le}")
 
                         fallback_candidates = []
                         for rp in real_paths_in_env:
                             norm_rp = rp.lstrip("/")
                             if norm_rp == clean_path or norm_rp.endswith("/" + clean_path) or os.path.basename(norm_rp) == fname:
-                                if rp not in fallback_candidates and rp not in direct_candidates:
+                                if rp not in fallback_candidates:
                                     fallback_candidates.append(rp)
 
                         for cp in fallback_candidates:
-                            try:
-                                file_data = await asyncio.wait_for(
-                                    asyncio.to_thread(client.environments.files.download, environment=env_id, path=cp),
-                                    timeout=20.0
-                                )
-                                content = file_data.read() if hasattr(file_data, "read") else file_data
-                                if hasattr(content, "content"): content = content.content
-
+                            content = await try_download_path(cp)
+                            if content is not None:
                                 local_server_path = os.path.join(save_dir, clean_path)
                                 os.makedirs(os.path.dirname(local_server_path), exist_ok=True)
                                 with open(local_server_path, 'wb') as sf:
                                     sf.write(content)
 
-                                file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(clean_path)}"
+                                file_url = f"https://friday-assistant.ru/uploads/{chat_uid or 'common'}/{urllib.parse.quote(clean_path)}?v={int(time.time())}"
                                 file_urls[clean_path] = file_url
                                 logger.info(f"✅ [SYNC OK] Найдено и скачано '{cp}' ({len(content)} байт)")
                                 download_success = True
                                 break
-                            except Exception as dl_err2:
-                                logger.warning(f"⚠️ [SYNC FAIL] '{cp}': {dl_err2}")
 
                         if not download_success:
                             logger.error(f"❌ [SYNC ERROR] Файл '{clean_path}' так и не найден!")
-
                 return {
                     "text": output_text,
                     "files": {},
