@@ -84,6 +84,8 @@ CLIENT_NAMES = {
 
 ALL_ACTIONS = list(ACTION_DESCRIPTIONS.keys())
 
+antigravity_user_sockets = {}
+
 def format_action_list(action_keys):
     caps = []
     for k in action_keys:
@@ -635,9 +637,68 @@ active_antigravity_tasks = {}
 # CRUD ДИАЛОГОВ И СООБЩЕНИЙ ANTIGRAVITY (С ПРИВЯЗКОЙ К АККАУНТУ И ПАПКЕ)
 # ==============================================================================
 
+async def handle_antigravity_register_client(websocket, data):
+    user_token = data.get("user_token")
+    if user_token:
+        antigravity_user_sockets[user_token] = websocket
+
+async def send_antigravity_event(user_token, fallback_ws, payload):
+    ws = antigravity_user_sockets.get(user_token) if user_token else None
+    if ws and ws in state.active_connections:
+        await async_send(ws, payload)
+        return
+    if fallback_ws and fallback_ws in state.active_connections:
+        await async_send(fallback_ws, payload)
+
+async def handle_antigravity_delete_synced_file(websocket, data):
+    chat_uid = data.get("chat_uid")
+    file_path = (data.get("file_path") or "").strip().replace("\\", "/").lstrip("./")
+    if not chat_uid or not file_path:
+        return
+
+    # 1. Безопасно удаляем физический файл с диска сервера
+    try:
+        base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid)))
+        target_path = os.path.abspath(os.path.join(base_dir, file_path))
+        if target_path.startswith(base_dir + os.sep) and os.path.exists(target_path):
+            if os.path.isdir(target_path):
+                shutil.rmtree(target_path, ignore_errors=True)
+            else:
+                os.remove(target_path)
+            logger.info(f"🗑️ [SERVER FILE DELETED] {target_path}")
+    except Exception as e:
+        logger.warning(f"⚠️ [SERVER FILE DELETE ERR] {e}")
+
+    # 2. Вычищаем запись из synced_files в MySQL
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute("SELECT synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        row = await cursor.fetchone()
+        if row and row.get("synced_files"):
+            sf = json.loads(row["synced_files"]) if isinstance(row["synced_files"], str) else row["synced_files"]
+            if isinstance(sf, dict):
+                keys_to_del = [k for k in sf.keys() if k.replace("\\", "/").lstrip("./") == file_path]
+                for k in keys_to_del:
+                    sf.pop(k, None)
+                await cursor.execute(
+                    "UPDATE antigravity_chats SET synced_files = %s WHERE chat_uid = %s",
+                    (json.dumps(sf, ensure_ascii=False), chat_uid)
+                )
+                await conn.commit()
+                logger.info(f"🧹 [DB SYNCED CLEANED] Удален '{file_path}' из чата {chat_uid}")
+    except Exception as dbe:
+        logger.error(f"[DB delete_synced_file error] {dbe}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
 async def handle_antigravity_get_chats(websocket, data):
     user_token = data.get("user_token")
     conn = None; cursor = None
+    if user_token:
+        antigravity_user_sockets[user_token] = websocket
     try:
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
@@ -722,6 +783,8 @@ async def handle_antigravity_create_chat(websocket, data):
     title = data.get("title") or "Новый диалог"
     user_token = data.get("user_token")
     workspace_path = data.get("workspace_path")
+    if user_token:
+        antigravity_user_sockets[user_token] = websocket
     conn = None; cursor = None
     try:
         conn = await get_async_db_connection()
@@ -804,6 +867,9 @@ async def handle_antigravity_task(websocket, data):
     user_token = data.get("user_token")
     workspace_path = data.get("workspace_path")
     chat_uid = data.get("chat_id") or data.get("chat_uid") or getattr(websocket, "active_chat_uid", None)
+    
+    if user_token:
+        antigravity_user_sockets[user_token] = websocket
     if not chat_uid:
         chat_uid = f"chat_{int(time.time() * 1000)}"
     websocket.active_chat_uid = chat_uid
@@ -871,9 +937,10 @@ async def handle_antigravity_task(websocket, data):
         if conn: conn.close()
 
     async def send_status_update(status_payload):
-        await async_send(websocket, {
+        await send_antigravity_event(user_token, websocket, {
             "type": "antigravity_status",
             "ui_msg_id": ui_msg_id,
+            "chat_id": chat_uid,
             **status_payload
         })
 
@@ -944,7 +1011,7 @@ async def handle_antigravity_task(websocket, data):
             if cursor: await cursor.close()
             if conn: conn.close()
 
-        await async_send(websocket, {
+        await send_antigravity_event(user_token, websocket, {
             "type": "antigravity_result",
             "ui_msg_id": ui_msg_id,
             "text": agent_reply_text,
@@ -975,14 +1042,14 @@ async def handle_antigravity_task(websocket, data):
             if cursor: await cursor.close()
             if conn: conn.close()
 
-        await async_send(websocket, {
+        await send_antigravity_event(user_token, websocket, {
             "type": "antigravity_cancelled",
             "chat_id": chat_uid,
             "ui_msg_id": ui_msg_id
         })
     except Exception as e:
         logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
-        await async_send(websocket, {
+        await send_antigravity_event(user_token, websocket, {
             "type": "antigravity_error",
             "ui_msg_id": ui_msg_id,
             "error": str(e)
