@@ -675,13 +675,31 @@ class AIService:
                     await status_callback({"status": "Агент думает (контейнер запущен)...", "interaction_id": new_interaction_id})
 
                 poll_count = 0
+                consecutive_poll_errors = 0
+                poll_client = client
+
                 while True:
                     await asyncio.sleep(2.5)
                     poll_count += 1
-                    interaction = await asyncio.wait_for(
-                        asyncio.to_thread(client.interactions.get, id=new_interaction_id),
-                        timeout=30.0
-                    )
+                    try:
+                        interaction = await asyncio.wait_for(
+                            asyncio.to_thread(poll_client.interactions.get, id=new_interaction_id),
+                            timeout=25.0
+                        )
+                        consecutive_poll_errors = 0
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as poll_err:
+                        consecutive_poll_errors += 1
+                        logger.warning(f"⚠️ [POLL RETRY {consecutive_poll_errors}/10] Ошибка проверки статуса на ключе #{assigned_key}: {type(poll_err).__name__}: {poll_err}")
+                        if consecutive_poll_errors >= 10:
+                            raise Exception(f"Потеряна связь при опросе статуса: {poll_err}")
+                        # Сбрасываем залипший сокет прокси и продолжаем ждать ЭТУ ЖЕ задачу
+                        poll_client = self._get_client(key_index=assigned_key)
+                        if status_callback:
+                            await status_callback({"status": f"Переподключение к проверке статуса ({consecutive_poll_errors}/10)..."})
+                        await asyncio.sleep(2.0)
+                        continue
 
                     status_raw = str(getattr(interaction, 'status', '')).lower().strip()
 
@@ -696,7 +714,7 @@ class AIService:
                     if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
                         logger.info(f"🏁 [ANTIGRAVITY DONE] Выход из цикла, статус: {status_raw}")
                         break
-
+                        
                 if "fail" in str(getattr(interaction, 'status', '')).lower():
                     raise Exception(f"Задача Antigravity завершилась ошибкой: {getattr(interaction, 'error', 'Unknown error')}")
 
