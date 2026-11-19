@@ -649,7 +649,8 @@ class AIService:
                     if recent_history:
                         history_parts = []
                         for m in recent_history[-8:]:
-                            role = "Пользователь" if m.get("role") == "user" else "Ассистент"
+                            r = m.get("role")
+                            role = "Пользователь" if r == "user" else ("Система" if r in ("system", "tool") else "Ассистент")
                             text_snip = (m.get("text") or "").strip()
                             if text_snip:
                                 if len(text_snip) > 300: text_snip = text_snip[:300] + "..."

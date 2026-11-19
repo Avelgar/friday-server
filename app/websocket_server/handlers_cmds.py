@@ -694,6 +694,26 @@ async def handle_antigravity_delete_synced_file(websocket, data):
         if cursor: await cursor.close()
         if conn: conn.close()
 
+async def handle_antigravity_save_system_log(websocket, data):
+    chat_uid = data.get("chat_uid")
+    text = (data.get("text") or "").strip()
+    if not chat_uid or not text:
+        return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor()
+        await cursor.execute(
+            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'system', %s)",
+            (chat_uid, text)
+        )
+        await conn.commit()
+    except Exception as e:
+        logger.error(f"[DB save_system_log error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
 async def handle_antigravity_get_chats(websocket, data):
     user_token = data.get("user_token")
     conn = None; cursor = None
@@ -704,7 +724,11 @@ async def handle_antigravity_get_chats(websocket, data):
         cursor = await conn.cursor(aiomysql.DictCursor)
         
         if not user_token:
-            await async_send(websocket, {"type": "antigravity_chats_list", "chats": []})
+            await async_send(websocket, {
+                "type": "antigravity_chats_list",
+                "chats": chats or [],
+                "silent": bool(data.get("silent", False))
+            })
             return
 
         await cursor.execute(
@@ -728,7 +752,8 @@ async def handle_antigravity_get_chats(websocket, data):
 
         await async_send(websocket, {
             "type": "antigravity_chats_list",
-            "chats": chats or []
+            "chats": chats or [],
+            "silent": bool(data.get("silent", False))
         })
     except Exception as e:
         logger.error(f"[DB get_chats error] {e}")
@@ -862,6 +887,8 @@ async def handle_antigravity_cancel_task(websocket, data):
 
 async def handle_antigravity_task(websocket, data):
     prompt = data.get("prompt", "").strip()
+    is_tool_response = bool(data.get("is_tool_response", False))
+    db_summary = (data.get("db_summary") or "").strip()
     target_files = data.get("target_files", [])
     input_files = data.get("input_files", {})
     user_token = data.get("user_token")
@@ -877,7 +904,7 @@ async def handle_antigravity_task(websocket, data):
     ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
     if not prompt: return
 
-    logger.info(f"📥 [WS IN] Чат: {chat_uid} | Задача: '{prompt[:70]}' | ui_msg_id: {ui_msg_id}")
+    logger.info(f"📥 [WS IN] Чат: {chat_uid} | Роль: {'tool' if is_tool_response else 'user'} | Задача: '{prompt[:70]}' | ui_msg_id: {ui_msg_id}")
 
     conn = None; cursor = None
     assigned_key = None
@@ -886,10 +913,16 @@ async def handle_antigravity_task(websocket, data):
     need_title_update = False
     recent_history = []
 
-    clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
-    if not clean_title_text: clean_title_text = prompt
-    auto_title = clean_title_text[:30].replace("\n", " ").strip()
-    if len(clean_title_text) > 30: auto_title += "..."
+    if not is_tool_response:
+        clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
+        if not clean_title_text: clean_title_text = prompt
+        auto_title = clean_title_text[:30].replace("\n", " ").strip()
+        if len(clean_title_text) > 30: auto_title += "..."
+    else:
+        auto_title = "Новый диалог"
+
+    msg_role = "tool" if is_tool_response else "user"
+    text_for_db = db_summary if (is_tool_response and db_summary) else prompt
 
     try:
         conn = await get_async_db_connection()
@@ -905,7 +938,7 @@ async def handle_antigravity_task(websocket, data):
             assigned_key = chat_row["key_index"]
             prev_interaction_id = chat_row["last_interaction_id"]
             environment_id = chat_row["environment_id"]
-            if chat_row.get("title") in ("Новый диалог", None, ""):
+            if chat_row.get("title") in ("Новый диалог", None, "") and not is_tool_response:
                 need_title_update = True
         else:
             assigned_key = await get_least_used_key_index(cursor)
@@ -925,8 +958,8 @@ async def handle_antigravity_task(websocket, data):
         recent_history = await cursor.fetchall() or []
 
         await cursor.execute(
-            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'user', %s)",
-            (chat_uid, prompt)
+            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, %s, %s)",
+            (chat_uid, msg_role, text_for_db)
         )
         await conn.commit()
 
@@ -1027,7 +1060,7 @@ async def handle_antigravity_task(websocket, data):
             conn = await get_async_db_connection()
             cursor = await conn.cursor()
             await cursor.execute(
-                "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role = 'user' ORDER BY id DESC LIMIT 1",
+                "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role IN ('user', 'tool') ORDER BY id DESC LIMIT 1",
                 (chat_uid,)
             )
             await cursor.execute(

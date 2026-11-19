@@ -81,6 +81,9 @@ async def websocket_handler(websocket):
                 elif msg_type == "delete_synced_file":
                     from app.websocket_server.handlers_cmds import handle_antigravity_delete_synced_file
                     asyncio.create_task(handle_antigravity_delete_synced_file(websocket, data))
+                elif msg_type == "save_system_log":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_save_system_log
+                    asyncio.create_task(handle_antigravity_save_system_log(websocket, data))
                 elif msg_type == "cancel_task":
                     from app.websocket_server.handlers_cmds import handle_antigravity_cancel_task
                     asyncio.create_task(handle_antigravity_cancel_task(websocket, data))
