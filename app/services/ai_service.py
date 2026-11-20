@@ -663,9 +663,10 @@ class AIService:
                     kwargs["input"] = current_input_prompt
                     logger.info(f"✨ [GOOGLE CALL] Чистый старт в новом окружении | Flash | Ключ #{assigned_key}")
 
+                create_client = self._get_client(key_index=assigned_key, timeout=25000)
                 interaction = await asyncio.wait_for(
-                    asyncio.to_thread(client.interactions.create, **kwargs),
-                    timeout=65.0
+                    asyncio.to_thread(create_client.interactions.create, **kwargs),
+                    timeout=30.0
                 )
                 
                 new_interaction_id = interaction.id
