@@ -894,4 +894,88 @@ class AIService:
 
         raise Exception(f"Все доступные ключи не отвечают или исчерпали квоту.")
 
+    async def list_environment_files(self, env_id: str, key_index: int = None):
+        client = self._get_client(key_index=key_index, timeout=30000)
+        SYS_DIRS = {".", "..", "usr", "bin", "lib", "lib64", "lib32", "libx32", "sbin", "proc", "sys", "dev", "etc", "var", "boot", "run", "srv", "snap", "media", "mnt"}
+        items = []
+        top_resp = await asyncio.wait_for(
+            asyncio.to_thread(client.environments.files.list, environment=env_id, path="", recursive=False),
+            timeout=30.0
+        )
+        for top_f in getattr(top_resp, "files", []) or []:
+            tname = (getattr(top_f, "name", "") or "").strip("/")
+            ttype = str(getattr(top_f, "type", "")).lower()
+            if not tname or tname in SYS_DIRS:
+                continue
+            if "dir" not in ttype:
+                spath = getattr(top_f, "path", None) or tname
+                items.append({
+                    "path": spath,
+                    "name": os.path.basename(spath),
+                    "size": int(getattr(top_f, "size_bytes", 0) or 0)
+                })
+            else:
+                sub_resp = await asyncio.wait_for(
+                    asyncio.to_thread(client.environments.files.list, environment=env_id, path=tname, recursive=True),
+                    timeout=30.0
+                )
+                for sf_item in getattr(sub_resp, "files", []) or []:
+                    if "dir" in str(getattr(sf_item, "type", "")).lower():
+                        continue
+                    spath = getattr(sf_item, "path", None) or getattr(sf_item, "name", "")
+                    if not spath or "__pycache__" in spath:
+                        continue
+                    items.append({
+                        "path": spath,
+                        "name": os.path.basename(spath),
+                        "size": int(getattr(sf_item, "size_bytes", 0) or 0)
+                    })
+        items.sort(key=lambda x: x["path"])
+        return items
+
+    async def download_environment_file(self, env_id: str, remote_path: str, chat_uid: str, key_index: int = None):
+        dl_client = self._get_client(key_index=key_index, timeout=180000)
+        file_data = await asyncio.wait_for(
+            asyncio.to_thread(dl_client.environments.files.download, environment=env_id, path=remote_path),
+            timeout=180.0
+        )
+        content = file_data.read() if hasattr(file_data, "read") else file_data
+        if hasattr(content, "content"):
+            content = content.content
+
+        clean_rel = remote_path.strip().replace("\\", "/").lstrip("/")
+        if clean_rel.startswith("workspace/"):
+            clean_rel = clean_rel[len("workspace/"):]
+        clean_rel = os.path.normpath(clean_rel).replace("\\", "/").lstrip("./")
+        if clean_rel.startswith(".."):
+            clean_rel = os.path.basename(clean_rel)
+
+        safe_uid = os.path.basename(chat_uid or 'common')
+        save_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
+        local_server_path = os.path.abspath(os.path.join(save_dir, clean_rel))
+        if not local_server_path.startswith(save_dir + os.sep):
+            raise ValueError("Invalid file path")
+        os.makedirs(os.path.dirname(local_server_path), exist_ok=True)
+        with open(local_server_path, 'wb') as sf:
+            sf.write(content)
+
+        file_url = f"https://friday-assistant.ru/uploads/{safe_uid}/{urllib.parse.quote(clean_rel)}?v={int(time.time())}"
+        return {"path": clean_rel, "url": file_url, "size": len(content)}
+
+    async def upload_file_to_environment(self, env_id: str, local_server_path: str, remote_path: str, key_index: int = None):
+        client = self._get_client(key_index=key_index, timeout=180000)
+        clean_remote = remote_path.strip().replace("\\", "/").lstrip("/")
+
+        def _do_upload():
+            with open(local_server_path, "rb") as f:
+                return client.environments.files.upload(
+                    environment=env_id,
+                    path=clean_remote,
+                    file=f,
+                    overwrite=True
+                )
+
+        await asyncio.wait_for(asyncio.to_thread(_do_upload), timeout=180.0)
+        return clean_remote
+
 ai_instance = AIService()

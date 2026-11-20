@@ -84,6 +84,21 @@ async def websocket_handler(websocket):
                 elif msg_type == "save_system_log":
                     from app.websocket_server.handlers_cmds import handle_antigravity_save_system_log
                     asyncio.create_task(handle_antigravity_save_system_log(websocket, data))
+                elif msg_type == "list_server_files":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_list_server_files
+                    asyncio.create_task(handle_antigravity_list_server_files(websocket, data))
+                elif msg_type == "delete_server_file":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_delete_server_file
+                    asyncio.create_task(handle_antigravity_delete_server_file(websocket, data))
+                elif msg_type == "list_env_files":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_list_env_files
+                    asyncio.create_task(handle_antigravity_list_env_files(websocket, data))
+                elif msg_type == "download_env_file":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_download_env_file
+                    asyncio.create_task(handle_antigravity_download_env_file(websocket, data))
+                elif msg_type == "upload_env_file":
+                    from app.websocket_server.handlers_cmds import handle_antigravity_upload_env_file
+                    asyncio.create_task(handle_antigravity_upload_env_file(websocket, data))
                 elif msg_type == "cancel_task":
                     from app.websocket_server.handlers_cmds import handle_antigravity_cancel_task
                     asyncio.create_task(handle_antigravity_cancel_task(websocket, data))

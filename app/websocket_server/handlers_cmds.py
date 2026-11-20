@@ -12,6 +12,7 @@ import time
 import os
 import shutil
 import re
+import urllib.parse
 
 logger = logging.getLogger("WS_Server")
 
@@ -1089,3 +1090,200 @@ async def handle_antigravity_task(websocket, data):
         })
     finally:
         active_antigravity_tasks.pop(chat_uid, None)
+
+
+async def handle_antigravity_list_server_files(websocket, data):
+    chat_uid = data.get("chat_uid")
+    if not chat_uid:
+        return
+    safe_uid = os.path.basename(chat_uid)
+    base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
+    files = []
+
+    if os.path.exists(base_dir):
+        for root, _, filenames in os.walk(base_dir):
+            for fname in filenames:
+                full_p = os.path.abspath(os.path.join(root, fname))
+                if not full_p.startswith(base_dir + os.sep):
+                    continue
+                rel_p = os.path.relpath(full_p, base_dir).replace("\\", "/")
+                try:
+                    st = os.stat(full_p)
+                    files.append({
+                        "path": rel_p,
+                        "name": fname,
+                        "size": st.st_size,
+                        "mtime": int(st.st_mtime),
+                        "url": f"https://friday-assistant.ru/uploads/{safe_uid}/{urllib.parse.quote(rel_p)}?v={int(st.st_mtime)}"
+                    })
+                except Exception:
+                    pass
+    files.sort(key=lambda x: x["path"])
+    await async_send(websocket, {
+        "type": "server_files_list",
+        "chat_uid": chat_uid,
+        "files": files
+    })
+
+
+async def handle_antigravity_delete_server_file(websocket, data):
+    await handle_antigravity_delete_synced_file(websocket, data)
+    chat_uid = data.get("chat_uid")
+    file_path = (data.get("file_path") or "").strip().replace("\\", "/").lstrip("./")
+    if chat_uid and file_path:
+        base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid)))
+        parent = os.path.dirname(os.path.abspath(os.path.join(base_dir, file_path)))
+        while parent.startswith(base_dir + os.sep):
+            try:
+                if not os.listdir(parent):
+                    os.rmdir(parent)
+                    parent = os.path.dirname(parent)
+                else:
+                    break
+            except Exception:
+                break
+    await async_send(websocket, {
+        "type": "server_file_deleted",
+        "chat_uid": chat_uid,
+        "file_path": file_path
+    })
+
+
+async def handle_antigravity_list_env_files(websocket, data):
+    chat_uid = data.get("chat_uid")
+    if not chat_uid:
+        return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute("SELECT environment_id, key_index FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        row = await cursor.fetchone()
+        env_id = row.get("environment_id") if row else None
+        key_idx = row.get("key_index") if row else None
+
+        if not env_id:
+            await async_send(websocket, {
+                "type": "env_files_list",
+                "chat_uid": chat_uid,
+                "has_env": False,
+                "files": []
+            })
+            return
+
+        files = await ai_instance.list_environment_files(env_id, key_index=key_idx)
+        await async_send(websocket, {
+            "type": "env_files_list",
+            "chat_uid": chat_uid,
+            "has_env": True,
+            "env_id": env_id,
+            "files": files
+        })
+    except Exception as e:
+        logger.error(f"[ENV LIST ERROR] {e}")
+        await async_send(websocket, {
+            "type": "env_files_list",
+            "chat_uid": chat_uid,
+            "has_env": True,
+            "error": str(e),
+            "files": []
+        })
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_download_env_file(websocket, data):
+    chat_uid = data.get("chat_uid")
+    remote_path = (data.get("remote_path") or "").strip()
+    if not chat_uid or not remote_path:
+        return
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute("SELECT environment_id, key_index, synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        row = await cursor.fetchone()
+        if not row or not row.get("environment_id"):
+            await async_send(websocket, {
+                "type": "fm_error",
+                "chat_uid": chat_uid,
+                "error": "Песочница не создана для этого диалога"
+            })
+            return
+
+        res = await ai_instance.download_environment_file(
+            row["environment_id"], remote_path, chat_uid, key_index=row.get("key_index")
+        )
+
+        sf = {}
+        if row.get("synced_files"):
+            try:
+                sf = json.loads(row["synced_files"]) if isinstance(row["synced_files"], str) else dict(row["synced_files"])
+            except Exception:
+                sf = {}
+        sf[res["path"]] = res["url"]
+        await cursor.execute(
+            "UPDATE antigravity_chats SET synced_files = %s WHERE chat_uid = %s",
+            (json.dumps(sf, ensure_ascii=False), chat_uid)
+        )
+        await conn.commit()
+
+        await async_send(websocket, {
+            "type": "env_file_downloaded",
+            "chat_uid": chat_uid,
+            "file_path": res["path"],
+            "url": res["url"],
+            "size": res["size"]
+        })
+    except Exception as e:
+        logger.error(f"[ENV DOWNLOAD ERROR] {e}")
+        await async_send(websocket, {
+            "type": "fm_error",
+            "chat_uid": chat_uid,
+            "error": f"Ошибка скачивания из песочницы: {e}"
+        })
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
+async def handle_antigravity_upload_env_file(websocket, data):
+    chat_uid = data.get("chat_uid")
+    local_filename = os.path.basename(data.get("local_filename") or "")
+    remote_path = (data.get("remote_path") or "").strip()
+    if not chat_uid or not local_filename or not remote_path:
+        return
+    conn = None; cursor = None
+    try:
+        safe_uid = os.path.basename(chat_uid)
+        base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
+        local_server_path = os.path.abspath(os.path.join(base_dir, local_filename))
+        if not local_server_path.startswith(base_dir + os.sep) or not os.path.exists(local_server_path):
+            raise FileNotFoundError("Загруженный файл не найден на сервере")
+
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute("SELECT environment_id, key_index FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        row = await cursor.fetchone()
+        if not row or not row.get("environment_id"):
+            raise RuntimeError("Песочница ещё не создана")
+
+        uploaded_path = await ai_instance.upload_file_to_environment(
+            row["environment_id"], local_server_path, remote_path, key_index=row.get("key_index")
+        )
+        await async_send(websocket, {
+            "type": "env_file_uploaded",
+            "chat_uid": chat_uid,
+            "remote_path": uploaded_path
+        })
+    except Exception as e:
+        logger.error(f"[ENV UPLOAD ERROR] {e}")
+        await async_send(websocket, {
+            "type": "fm_error",
+            "chat_uid": chat_uid,
+            "error": f"Ошибка загрузки в песочницу: {e}"
+        })
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
