@@ -87,7 +87,7 @@ async def run_direct_hydrogen(
 
     total_keys = len(api_keys) if api_keys else 1
 
-    for model_name in ("models/gemini-3.6-flash", "models/gemini-3.5-flash-lite"):
+    for model_name in ("models/gemini-3.5-flash-lite"):
         tried: set[int] = set()
         attempts = 2 if "3.6" in model_name else min(total_keys, 4)
         req_timeout_ms = 12000 if "3.6" in model_name else 25000
