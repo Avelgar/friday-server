@@ -99,7 +99,7 @@ async def run_direct_hydrogen(
             interaction = await asyncio.wait_for(
                 asyncio.to_thread(
                     client.interactions.create,
-                    model="models/gemini-4-hydrogen",
+                    model="models/gemini-3.6-flash",
                     system_instruction=DIRECT_SYSTEM_INSTRUCTION,
                     input=full_input,
                     tools=tools,
