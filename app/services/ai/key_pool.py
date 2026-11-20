@@ -66,7 +66,6 @@ class GeminiKeyPool:
     def get_available_key(self, exclude_index: int = None) -> int:
         return self.get_next_key(exclude_index=exclude_index)
 
-
 def build_http_options(timeout=60000):
     client_args = {}
     async_client_args = {}
@@ -74,12 +73,16 @@ def build_http_options(timeout=60000):
         client_args["proxy"] = PROXY_URL
         async_client_args["proxy"] = PROXY_URL
 
-    return types.HttpOptions(
-        api_version="v1beta",
-        timeout=timeout,
-        client_args=client_args or None,
-        async_client_args=async_client_args or None
-    )
+    kwargs = {
+        "api_version": "v1beta",
+        "timeout": timeout,
+        "client_args": client_args or None,
+        "async_client_args": async_client_args or None,
+    }
+    if hasattr(types, "HttpRetryOptions"):
+        kwargs["retry_options"] = types.HttpRetryOptions(attempts=1)
+
+    return types.HttpOptions(**kwargs)
 
 
 def create_genai_client(api_keys: list[str], key_index: int = 0, timeout=180000):
