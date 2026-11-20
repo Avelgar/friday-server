@@ -728,7 +728,7 @@ async def handle_antigravity_get_chats(websocket, data):
         if not user_token:
             await async_send(websocket, {
                 "type": "antigravity_chats_list",
-                "chats": chats or [],
+                "chats": [],
                 "silent": bool(data.get("silent", False))
             })
             return
@@ -916,6 +916,44 @@ async def handle_antigravity_cancel_task(websocket, data):
         "ui_msg_id": ui_msg_id
     })
 
+
+async def _maybe_update_rolling_summary(chat_uid: str):
+    conn = None; cursor = None
+    try:
+        conn = await get_async_db_connection()
+        cursor = await conn.cursor(aiomysql.DictCursor)
+        await cursor.execute("SELECT summary, summary_msg_id FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        row = await cursor.fetchone()
+        if not row:
+            return
+        prev_summary = row.get("summary") or ""
+        last_sum_id = int(row.get("summary_msg_id") or 0)
+
+        await cursor.execute(
+            "SELECT id, role, text FROM antigravity_messages WHERE chat_uid = %s AND id > %s ORDER BY id ASC",
+            (chat_uid, last_sum_id)
+        )
+        unsummarized = await cursor.fetchall() or []
+        # Оставляем последние 10 сообщений сырыми; если старше накопилось >= 6, сжимаем их в summary
+        if len(unsummarized) < 16:
+            return
+
+        to_compress = unsummarized[:-10]
+        new_cutoff_id = to_compress[-1]["id"]
+        new_summary = await ai_instance.generate_rolling_summary(prev_summary, to_compress)
+        if new_summary:
+            await cursor.execute(
+                "UPDATE antigravity_chats SET summary = %s, summary_msg_id = %s WHERE chat_uid = %s",
+                (new_summary, new_cutoff_id, chat_uid)
+            )
+            await conn.commit()
+    except Exception as e:
+        logger.warning(f"⚠️ [SUMMARY BG ERR] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
+
+
 async def handle_antigravity_task(websocket, data):
     prompt = data.get("prompt", "").strip()
     is_tool_response = bool(data.get("is_tool_response", False))
@@ -941,6 +979,9 @@ async def handle_antigravity_task(websocket, data):
     assigned_key = None
     prev_interaction_id = None
     environment_id = None
+    chat_summary = None
+    last_engine = None
+    last_input_tokens = 0
     need_title_update = False
     recent_history = []
 
@@ -960,10 +1001,14 @@ async def handle_antigravity_task(websocket, data):
         cursor = await conn.cursor(aiomysql.DictCursor)
 
         await cursor.execute(
-            "SELECT key_index, last_interaction_id, environment_id, title FROM antigravity_chats WHERE chat_uid = %s",
+            "SELECT key_index, last_interaction_id, environment_id, title, summary, last_engine, last_input_tokens FROM antigravity_chats WHERE chat_uid = %s",
             (chat_uid,)
         )
         chat_row = await cursor.fetchone()
+
+        chat_summary = chat_row.get("summary") if chat_row else None
+        last_engine = chat_row.get("last_engine") if chat_row else None
+        last_input_tokens = int(chat_row.get("last_input_tokens") or 0) if chat_row else 0
 
         if chat_row:
             assigned_key = chat_row["key_index"]
@@ -1011,24 +1056,60 @@ async def handle_antigravity_task(websocket, data):
     active_antigravity_tasks[chat_uid] = asyncio.current_task()
 
     try:
-        result = await ai_instance.run_antigravity_agent(
-            prompt_text=prompt,
-            status_callback=send_status_update,
-            target_files=target_files,
-            input_files=input_files,
-            previous_interaction_id=prev_interaction_id,
-            environment_id=environment_id,
-            assigned_key=assigned_key,
-            chat_uid=chat_uid,
-            recent_history=recent_history
-        )
+        # Если это ответ IDE на тег — остаёмся на том же движке; иначе спрашиваем роутер 3.5-lite
+        if is_tool_response and last_engine in ("DIRECT", "ANTIGRAVITY"):
+            route = last_engine
+        else:
+            route = await ai_instance.classify_route(prompt)
+
+        used_engine = route
+        result = None
+
+        if route == "DIRECT":
+            direct_res = await ai_instance.run_direct_hydrogen(
+                prompt_text=prompt,
+                summary=chat_summary,
+                recent_history=recent_history,
+                status_callback=send_status_update,
+                assigned_key=assigned_key
+            )
+            if direct_res.get("escalate"):
+                logger.info("⬆️ [ESCALATE] Прямой Hydrogen запросил переход в Antigravity")
+                used_engine = "ANTIGRAVITY"
+            else:
+                result = {
+                    "text": direct_res["text"],
+                    "file_urls": {},
+                    "environment_id": environment_id,
+                    "interaction_id": prev_interaction_id,
+                    "assigned_key": direct_res.get("assigned_key", assigned_key),
+                    "usage": direct_res.get("usage", {})
+                }
+
+        if result is None:
+            used_engine = "ANTIGRAVITY"
+            # Если контекст в Antigravity раздулся > 120k токенов (или прошлый шаг был в DIRECT) —
+            # сбрасываем цепочку interaction_id, НО оставляем живой Linux-контейнер environment_id!
+            force_reset = (last_input_tokens > 120000) or (last_engine == "DIRECT")
+            result = await ai_instance.run_antigravity_agent(
+                prompt_text=prompt,
+                status_callback=send_status_update,
+                previous_interaction_id=prev_interaction_id,
+                environment_id=environment_id,
+                assigned_key=assigned_key,
+                chat_uid=chat_uid,
+                recent_history=recent_history,
+                summary=chat_summary,
+                force_reset_chain=force_reset
+            )
 
         new_interaction_id = result["interaction_id"]
         new_env_id = result["environment_id"]
         agent_reply_text = result["text"]
         final_assigned_key = result.get("assigned_key", assigned_key)
+        last_in_tokens = int((result.get("usage") or {}).get("input", 0) or 0)
 
-        logger.info(f"📤 [ANTIGRAVITY DONE] Ответ готов ({len(agent_reply_text)} симв.): '{agent_reply_text[:60]}...'")
+        logger.info(f"📤 [ANTIGRAVITY DONE] ({used_engine}) Ответ готов ({len(agent_reply_text)} симв.): '{agent_reply_text[:60]}...'")
 
         try:
             conn = await get_async_db_connection()
@@ -1051,17 +1132,17 @@ async def handle_antigravity_task(websocket, data):
                 await cursor.execute(
                     """UPDATE antigravity_chats 
                        SET last_interaction_id = %s, environment_id = %s, key_index = %s, title = %s, 
-                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
+                           synced_files = COALESCE(%s, synced_files), last_engine = %s, last_input_tokens = %s, updated_at = NOW() 
                        WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, final_assigned_key, auto_title, synced_str, chat_uid)
+                    (new_interaction_id, new_env_id, final_assigned_key, auto_title, synced_str, used_engine, last_in_tokens, chat_uid)
                 )
             else:
                 await cursor.execute(
                     """UPDATE antigravity_chats 
                        SET last_interaction_id = %s, environment_id = %s, key_index = %s, 
-                           synced_files = COALESCE(%s, synced_files), updated_at = NOW() 
+                           synced_files = COALESCE(%s, synced_files), last_engine = %s, last_input_tokens = %s, updated_at = NOW() 
                        WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, final_assigned_key, synced_str, chat_uid)
+                    (new_interaction_id, new_env_id, final_assigned_key, synced_str, used_engine, last_in_tokens, chat_uid)
                 )
 
             await cursor.execute(
@@ -1085,6 +1166,8 @@ async def handle_antigravity_task(websocket, data):
             "interaction_id": new_interaction_id,
             "chat_id": chat_uid
         })
+
+        asyncio.create_task(_maybe_update_rolling_summary(chat_uid))
 
     except asyncio.CancelledError:
         logger.warning(f"🛑 [WS Antigravity] Задача {chat_uid} прервана! Очистка контекста...")
