@@ -628,10 +628,8 @@ async def handle_command(websocket, data):
         if conn: conn.close()
         active_media_queues.pop(data.get('ui_msg_id', ''), None)
 
-
 async def get_least_used_key_index(cursor=None):
-    # Берем следующий по очереди свободный ключ из пула
-    return ai_instance.key_pool.get_next_key()
+    return ai_instance.key_pool.get_best_key(model="antigravity")
 
 active_antigravity_tasks = {}
 

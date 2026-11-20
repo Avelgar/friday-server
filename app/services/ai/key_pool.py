@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 import os
+import json
 import time
+import random
 import logging
+import threading
+from datetime import datetime
 from google import genai
 from google.genai import types
 
@@ -23,48 +27,155 @@ else:
     logger.info("🌐 [AI_Service] Прямое подключение без прокси (PROXY_URL не задан)")
 
 
+def _norm_model(model: str) -> str:
+    m = (model or "antigravity").strip().lower()
+    if m.startswith("models/"):
+        m = m[len("models/"):]
+    return m
+
+
 class GeminiKeyPool:
-    def __init__(self, keys: list[str]):
+    def __init__(self, keys: list[str], state_file: str = "/opt/friday/storage/key_pool_state.json"):
         self.keys = keys or []
-        self.exhausted_keys = {}
-        self._round_robin_counter = 0
+        self._state_file = state_file
+        self._lock = threading.Lock()
+        # state[model][str(idx)] = {"exhausted_until": float, "used_today": int, "errors_today": int, "last_used": float}
+        self._state = {"date": self._today(), "models": {}}
+        self._load_state()
 
-    def mark_exhausted(self, key_index: int, duration_seconds: float = 3600):
-        now = time.time()
-        self.exhausted_keys[key_index] = now + duration_seconds
-        logger.warning(f"🚫 [Key Pool] Ключ #{key_index} помечен как НЕРАБОЧИЙ на {duration_seconds/60:.0f} мин.")
+    def _today(self) -> str:
+        return datetime.utcnow().strftime("%Y-%m-%d")
 
-    def is_usable(self, key_index: int) -> bool:
+    def _load_state(self):
+        try:
+            if os.path.exists(self._state_file):
+                with open(self._state_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and isinstance(data.get("models"), dict):
+                    self._state = data
+                    self._ensure_today_locked()
+        except Exception as e:
+            logger.warning(f"⚠️ [Key Pool] Не удалось прочитать state: {e}")
+
+    def _save_state_locked(self):
+        try:
+            os.makedirs(os.path.dirname(self._state_file), exist_ok=True)
+            tmp = self._state_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._state, f, ensure_ascii=False)
+            os.replace(tmp, self._state_file)
+        except Exception:
+            pass
+
+    def _ensure_today_locked(self):
+        today = self._today()
+        if self._state.get("date") != today:
+            self._state = {"date": today, "models": {}}
+
+    def _entry_locked(self, model: str, key_index: int) -> dict:
+        self._ensure_today_locked()
+        m = _norm_model(model)
+        models_map = self._state.setdefault("models", {})
+        m_map = models_map.setdefault(m, {})
+        k_str = str(key_index)
+        if k_str not in m_map:
+            m_map[k_str] = {
+                "exhausted_until": 0.0,
+                "used_today": 0,
+                "errors_today": 0,
+                "last_used": 0.0,
+            }
+        return m_map[k_str]
+
+    def mark_exhausted(self, key_index: int, duration_seconds: float = 3600, model: str = "antigravity"):
+        if not self.keys:
+            return
+        with self._lock:
+            entry = self._entry_locked(model, key_index)
+            entry["exhausted_until"] = time.time() + duration_seconds
+            entry["errors_today"] = int(entry.get("errors_today", 0)) + 1
+            self._save_state_locked()
+        logger.warning(f"🚫 [Key Pool] ({_norm_model(model)}) Ключ #{key_index} в паузе на {duration_seconds/60:.0f} мин.")
+
+    def mark_success(self, key_index: int, model: str = "antigravity"):
+        if not self.keys:
+            return
+        with self._lock:
+            entry = self._entry_locked(model, key_index)
+            entry["exhausted_until"] = 0.0
+            self._save_state_locked()
+
+    def is_usable(self, key_index: int, model: str = "antigravity") -> bool:
         if not self.keys:
             return True
-        if key_index not in self.exhausted_keys:
-            return True
-        if time.time() > self.exhausted_keys[key_index]:
-            del self.exhausted_keys[key_index]
-            return True
-        return False
+        if key_index < 0 or key_index >= len(self.keys):
+            return False
+        with self._lock:
+            entry = self._entry_locked(model, key_index)
+            until = float(entry.get("exhausted_until", 0.0))
+            if until <= 0:
+                return True
+            if time.time() >= until:
+                entry["exhausted_until"] = 0.0
+                self._save_state_locked()
+                return True
+            return False
 
-    def get_next_key(self, exclude_index: int = None) -> int:
+    def get_best_key(self, model: str = "antigravity", exclude_indices: set[int] = None) -> int:
+        """Выбирает самый свежий/неиспользованный живой ключ для конкретной модели."""
         total = len(self.keys)
         if total <= 1:
             return 0
 
-        for _ in range(total):
-            self._round_robin_counter = (self._round_robin_counter + 1) % total
-            candidate = self._round_robin_counter
-            if exclude_index is not None and candidate == exclude_index:
-                continue
-            if self.is_usable(candidate):
-                return candidate
+        excluded = exclude_indices or set()
+        now = time.time()
 
-        if self.exhausted_keys:
-            earliest = min(self.exhausted_keys.keys(), key=lambda k: self.exhausted_keys[k])
-            del self.exhausted_keys[earliest]
-            return earliest
-        return 0
+        with self._lock:
+            self._ensure_today_locked()
+            candidates = [i for i in range(total) if i not in excluded]
+            if not candidates:
+                candidates = list(range(total))
 
-    def get_available_key(self, exclude_index: int = None) -> int:
-        return self.get_next_key(exclude_index=exclude_index)
+            usable = []
+            for idx in candidates:
+                entry = self._entry_locked(model, idx)
+                until = float(entry.get("exhausted_until", 0.0))
+                if until > now:
+                    continue
+                if until > 0:
+                    entry["exhausted_until"] = 0.0
+                usable.append((
+                    int(entry.get("errors_today", 0)),
+                    int(entry.get("used_today", 0)),
+                    float(entry.get("last_used", 0.0)),
+                    random.random(),
+                    idx
+                ))
+
+            if usable:
+                usable.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+                chosen = usable[0][4]
+            else:
+                # Все кандидаты в бане — берём тот, у которого бан заканчивается раньше всех
+                chosen = min(
+                    candidates,
+                    key=lambda idx: float(self._entry_locked(model, idx).get("exhausted_until", 0.0))
+                )
+                self._entry_locked(model, chosen)["exhausted_until"] = 0.0
+
+            chosen_entry = self._entry_locked(model, chosen)
+            chosen_entry["used_today"] = int(chosen_entry.get("used_today", 0)) + 1
+            chosen_entry["last_used"] = now
+            self._save_state_locked()
+            return chosen
+
+    def get_next_key(self, exclude_index: int = None, model: str = "antigravity") -> int:
+        excl = {exclude_index} if exclude_index is not None else None
+        return self.get_best_key(model=model, exclude_indices=excl)
+
+    def get_available_key(self, exclude_index: int = None, model: str = "antigravity") -> int:
+        return self.get_next_key(exclude_index=exclude_index, model=model)
+
 
 def build_http_options(timeout=60000):
     client_args = {}

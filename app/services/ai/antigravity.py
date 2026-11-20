@@ -28,18 +28,22 @@ async def run_antigravity_agent(
 ):
     total_keys = len(api_keys)
 
-    if assigned_key is None or not key_pool.is_usable(assigned_key):
-        assigned_key = key_pool.get_next_key(exclude_index=assigned_key)
+    model_tag = "antigravity"
+    tried: set[int] = set()
+
+    if assigned_key is None or not key_pool.is_usable(assigned_key, model=model_tag):
+        assigned_key = key_pool.get_best_key(model=model_tag)
         previous_interaction_id = None
         environment_id = None
 
     if force_reset_chain:
         previous_interaction_id = None
 
-    max_attempts = min(total_keys, 10) if total_keys > 0 else 3
+    max_attempts = min(total_keys, 12) if total_keys > 0 else 3
     attempt = 0
 
     while attempt < max_attempts:
+        tried.add(assigned_key)
         try:
             if status_callback:
                 await status_callback({"status": f"Подключение к контейнеру (ключ #{assigned_key})..."})
@@ -114,6 +118,8 @@ async def run_antigravity_agent(
                 except asyncio.CancelledError:
                     raise
                 except Exception as poll_err:
+                    key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+                    assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                     consecutive_poll_errors += 1
                     logger.warning(f"⚠️ [POLL RETRY {consecutive_poll_errors}/10] Ключ #{assigned_key}: {type(poll_err).__name__}: {poll_err}")
                     if consecutive_poll_errors >= 10:
@@ -136,6 +142,8 @@ async def run_antigravity_agent(
                     break
 
             if "fail" in str(getattr(interaction, 'status', '')).lower():
+                key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+                assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                 raise Exception(f"Задача Antigravity завершилась ошибкой: {getattr(interaction, 'error', 'Unknown error')}")
 
             usage = extract_usage_tokens(interaction)
@@ -164,6 +172,10 @@ async def run_antigravity_agent(
                                 content = content.content
                             return content
                         except Exception as dl_err:
+                            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+                            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
+                            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+                            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                             err_txt = str(dl_err).lower()
                             if "404" in err_txt or "not_found" in err_txt or "not found" in err_txt:
                                 return None
@@ -218,6 +230,8 @@ async def run_antigravity_agent(
                                         if spath and "__pycache__" not in spath:
                                             real_paths_in_env.append(spath)
                         except Exception as le:
+                            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+                            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                             logger.warning(f"⚠️ [ENV FILES] Ошибка поиска: {le}")
 
                     for rp in real_paths_in_env:
@@ -233,7 +247,7 @@ async def run_antigravity_agent(
                                 file_urls[clean_path] = file_url
                                 download_success = True
                                 break
-
+            key_pool.mark_success(assigned_key, model=model_tag)
             return {
                 "text": output_text,
                 "files": {},
@@ -245,6 +259,8 @@ async def run_antigravity_agent(
             }
 
         except (asyncio.TimeoutError, TimeoutError):
+            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
             logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} не ответил за 30с.")
             key_pool.mark_exhausted(assigned_key, duration_seconds=1800)
             assigned_key = key_pool.get_next_key(exclude_index=assigned_key)
@@ -253,6 +269,8 @@ async def run_antigravity_agent(
             attempt += 1
 
         except Exception as e:
+            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
             err_lower = str(e).lower()
             logger.warning(f"[Antigravity Ошибка на ключе #{assigned_key}]: {e}")
 
