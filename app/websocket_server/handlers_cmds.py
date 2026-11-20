@@ -1165,7 +1165,7 @@ async def handle_antigravity_task(websocket, data):
             "chat_id": chat_uid
         })
 
-        asyncio.create_task(_maybe_update_rolling_summary(chat_uid))
+        #asyncio.create_task(_maybe_update_rolling_summary(chat_uid))
 
     except asyncio.CancelledError:
         logger.warning(f"🛑 [WS Antigravity] Задача {chat_uid} прервана! Очистка контекста...")

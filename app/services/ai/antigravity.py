@@ -64,7 +64,6 @@ async def run_antigravity_agent(
                     "model": "gemini-3.5-flash-lite",
                 }
             }
-
             if previous_interaction_id and environment_id:
                 kwargs["previous_interaction_id"] = previous_interaction_id
                 kwargs["environment"] = environment_id
@@ -140,6 +139,8 @@ async def run_antigravity_agent(
                 if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
                     logger.info(f"🏁 [ANTIGRAVITY DONE] Статус: {status_raw}")
                     break
+                if poll_count >= 100:
+                    raise Exception("Превышено время ожидания от контейнера Antigravity (5 мин)")
 
             if "fail" in str(getattr(interaction, 'status', '')).lower():
                 key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
@@ -268,6 +269,14 @@ async def run_antigravity_agent(
             assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
             err_lower = str(e).lower()
             logger.warning(f"[Antigravity Ошибка на ключе #{assigned_key}]: {e}")
+            err_str = str(e)
+            if "'quota_limit_value': '0'" in err_str or "ApiRequestsPerMinutePerProjectPerRegion" in err_str or "API_KEY_INVALID" in err_str or "401" in err_str:
+                key_pool.mark_dead_all_models(assigned_key)
+                assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
+                previous_interaction_id = None
+                environment_id = None
+                attempt += 1
+                continue
 
             if "timed out" in err_lower or "timeout" in err_lower:
                 key_pool.mark_exhausted(assigned_key, duration_seconds=1800)
