@@ -13,6 +13,7 @@ import os
 import shutil
 import re
 import urllib.parse
+import hashlib
 
 logger = logging.getLogger("WS_Server")
 
@@ -793,9 +794,9 @@ async def handle_antigravity_get_messages(websocket, data):
         await async_send(websocket, {
             "type": "antigravity_chat_history",
             "chat_uid": chat_uid,
-            "workspace_path": ws_path,
             "messages": msgs or [],
-            "synced_files": synced_files or {}
+            "synced_files": synced_files or {},
+            "synced_meta": build_synced_meta(chat_uid, synced_files or {})
         })
     except Exception as e:
         logger.error(f"[DB get_messages error] {e}")
@@ -803,6 +804,35 @@ async def handle_antigravity_get_messages(websocket, data):
         if cursor: await cursor.close()
         if conn: conn.close()
 
+def build_synced_meta(chat_uid: str, synced_files: dict) -> dict:
+    meta = {}
+    if not synced_files or not isinstance(synced_files, dict):
+        return meta
+    safe_uid = os.path.basename(chat_uid or 'common')
+    base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
+    for rel_p, f_url in synced_files.items():
+        norm_rel = str(rel_p).replace("\\", "/").lstrip("./")
+        local_p = os.path.abspath(os.path.join(base_dir, norm_rel))
+        if not local_p.startswith(base_dir + os.sep) or not os.path.isfile(local_p):
+            continue
+        f_size = None
+        f_hash = None
+        try:
+            f_size = os.path.getsize(local_p)
+            if f_size <= 50 * 1024 * 1024:
+                h = hashlib.sha256()
+                with open(local_p, "rb") as hf:
+                    for chunk in iter(lambda: hf.read(65536), b""):
+                        h.update(chunk)
+                f_hash = h.hexdigest()
+        except Exception:
+            pass
+        meta[norm_rel] = {
+            "url": f_url,
+            "size": f_size,
+            "sha256": f_hash
+        }
+    return meta
 
 async def handle_antigravity_create_chat(websocket, data):
     chat_uid = data.get("chat_uid") or f"chat_{int(time.time() * 1000)}"
@@ -1050,6 +1080,7 @@ async def handle_antigravity_task(websocket, data):
             "ui_msg_id": ui_msg_id,
             "text": agent_reply_text,
             "file_urls": result.get("file_urls", {}),
+            "file_meta": build_synced_meta(chat_uid, result.get("file_urls", {})),
             "environment_id": new_env_id,
             "interaction_id": new_interaction_id,
             "chat_id": chat_uid
