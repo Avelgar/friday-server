@@ -8,6 +8,8 @@ logger = logging.getLogger("AI_Service")
 
 
 def format_stateless_prompt(prompt_text: str, summary: str = None, recent_history: list = None) -> str:
+    if (not summary or not summary.strip()) and not recent_history:
+        return prompt_text
     blocks = []
     if summary and summary.strip():
         blocks.append(f"# Краткая сводка предыдущего диалога:\n{summary.strip()}")
@@ -87,7 +89,9 @@ async def run_direct_hydrogen(
 
     for model_name in ("models/gemini-3.6-flash", "models/gemini-3.5-flash-lite"):
         tried: set[int] = set()
-        attempts = min(total_keys, 3)
+        attempts = 2 if "3.6" in model_name else min(total_keys, 4)
+        req_timeout_ms = 12000 if "3.6" in model_name else 25000
+        wait_sec = 14.0 if "3.6" in model_name else 30.0
         thinking = "low" if "lite" in model_name or len(prompt_text.strip()) < 60 else "medium"
         generation_config = {
             "max_output_tokens": 16384,
