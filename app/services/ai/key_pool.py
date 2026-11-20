@@ -177,7 +177,7 @@ class GeminiKeyPool:
         return self.get_next_key(exclude_index=exclude_index, model=model)
 
 
-def build_http_options(timeout=60000):
+def build_http_options(timeout=60000, with_retry_opt: bool = True):
     client_args = {}
     async_client_args = {}
     if PROXY_URL:
@@ -190,16 +190,16 @@ def build_http_options(timeout=60000):
         "client_args": client_args or None,
         "async_client_args": async_client_args or None,
     }
-    if hasattr(types, "HttpRetryOptions"):
+    if with_retry_opt and hasattr(types, "HttpRetryOptions"):
         kwargs["retry_options"] = types.HttpRetryOptions(attempts=1)
 
     return types.HttpOptions(**kwargs)
 
 
-def create_genai_client(api_keys: list[str], key_index: int = 0, timeout=180000):
+def create_genai_client(api_keys: list[str], key_index: int = 0, timeout=180000, with_retry_opt: bool = True):
     api_key = api_keys[key_index] if api_keys and key_index < len(api_keys) else None
     return genai.Client(
-        http_options=build_http_options(timeout=timeout),
+        http_options=build_http_options(timeout=timeout, with_retry_opt=with_retry_opt),
         api_key=api_key
     )
 

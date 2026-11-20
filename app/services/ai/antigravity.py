@@ -160,29 +160,24 @@ async def run_antigravity_agent(
                 client = create_genai_client(api_keys, assigned_key, timeout=180000)
 
                 async def try_download_path(path_to_get: str):
-                    for retry in range(3):
+                    for retry in range(2):
                         try:
-                            dl_client = create_genai_client(api_keys, assigned_key, timeout=180000)
+                            dl_client = create_genai_client(api_keys, assigned_key, timeout=60000, with_retry_opt=False)
                             file_data = await asyncio.wait_for(
                                 asyncio.to_thread(dl_client.environments.files.download, environment=env_id, path=path_to_get),
-                                timeout=180.0
+                                timeout=60.0
                             )
                             content = file_data.read() if hasattr(file_data, "read") else file_data
                             if hasattr(content, "content"):
                                 content = content.content
                             return content
                         except Exception as dl_err:
-                            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
-                            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
-                            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
-                            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                             err_txt = str(dl_err).lower()
                             if "404" in err_txt or "not_found" in err_txt or "not found" in err_txt:
                                 return None
-                            logger.warning(f"⚠️ [SYNC RETRY {retry+1}/3] '{path_to_get}': {dl_err}")
+                            logger.warning(f"⚠️ [SYNC RETRY {retry+1}/2] '{path_to_get}': {type(dl_err).__name__}: {dl_err}")
                             await asyncio.sleep(1.5)
                     return None
-
                 real_paths_in_env = None
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
@@ -335,10 +330,10 @@ async def list_environment_files(api_keys: list[str], env_id: str, key_index: in
 
 
 async def download_environment_file(api_keys: list[str], env_id: str, remote_path: str, chat_uid: str, key_index: int = 0):
-    dl_client = create_genai_client(api_keys, key_index or 0, timeout=180000)
+    dl_client = create_genai_client(api_keys, key_index or 0, timeout=60000, with_retry_opt=False)
     file_data = await asyncio.wait_for(
         asyncio.to_thread(dl_client.environments.files.download, environment=env_id, path=remote_path),
-        timeout=180.0
+        timeout=60.0
     )
     content = file_data.read() if hasattr(file_data, "read") else file_data
     if hasattr(content, "content"):

@@ -80,41 +80,42 @@ async def run_direct_hydrogen(
     assigned_key: int = None
 ):
     full_input = format_stateless_prompt(prompt_text, summary=summary, recent_history=recent_history)
-    tools = [
-        {"type": "google_search"},
-        {"type": "url_context"},
-    ]
-    generation_config = {
-        "max_output_tokens": 16384,
-        "thinking_level": "medium",
-    }
+    has_url = ("http://" in prompt_text or "https://" in prompt_text)
+    tools = [{"type": "url_context"}] if has_url else None
 
     total_keys = len(api_keys) if api_keys else 1
 
-    for model_name in ("models/gemini-4-hydrogen", "models/gemini-3.6-flash"):
+    for model_name in ("models/gemini-3.6-flash", "models/gemini-3.5-flash-lite"):
         tried: set[int] = set()
-        attempts = min(total_keys, 6)
+        attempts = min(total_keys, 3)
+        thinking = "low" if "lite" in model_name or len(prompt_text.strip()) < 60 else "medium"
+        generation_config = {
+            "max_output_tokens": 16384,
+            "thinking_level": thinking,
+        }
 
         for _ in range(attempts):
             key_idx = key_pool.get_best_key(model=model_name, exclude_indices=tried)
             tried.add(key_idx)
-            client = create_genai_client(api_keys, key_idx, timeout=45000)
+            client = create_genai_client(api_keys, key_idx, timeout=25000)
 
             try:
                 if status_callback:
-                    short_m = "Hydrogen" if "hydrogen" in model_name else "3.6 Flash"
-                    await status_callback({"status": f"Прямой ответ {short_m} (ключ #{key_idx})..."})
+                    short_m = "3.6 Flash" if "3.6" in model_name else "3.5 Lite"
+                    await status_callback({"status": f"Быстрый ответ {short_m} (ключ #{key_idx})..."})
+
+                create_kw = {
+                    "model": model_name,
+                    "system_instruction": DIRECT_SYSTEM_INSTRUCTION,
+                    "input": full_input,
+                    "generation_config": generation_config,
+                }
+                if tools:
+                    create_kw["tools"] = tools
 
                 interaction = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        client.interactions.create,
-                        model=model_name,
-                        system_instruction=DIRECT_SYSTEM_INSTRUCTION,
-                        input=full_input,
-                        tools=tools,
-                        generation_config=generation_config,
-                    ),
-                    timeout=50.0
+                    asyncio.to_thread(client.interactions.create, **create_kw),
+                    timeout=30.0
                 )
 
                 key_pool.mark_success(key_idx, model=model_name)
