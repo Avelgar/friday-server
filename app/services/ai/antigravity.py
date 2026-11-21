@@ -61,7 +61,7 @@ async def run_antigravity_agent(
                 "tools": tools,
                 "agent_config": {
                     "type": "antigravity",
-                    "model": "gemini-3.8-flash",
+                    #"model": "gemini-3.8-flash",
                 }
             }
             if previous_interaction_id and environment_id:
