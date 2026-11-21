@@ -195,7 +195,20 @@ def build_http_options(timeout=60000, with_retry_opt: bool = True):
 
     return types.HttpOptions(**kwargs)
 
-
+def mark_dead_all_models(self, key_index: int, duration_seconds: float = 86400):
+        if not self.keys:
+            return
+        with self._lock:
+            until = time.time() + duration_seconds
+            models_map = self._state.setdefault("models", {})
+            all_models = set(models_map.keys()) | {"antigravity", "gemini-3.5-flash-lite"}
+            for m in all_models:
+                entry = self._entry_locked(m, key_index)
+                entry["exhausted_until"] = until
+                entry["errors_today"] = int(entry.get("errors_today", 0)) + 10
+            self._save_state_locked()
+        logger.error(f"☠️ [Key Pool] Ключ #{key_index} заблокирован для ВСЕХ моделей на 24ч.")
+        
 def create_genai_client(api_keys: list[str], key_index: int = 0, timeout=180000, with_retry_opt: bool = True):
     api_key = api_keys[key_index] if api_keys and key_index < len(api_keys) else None
     return genai.Client(
