@@ -139,8 +139,8 @@ async def run_antigravity_agent(
                 if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
                     logger.info(f"🏁 [ANTIGRAVITY DONE] Статус: {status_raw}")
                     break
-                if poll_count >= 100:
-                    raise Exception("Превышено время ожидания от контейнера Antigravity (5 мин)")
+                #if poll_count >= 100:
+                    #raise Exception("Превышено время ожидания от контейнера Antigravity (5 мин)")
 
             if "fail" in str(getattr(interaction, 'status', '')).lower():
                 key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
