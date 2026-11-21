@@ -7,7 +7,7 @@ from .key_pool import GeminiKeyPool, create_genai_client, extract_interaction_te
 logger = logging.getLogger("AI_Service")
 
 MODEL_ID = "models/gemini-3.5-flash-lite"
-
+MODEL_ID_DIRECT = "models/gemini-3.5-flash-lite"
 
 def format_stateless_prompt(prompt_text: str, summary: str = None, recent_history: list = None) -> str:
     if (not summary or not summary.strip()) and not recent_history:
@@ -154,7 +154,7 @@ async def run_direct_hydrogen(
     attempts = min(total_keys, 6)
 
     for _ in range(attempts):
-        key_idx = key_pool.get_best_key(model=MODEL_ID, exclude_indices=tried)
+        key_idx = key_pool.get_best_key(model=MODEL_ID_DIRECT, exclude_indices=tried)
         tried.add(key_idx)
         client = create_genai_client(api_keys, key_idx, timeout=25000)
 
@@ -169,7 +169,7 @@ async def run_direct_hydrogen(
 
             stream = await asyncio.wait_for(
                 client.aio.models.generate_content_stream(
-                    model=MODEL_ID,
+                    model=MODEL_ID_DIRECT,
                     contents=contents,
                     config=config,
                 ),
@@ -223,7 +223,7 @@ async def run_direct_hydrogen(
             if not flushed_any and early_buf and chunk_callback:
                 await chunk_callback(early_buf)
 
-            key_pool.mark_success(key_idx, model=MODEL_ID)
+            key_pool.mark_success(key_idx, model=MODEL_ID_DIRECT)
             logger.info(f"⚡ [DIRECT STREAM 3.5-lite] Ключ #{key_idx} | Токены: in={usage_info['input']} cached={usage_info['cached']} out={usage_info['output']}")
 
             return {
@@ -244,7 +244,7 @@ async def run_direct_hydrogen(
                     "assigned_key": key_idx,
                     "usage": usage_info,
                 }
-            key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID)
+            key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID_DIRECT)
         except Exception as e:
             err_str = str(e)
             err_lower = err_str.lower()
@@ -262,9 +262,9 @@ async def run_direct_hydrogen(
             elif any(n in err_lower for n in ["eof", "ssl", "connection reset", "broken pipe"]):
                 await asyncio.sleep(1.0)
             elif "429" in err_lower or "quota" in err_lower or "too_many_requests" in err_lower:
-                key_pool.mark_exhausted(key_idx, duration_seconds=10800, model=MODEL_ID)
+                key_pool.mark_exhausted(key_idx, duration_seconds=10800, model=MODEL_ID_DIRECT)
             else:
-                key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID)
+                key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID_DIRECT)
         finally:
             try:
                 if hasattr(client, "aio") and hasattr(client.aio, "aclose"):
