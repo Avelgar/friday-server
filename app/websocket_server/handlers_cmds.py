@@ -1232,11 +1232,19 @@ async def handle_antigravity_list_server_files(websocket, data):
                 rel_p = os.path.relpath(full_p, base_dir).replace("\\", "/")
                 try:
                     st = os.stat(full_p)
+                    f_hash = None
+                    if st.st_size <= 50 * 1024 * 1024:
+                        h = hashlib.sha256()
+                        with open(full_p, "rb") as hf:
+                            for chunk in iter(lambda: hf.read(65536), b""):
+                                h.update(chunk)
+                        f_hash = h.hexdigest()
                     files.append({
                         "path": rel_p,
                         "name": fname,
                         "size": st.st_size,
                         "mtime": int(st.st_mtime),
+                        "sha256": f_hash,
                         "url": f"https://friday-assistant.ru/uploads/{safe_uid}/{urllib.parse.quote(rel_p)}?v={int(st.st_mtime)}"
                     })
                 except Exception:
