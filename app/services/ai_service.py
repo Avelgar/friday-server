@@ -48,11 +48,12 @@ class AIService:
     async def classify_route(self, prompt_text: str) -> str:
         return await ai_router.classify_route(self.key_pool, self.api_keys, prompt_text)
 
-    async def run_direct_hydrogen(self, prompt_text: str, summary: str = None, recent_history: list = None, status_callback=None, assigned_key: int = None):
+    async def run_direct_hydrogen(self, prompt_text: str, summary: str = None, recent_history: list = None, status_callback=None, chunk_callback=None, assigned_key: int = None):
         return await ai_router.run_direct_hydrogen(
             self.key_pool, self.api_keys, prompt_text,
             summary=summary, recent_history=recent_history,
-            status_callback=status_callback, assigned_key=assigned_key
+            status_callback=status_callback, chunk_callback=chunk_callback,
+            assigned_key=assigned_key
         )
 
     async def generate_rolling_summary(self, prev_summary: str, messages: list) -> str | None:

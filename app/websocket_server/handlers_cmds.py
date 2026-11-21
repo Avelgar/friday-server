@@ -1051,6 +1051,16 @@ async def handle_antigravity_task(websocket, data):
             **status_payload
         })
 
+    async def send_chunk_update(delta: str):
+        if not delta:
+            return
+        await send_antigravity_event(user_token, websocket, {
+            "type": "antigravity_chunk",
+            "ui_msg_id": ui_msg_id,
+            "chat_id": chat_uid,
+            "delta": delta
+        })
+
     active_antigravity_tasks[chat_uid] = asyncio.current_task()
 
     try:
@@ -1069,6 +1079,7 @@ async def handle_antigravity_task(websocket, data):
                 summary=chat_summary,
                 recent_history=recent_history,
                 status_callback=send_status_update,
+                chunk_callback=send_chunk_update,
                 assigned_key=assigned_key
             )
             if direct_res.get("escalate"):
