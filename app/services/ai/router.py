@@ -156,6 +156,7 @@ async def run_direct_hydrogen(
     total_keys = len(api_keys) if api_keys else 1
     tried: set[int] = set()
     attempts = min(total_keys, 6)
+    router_model = to_api_model(get_models_config()["router_model"])
 
     for _ in range(attempts):
         key_idx = key_pool.get_best_key(model=router_model, exclude_indices=tried)
