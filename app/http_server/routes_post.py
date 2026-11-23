@@ -425,18 +425,18 @@ def do_POST(self):
 
         elif self.path == '/admin/models':
             try:
-                content_length = int(self.headers.get('Content-Length', 0))
-                body_raw = self.rfile.read(content_length) if content_length > 0 else b'{}'
-                payload = json.loads(body_raw.decode('utf-8'))
+                if self.path.split('?')[0] == '/admin/models':
+                    expected_secret = os.environ.get('ADMIN_SECRET') or JWT_SECRET
+                    if data.get('admin_key') != expected_secret:
+                        return self.send_json(403, {"status": "error", "message": "Неверный пароль администратора"})
 
-                expected_secret = os.environ.get('ADMIN_SECRET') or JWT_SECRET
-                if payload.get('admin_key') != expected_secret:
-                    return self.send_json(403, {"status": "error", "message": "Неверный пароль администратора"})
+                    from app.services.ai.model_config import save_models_config
+                    saved = save_models_config(data)
+                    logger.info(f"[Admin] Обновлены модели: {saved}")
+                    return self.send_json(200, {"status": "success", "config": saved})
 
-                from app.services.ai.model_config import save_models_config
-                saved = save_models_config(payload)
-                logger.info(f"[Admin] Обновлены модели: {saved}")
-                return self.send_json(200, {"status": "success", "config": saved})
+                conn = get_db_connection()
+                cursor = conn.cursor(dictionary=True, buffered=True)
             except Exception as e:
                 return self.send_json(400, {"status": "error", "message": str(e)})
 
