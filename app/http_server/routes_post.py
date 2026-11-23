@@ -423,6 +423,23 @@ def do_POST(self):
             notify_ws(user_id, {"type": "message_edited", "dialog_id": row['dialog_id'], "message_id": msg_id, "text": new_text})
             self.send_json(200, {"status": "success", "message": "Сообщение обновлено"})
 
+        elif self.path == '/admin/models':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                body_raw = self.rfile.read(content_length) if content_length > 0 else b'{}'
+                payload = json.loads(body_raw.decode('utf-8'))
+
+                expected_secret = os.environ.get('ADMIN_SECRET') or JWT_SECRET
+                if payload.get('admin_key') != expected_secret:
+                    return self.send_json(403, {"status": "error", "message": "Неверный пароль администратора"})
+
+                from app.services.ai.model_config import save_models_config
+                saved = save_models_config(payload)
+                logger.info(f"[Admin] Обновлены модели: {saved}")
+                return self.send_json(200, {"status": "success", "config": saved})
+            except Exception as e:
+                return self.send_json(400, {"status": "error", "message": str(e)})
+
         else:
             self.send_error(404)
 

@@ -8,6 +8,7 @@ import urllib.parse
 from .key_pool import GeminiKeyPool, create_genai_client, extract_interaction_text, extract_usage_tokens
 from .prompts import AGENT_SYSTEM_INSTRUCTION
 from .router import format_stateless_prompt
+from .model_config import get_models_config, normalize_model_name
 
 logger = logging.getLogger("AI_Service")
 SYS_DIRS = {".", "..", "usr", "bin", "lib", "lib64", "lib32", "libx32", "sbin", "proc", "sys", "dev", "etc", "var", "boot", "run", "srv", "snap", "media", "mnt"}
@@ -41,6 +42,7 @@ async def run_antigravity_agent(
 
     max_attempts = min(total_keys, 12) if total_keys > 0 else 3
     attempt = 0
+    ag_model = normalize_model_name(get_models_config()["antigravity_model"])
 
     while attempt < max_attempts:
         tried.add(assigned_key)
@@ -61,7 +63,7 @@ async def run_antigravity_agent(
                 "tools": tools,
                 "agent_config": {
                     "type": "antigravity",
-                    "model": "gemini-3.6-flash",
+                    "model": ag_model,
                 }
             }
             if previous_interaction_id and environment_id:

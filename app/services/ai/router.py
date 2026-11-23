@@ -3,11 +3,9 @@ import asyncio
 import logging
 from google.genai import types
 from .key_pool import GeminiKeyPool, create_genai_client, extract_interaction_text
-
+from .model_config import get_models_config, to_api_model
 logger = logging.getLogger("AI_Service")
 
-MODEL_ID = "models/gemini-3.5-flash-lite"
-MODEL_ID_DIRECT = "models/gemini-3.5-flash-lite"
 
 def format_stateless_prompt(prompt_text: str, summary: str = None, recent_history: list = None) -> str:
     if (not summary or not summary.strip()) and not recent_history:
@@ -99,8 +97,10 @@ async def classify_route(key_pool: GeminiKeyPool, api_keys: list[str], prompt_te
     tried: set[int] = set()
     attempts = min(len(api_keys), 4) if api_keys else 1
 
+    router_model = to_api_model(get_models_config()["router_model"])
+
     for _ in range(attempts):
-        key_idx = key_pool.get_best_key(model=MODEL_ID, exclude_indices=tried)
+        key_idx = key_pool.get_best_key(model=router_model, exclude_indices=tried)
         tried.add(key_idx)
         client = create_genai_client(api_keys, key_idx, timeout=12000)
         try:
@@ -108,14 +108,14 @@ async def classify_route(key_pool: GeminiKeyPool, api_keys: list[str], prompt_te
             interaction = await asyncio.wait_for(
                 asyncio.to_thread(
                     client.interactions.create,
-                    model=MODEL_ID,
+                    model=router_model,
                     system_instruction=ROUTER_SYSTEM_INSTRUCTION,
                     input=prompt_text[:2000],
                     generation_config={"max_output_tokens": 16, "thinking_level": "low"},
                 ),
                 timeout=14.0
             )
-            key_pool.mark_success(key_idx, model=MODEL_ID)
+            key_pool.mark_success(key_idx, model=router_model)
             ans = extract_interaction_text(interaction).strip().upper()
             route = "ANTIGRAVITY" if "ANTIGRAVITY" in ans else "DIRECT"
             logger.info(f"🧭 [ROUTER 3.5-lite] Ключ #{key_idx} -> {route} ('{ans[:25]}')")
@@ -125,7 +125,7 @@ async def classify_route(key_pool: GeminiKeyPool, api_keys: list[str], prompt_te
             if _is_dead_project_error(str(e)):
                 key_pool.mark_dead_all_models(key_idx)
             else:
-                key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID)
+                key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=router_model)
 
     return "DIRECT"
 
@@ -143,10 +143,14 @@ async def run_direct_hydrogen(
     from .prompts import DIRECT_SYSTEM_INSTRUCTION
 
     contents = build_direct_contents(prompt_text, recent_history=recent_history)
+    cfg = get_models_config()
+    direct_model = to_api_model(cfg["direct_model"])
+    is_25 = "2.5" in direct_model
+    thinking_cfg = types.ThinkingConfig(thinking_budget=0) if is_25 else types.ThinkingConfig(thinking_level="low")
     config = types.GenerateContentConfig(
         system_instruction=DIRECT_SYSTEM_INSTRUCTION,
         max_output_tokens=16384,
-        thinking_config=types.ThinkingConfig(thinking_level="low"),
+        thinking_config=thinking_cfg,
     )
 
     total_keys = len(api_keys) if api_keys else 1
@@ -154,7 +158,7 @@ async def run_direct_hydrogen(
     attempts = min(total_keys, 6)
 
     for _ in range(attempts):
-        key_idx = key_pool.get_best_key(model=MODEL_ID_DIRECT, exclude_indices=tried)
+        key_idx = key_pool.get_best_key(model=router_model, exclude_indices=tried)
         tried.add(key_idx)
         client = create_genai_client(api_keys, key_idx, timeout=25000)
 
@@ -169,7 +173,7 @@ async def run_direct_hydrogen(
 
             stream = await asyncio.wait_for(
                 client.aio.models.generate_content_stream(
-                    model=MODEL_ID_DIRECT,
+                    model=router_model,
                     contents=contents,
                     config=config,
                 ),
@@ -223,7 +227,7 @@ async def run_direct_hydrogen(
             if not flushed_any and early_buf and chunk_callback:
                 await chunk_callback(early_buf)
 
-            key_pool.mark_success(key_idx, model=MODEL_ID_DIRECT)
+            key_pool.mark_success(key_idx, model=router_model)
             logger.info(f"⚡ [DIRECT STREAM 3.5-lite] Ключ #{key_idx} | Токены: in={usage_info['input']} cached={usage_info['cached']} out={usage_info['output']}")
 
             return {
@@ -244,7 +248,7 @@ async def run_direct_hydrogen(
                     "assigned_key": key_idx,
                     "usage": usage_info,
                 }
-            key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID_DIRECT)
+            key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=router_model)
         except Exception as e:
             err_str = str(e)
             err_lower = err_str.lower()
@@ -262,9 +266,9 @@ async def run_direct_hydrogen(
             elif any(n in err_lower for n in ["eof", "ssl", "connection reset", "broken pipe"]):
                 await asyncio.sleep(1.0)
             elif "429" in err_lower or "quota" in err_lower or "too_many_requests" in err_lower:
-                key_pool.mark_exhausted(key_idx, duration_seconds=10800, model=MODEL_ID_DIRECT)
+                key_pool.mark_exhausted(key_idx, duration_seconds=10800, model=router_model)
             else:
-                key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=MODEL_ID_DIRECT)
+                key_pool.mark_exhausted(key_idx, duration_seconds=1800, model=router_model)
         finally:
             try:
                 if hasattr(client, "aio") and hasattr(client.aio, "aclose"):
