@@ -4,6 +4,7 @@ import logging
 from google.genai import types
 from .key_pool import GeminiKeyPool, create_genai_client, extract_interaction_text
 from .model_config import get_models_config, to_api_model
+from .prompts import DIRECT_SYSTEM_INSTRUCTION, ROUTER_SYSTEM_INSTRUCTION
 logger = logging.getLogger("AI_Service")
 
 
