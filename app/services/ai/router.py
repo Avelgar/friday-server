@@ -87,38 +87,50 @@ def _is_dead_project_error(err_str: str) -> bool:
 
 
 async def classify_route(key_pool: GeminiKeyPool, api_keys: list[str], prompt_text: str) -> str:
+    clean_p = prompt_text.strip().lower()
+
     if "Скачай через: curl" in prompt_text or "Ссылка: https://friday-assistant.ru/uploads/" in prompt_text:
         return "ANTIGRAVITY"
 
-    clean_p = prompt_text.strip().lower()
-    if len(clean_p) < 35 and not any(k in clean_p for k in [".", "/", "\\", "файл", "код", "сделай", "создай", "напиши", "удали", "запусти", "проект", "папк", "покажи", "посмотр", "3д", "stl", "docx"]):
+    if any(w in clean_p for w in ("антигравити", "antigravity", "песочниц")):
+        return "ANTIGRAVITY"
+
+    if len(clean_p) < 35 and not any(k in clean_p for k in [".", "/", "\\", "файл", "код", "сделай", "создай", "напиши", "удали", "запусти", "проект", "папк", "покажи", "посмотр", "исправ", "таблиц", "гост", "глав", "3д", "stl", "docx"]):
         return "DIRECT"
+
+    router_model = to_api_model(get_models_config()["router_model"])
+    is_25 = "2.5" in router_model
+    thinking_cfg = types.ThinkingConfig(thinking_budget=0) if is_25 else types.ThinkingConfig(thinking_level="low")
+    cfg = types.GenerateContentConfig(
+        system_instruction=ROUTER_SYSTEM_INSTRUCTION,
+        max_output_tokens=512,
+        thinking_config=thinking_cfg,
+    )
 
     tried: set[int] = set()
     attempts = min(len(api_keys), 4) if api_keys else 1
-
-    router_model = to_api_model(get_models_config()["router_model"])
 
     for _ in range(attempts):
         key_idx = key_pool.get_best_key(model=router_model, exclude_indices=tried)
         tried.add(key_idx)
         client = create_genai_client(api_keys, key_idx, timeout=12000)
         try:
-            from .prompts import ROUTER_SYSTEM_INSTRUCTION
-            interaction = await asyncio.wait_for(
+            resp = await asyncio.wait_for(
                 asyncio.to_thread(
-                    client.interactions.create,
+                    client.models.generate_content,
                     model=router_model,
-                    system_instruction=ROUTER_SYSTEM_INSTRUCTION,
-                    input=prompt_text[:2000],
-                    generation_config={"max_output_tokens": 16, "thinking_level": "low"},
+                    contents=prompt_text[:2000],
+                    config=cfg,
                 ),
                 timeout=14.0
             )
             key_pool.mark_success(key_idx, model=router_model)
-            ans = extract_interaction_text(interaction).strip().upper()
+            ans = (getattr(resp, "text", None) or "").strip().upper()
+            if not ans:
+                logger.warning(f"⚠️ [ROUTER] Ключ #{key_idx} вернул пустой ответ, отдаём в ANTIGRAVITY")
+                return "ANTIGRAVITY"
             route = "ANTIGRAVITY" if "ANTIGRAVITY" in ans else "DIRECT"
-            logger.info(f"🧭 [ROUTER 3.5-lite] Ключ #{key_idx} -> {route} ('{ans[:25]}')")
+            logger.info(f"🧭 [ROUTER {router_model}] Ключ #{key_idx} -> {route} ('{ans[:25]}')")
             return route
         except Exception as e:
             logger.warning(f"⚠️ [ROUTER] Сбой на ключе #{key_idx}: {e}")
