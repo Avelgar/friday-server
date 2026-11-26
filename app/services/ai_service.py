@@ -79,7 +79,7 @@ class AIService:
         file_manifest: list = None,
         selected_files: list = None,
         need_network: bool = False,
-        max_total_tokens: int = 60_000,
+        max_total_tokens: int = 85_000,
         **kwargs,
     ):
         return await ag.run_antigravity_agent(

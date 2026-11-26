@@ -61,19 +61,18 @@ def format_manifest_block(file_manifest: list | None, selected_files: list | Non
         return "Файлов на сервере пока нет."
 
     selected_norm = {
-        f.strip().replace("\\", "/").lstrip("./")
+        re.sub(r"^(\./)+", "", f.strip().replace("\\", "/")).lstrip("/")
         for f in (selected_files or [])
         if f and f.strip()
     }
 
-    # Если выбран конкретный список файлов — поднимаем их наверх и ограничиваем хвост
     ordered = list(file_manifest)
     if selected_norm:
         priority = [f for f in ordered if f["path"] in selected_norm]
         others = [f for f in ordered if f["path"] not in selected_norm]
-        ordered = priority + others[:8]
+        ordered = priority + others[:6]
     else:
-        ordered = ordered[:20]
+        ordered = ordered[:15]
 
     lines = []
     for f in ordered:
@@ -104,7 +103,7 @@ def format_stateless_prompt(
         blocks.append(f"# Структура проекта (с сервера):\n{tree_txt}")
 
     manifest_txt = format_manifest_block(file_manifest, selected_files=selected_files, with_urls=True)
-    blocks.append(f"# Файлы на сервере (скачивай через curl -sL --create-dirs -o /workspace/<путь> \"<url>\"):\n{manifest_txt}")
+    blocks.append(f"# Файлы на сервере (скачивай через curl -sL -m 20 --create-dirs -o /workspace/<путь> \"<url>\"):\n{manifest_txt}")
 
     entries = _compress_history_entries(recent_history, char_budget=ANTIGRAVITY_HISTORY_CHAR_BUDGET)
     if entries:
@@ -173,7 +172,11 @@ def parse_antigravity_call(text: str) -> dict | None:
     if files_m:
         raw_files = files_m.group(1).strip()
         if raw_files.lower() not in ("нет", "none", "-", "пусто", ""):
-            files = [f.strip().replace("\\", "/").lstrip("./") for f in raw_files.split(",") if f.strip()]
+            files = [
+                re.sub(r"^(\./)+", "", f.strip().replace("\\", "/")).lstrip("/")
+                for f in raw_files.split(",")
+                if f.strip()
+            ]
         body = body[:files_m.start()] + body[files_m.end():]
 
     task = body.strip(" |\n\t")
@@ -233,11 +236,11 @@ async def run_direct(
 
     total_keys = len(api_keys) if api_keys else 1
     max_key_attempts = min(total_keys, 4)
+    afc_cfg = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
 
     for model_name in model_candidates:
         is_25 = "2.5" in model_name
-        thinking_cfg = types.ThinkingConfig(thinking_budget=0) if is_25 else types.ThinkingConfig(thinking_level="high")
-        afc_cfg = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
+        thinking_cfg = types.ThinkingConfig(thinking_budget=0) if is_25 else types.ThinkingConfig(thinking_level="low")
         config_kwargs = {
             "system_instruction": full_system_instruction,
             "max_output_tokens": 8192,

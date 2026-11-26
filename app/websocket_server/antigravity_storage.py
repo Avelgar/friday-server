@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import hashlib
@@ -83,14 +84,23 @@ def detect_requested_ide_tag(text: str) -> str | None:
     return None
 
 
+def _canonical_upload_path(rel_p: str) -> str:
+    """Превращает префиксные имена вроде mwxjjq7x_js__entities.js в чистый путь js/entities.js."""
+    m = re.match(r"^[a-z0-9]{7,10}_(.+__.+)$", rel_p)
+    if m:
+        return m.group(1).replace("__", "/").lstrip("/")
+    return rel_p
+
+
 def build_synced_meta(chat_uid: str, synced_files: dict) -> dict:
     meta = {}
     if not synced_files or not isinstance(synced_files, dict):
         return meta
-    safe_uid = os.path.basename(chat_uid or "common")
+    safe_uid = os.path.basename(chat_uid or 'common')
     base_dir = os.path.abspath(os.path.join(UPLOADS_DIR, safe_uid))
     for rel_p, f_url in synced_files.items():
-        norm_rel = str(rel_p).replace("\\", "/").lstrip("./")
+        norm_rel = str(rel_p).replace("\\", "/")
+        norm_rel = re.sub(r"^(\./)+", "", norm_rel).lstrip("/")
         local_p = os.path.abspath(os.path.join(base_dir, norm_rel))
         if not local_p.startswith(base_dir + os.sep) or not os.path.isfile(local_p):
             continue
@@ -123,9 +133,10 @@ def build_server_file_manifest(chat_uid: str, synced_files: dict | None = None) 
     url_map = {}
     if isinstance(synced_files, dict):
         for k, v in synced_files.items():
-            url_map[str(k).replace("\\", "/").lstrip("./")] = v
+            clean_k = re.sub(r"^(\./)+", "", str(k).replace("\\", "/")).lstrip("/")
+            url_map[clean_k] = v
 
-    manifest = []
+    raw_items = []
     for root, _, filenames in os.walk(base_dir):
         for fname in filenames:
             full_p = os.path.abspath(os.path.join(root, fname))
@@ -144,8 +155,11 @@ def build_server_file_manifest(chat_uid: str, synced_files: dict | None = None) 
                     f"https://friday-assistant.ru/uploads/{safe_uid}/"
                     f"{urllib.parse.quote(rel_p)}?v={int(st.st_mtime)}"
                 )
-                manifest.append({
-                    "path": rel_p,
+                canonical = _canonical_upload_path(rel_p)
+                raw_items.append({
+                    "path": canonical,
+                    "raw_path": rel_p,
+                    "is_prefixed": canonical != rel_p,
                     "size": st.st_size,
                     "lines": lines_cnt,
                     "mtime": int(st.st_mtime),
@@ -154,5 +168,20 @@ def build_server_file_manifest(chat_uid: str, synced_files: dict | None = None) 
             except Exception:
                 pass
 
-    manifest.sort(key=lambda x: x["mtime"], reverse=True)
-    return manifest
+    # Сортируем от самых свежих к старым и оставляем по 1 самой новой версии каждого файла
+    raw_items.sort(key=lambda x: (x["mtime"], not x["is_prefixed"]), reverse=True)
+    deduped = []
+    seen_paths = set()
+    for item in raw_items:
+        if item["path"] in seen_paths:
+            continue
+        seen_paths.add(item["path"])
+        deduped.append({
+            "path": item["path"],
+            "size": item["size"],
+            "lines": item["lines"],
+            "mtime": item["mtime"],
+            "url": item["url"],
+        })
+
+    return deduped

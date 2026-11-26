@@ -15,15 +15,19 @@ logger = logging.getLogger("AI_Service")
 SYS_DIRS = {".", "..", "usr", "bin", "lib", "lib64", "lib32", "libx32", "sbin", "proc", "sys", "dev", "etc", "var", "boot", "run", "srv", "snap", "media", "mnt"}
 
 
-class AsyncAntigravityLimiter:
-    """Асинхронное скользящее окно RPM и TPM (60 сек) для квоты Antigravity (100K TPM)."""
+class BudgetExhaustedError(RuntimeError):
+    """Остановка по нашему потолку max_total_tokens (ключ здоров, ретраить не нужно)."""
 
-    def __init__(self, max_rpm: int = 50, max_tpm: int = 90_000, min_headroom: int = 25_000):
+
+class AsyncAntigravityLimiter:
+    """Асинхронное скользящее окно RPM и TPM (60 сек) по некэшированным токенам."""
+
+    def __init__(self, max_rpm: int = 50, max_tpm: int = 90_000, min_headroom: int = 15_000):
         self.max_rpm = max_rpm
         self.max_tpm = max_tpm
         self.min_headroom = min_headroom
         self._lock = asyncio.Lock()
-        self._entries: deque[list] = deque()  # [timestamp, tokens]
+        self._entries: deque[list] = deque()
 
     def _prune(self, now: float) -> None:
         cutoff = now - 60.0
@@ -34,6 +38,7 @@ class AsyncAntigravityLimiter:
         need = max(self.min_headroom, estimated_tokens)
         while True:
             sleep_for = 0.0
+            used_tpm = 0
             async with self._lock:
                 now = time.monotonic()
                 self._prune(now)
@@ -50,20 +55,20 @@ class AsyncAntigravityLimiter:
                 else:
                     sleep_for = 1.0
 
-            logger.info(f"⏳ [AG LIMITER] Окно TPM заполнено, ждём {sleep_for:.1f}с...")
+            logger.info(f"⏳ [AG LIMITER] Окно TPM заполнено ({used_tpm}/{self.max_tpm}), ждём {sleep_for:.1f}с...")
             if status_callback:
                 await status_callback({"status": f"Ожидание окна лимита TPM ({sleep_for:.0f}с)..."})
             await asyncio.sleep(sleep_for)
 
-    async def finalize(self, slot: list, actual_tokens: int) -> None:
-        if actual_tokens <= 0:
+    async def finalize(self, slot: list, actual_billable_tokens: int) -> None:
+        if actual_billable_tokens <= 0:
             return
         async with self._lock:
             slot[0] = time.monotonic()
-            slot[1] = actual_tokens
+            slot[1] = actual_billable_tokens
 
 
-ag_limiter = AsyncAntigravityLimiter(max_rpm=50, max_tpm=90_000, min_headroom=25_000)
+ag_limiter = AsyncAntigravityLimiter(max_rpm=50, max_tpm=90_000, min_headroom=15_000)
 
 
 def _is_dead_project_error(err_str: str) -> bool:
@@ -91,6 +96,16 @@ def _describe_step(step) -> str:
     return f"{stype}: {preview}" if preview else str(stype)
 
 
+def _sanitize_sync_path(raw_path: str) -> str | None:
+    p = raw_path.strip().replace("\\", "/")
+    p = re.sub(r"^(\./)+", "", p).lstrip("/")
+    if not p or p in (".", "..", "...") or set(p) <= {".", "/"}:
+        return None
+    if ".." in p.split("/"):
+        return None
+    return p
+
+
 async def run_antigravity_agent(
     key_pool: GeminiKeyPool,
     api_keys: list[str],
@@ -103,7 +118,7 @@ async def run_antigravity_agent(
     file_manifest: list = None,
     selected_files: list = None,
     need_network: bool = False,
-    max_total_tokens: int = 60_000,
+    max_total_tokens: int = 85_000,
     **kwargs,
 ):
     total_keys = len(api_keys)
@@ -131,10 +146,10 @@ async def run_antigravity_agent(
     if need_network:
         tools.extend([{"type": "google_search"}, {"type": "url_context"}])
 
-    max_attempts = min(max(total_keys, 2), 6)
+    max_attempts = min(max(total_keys, 2), 4)
     model_idx = 0
 
-    for attempt in range(max_attempts):
+    for _ in range(max_attempts):
         ag_model = ag_models_queue[min(model_idx, len(ag_models_queue) - 1)]
         tried.add(assigned_key)
         slot = await ag_limiter.acquire(est_tokens, status_callback=status_callback)
@@ -212,15 +227,18 @@ async def run_antigravity_agent(
                     logger.info(f"🏁 [ANTIGRAVITY DONE] Статус: {status_raw}")
                     break
 
-                if poll_count >= 72:  # 180 секунд
+                if poll_count >= 72:
                     raise TimeoutError(f"Песочница ({ag_model}) зависла дольше 180 секунд.")
 
             usage = extract_usage_tokens(interaction)
-            await ag_limiter.finalize(slot, usage["total"] or est_tokens)
-            logger.info(f"📊 [ANTIGRAVITY USAGE] Ключ #{assigned_key} | in={usage['input']} cached={usage['cached']} out={usage['output']} total={usage['total']}")
+            billable_tokens = max(est_tokens, max(0, usage["total"] - usage["cached"]))
+            await ag_limiter.finalize(slot, billable_tokens)
+            logger.info(
+                f"📊 [ANTIGRAVITY USAGE] Ключ #{assigned_key} | in={usage['input']} cached={usage['cached']} "
+                f"out={usage['output']} total={usage['total']} (некэш≈{billable_tokens})"
+            )
 
             if "cancel" in status_raw:
-                # Google сам прервал задачу (часто бывает при зависании в песочнице на 4-hydrogen / 3.6-flash)
                 if model_idx + 1 < len(ag_models_queue):
                     logger.warning(f"⚠️ [SANDBOX CANCELLED] {ag_model} отменён Google; повторяем на {ag_models_queue[model_idx + 1]}...")
                     model_idx += 1
@@ -232,18 +250,12 @@ async def run_antigravity_agent(
                 raise Exception(f"Задача Antigravity завершилась ошибкой: {err_obj}")
 
             output_text = extract_interaction_text(interaction)
-            if "incomplete" in status_raw:
-                if output_text.strip():
-                    output_text += "\n\n[Достигнут лимит 60K токенов на 1 запуск — часть работы выполнена. Напиши «продолжай», чтобы продолжить с текущего места.]"
-                else:
-                    raise RuntimeError("Достигнут лимит 60K токенов внутри песочницы до формирования ответа. Уменьши число файлов или разбей задачу.")
-
             sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
             file_urls = {}
 
             if sync_matches and env_id:
                 logger.info(f"📦 [SYNC LIST] Запрошена синхронизация: {sync_matches}")
-                save_dir = os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid or 'common'))
+                save_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid or 'common')))
                 os.makedirs(save_dir, exist_ok=True)
                 env_client = create_genai_client(api_keys, assigned_key, timeout=180000)
 
@@ -269,14 +281,22 @@ async def run_antigravity_agent(
 
                 real_paths_in_env = None
                 for sync_path in sync_matches:
-                    clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
+                    clean_path = _sanitize_sync_path(sync_path)
+                    if not clean_path:
+                        logger.warning(f"⚠️ [SYNC SKIP] Пропущен некорректный путь: '{sync_path}'")
+                        continue
+
+                    local_server_path = os.path.abspath(os.path.join(save_dir, clean_path))
+                    if not local_server_path.startswith(save_dir + os.sep) or os.path.isdir(local_server_path):
+                        logger.warning(f"⚠️ [SYNC SKIP] Небезопасный или директория: '{local_server_path}'")
+                        continue
+
                     fname = os.path.basename(clean_path)
                     download_success = False
 
                     for cp in [f"workspace/{clean_path}", clean_path]:
                         content = await try_download_path(cp)
                         if content is not None:
-                            local_server_path = os.path.join(save_dir, clean_path)
                             os.makedirs(os.path.dirname(local_server_path), exist_ok=True)
                             with open(local_server_path, 'wb') as sf:
                                 sf.write(content)
@@ -321,7 +341,6 @@ async def run_antigravity_agent(
                         if norm_rp == clean_path or norm_rp.endswith("/" + clean_path) or os.path.basename(norm_rp) == fname:
                             content = await try_download_path(rp)
                             if content is not None:
-                                local_server_path = os.path.join(save_dir, clean_path)
                                 os.makedirs(os.path.dirname(local_server_path), exist_ok=True)
                                 with open(local_server_path, 'wb') as sf:
                                     sf.write(content)
@@ -330,6 +349,16 @@ async def run_antigravity_agent(
                                 break
 
             key_pool.mark_success(assigned_key, model=model_tag)
+
+            if "incomplete" in status_raw:
+                if output_text.strip():
+                    output_text += f"\n\n[Достигнут лимит {max_total_tokens} токенов на 1 запуск — часть работы сохранена.]"
+                else:
+                    raise BudgetExhaustedError(
+                        f"Агент упёрся в лимит {max_total_tokens} некэшированных токенов до выдачи ответа. "
+                        f"Передай 1-2 файла вместо всех сразу или разбей задачу на этапы."
+                    )
+
             return {
                 "text": output_text,
                 "files": {},
@@ -340,6 +369,8 @@ async def run_antigravity_agent(
                 "usage": usage,
             }
 
+        except BudgetExhaustedError:
+            raise
         except asyncio.CancelledError:
             raise
         except (asyncio.TimeoutError, TimeoutError) as te:

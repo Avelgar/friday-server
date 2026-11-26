@@ -1,10 +1,10 @@
+import os
 import re
 import json
 import time
 import asyncio
 import logging
 import aiomysql
-import os
 
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
@@ -176,8 +176,6 @@ async def handle_antigravity_task(websocket, data):
         project_tree = chat_state.get("project_tree")
         file_manifest = build_server_file_manifest(chat_uid, synced_files_dict)
 
-        # Все новые сообщения всегда идут в DIRECT.
-        # Напрямую в ANTIGRAVITY возвращается только ответ IDE на тег, вызванный самим ANTIGRAVITY.
         run_direct_first = not (is_tool_response and last_engine == "ANTIGRAVITY")
         used_engine = "DIRECT" if run_direct_first else "ANTIGRAVITY"
         result = None
@@ -249,7 +247,7 @@ async def handle_antigravity_task(websocket, data):
                 file_manifest=file_manifest,
                 selected_files=ag_selected_files,
                 need_network=ag_need_network,
-                max_total_tokens=60_000,
+                max_total_tokens=85_000,
             )
 
         new_env_id = result.get("environment_id")
