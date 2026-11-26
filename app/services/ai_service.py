@@ -21,7 +21,7 @@ class AIService:
     def _get_live_client(self):
         return create_live_client(self.api_keys)
 
-    # --- 1. ГОЛОС / TTS (Gemini 3.8 Live) ---
+    # --- 1. ГОЛОС / TTS (Gemini Live) ---
     async def generate_static_audio(self, text, voice_name="Aoede", assistant_name="Пятница"):
         return await live_voice.generate_static_audio(self.api_keys, text, voice_name, assistant_name)
 
@@ -44,37 +44,57 @@ class AIService:
         ):
             yield item
 
-    # --- 2. РОУТЕР, ПРЯМОЙ HYDROGEN И SUMMARY ---
-    async def classify_route(self, prompt_text: str) -> str:
-        return await ai_router.classify_route(self.key_pool, self.api_keys, prompt_text)
-
-    async def run_direct_hydrogen(self, prompt_text: str, summary: str = None, recent_history: list = None, status_callback=None, chunk_callback=None, assigned_key: int = None):
-        return await ai_router.run_direct_hydrogen(
-            self.key_pool, self.api_keys, prompt_text,
-            summary=summary, recent_history=recent_history,
-            status_callback=status_callback, chunk_callback=chunk_callback,
-            assigned_key=assigned_key
+    # --- 2. DIRECT (без роутера и без summary) ---
+    async def run_direct(
+        self,
+        prompt_text: str,
+        recent_history: list = None,
+        project_tree: str = None,
+        file_manifest: list = None,
+        status_callback=None,
+        chunk_callback=None,
+        assigned_key: int = None,
+    ):
+        return await ai_router.run_direct(
+            self.key_pool,
+            self.api_keys,
+            prompt_text,
+            recent_history=recent_history,
+            project_tree=project_tree,
+            file_manifest=file_manifest,
+            status_callback=status_callback,
+            chunk_callback=chunk_callback,
+            assigned_key=assigned_key,
         )
-
-    async def generate_rolling_summary(self, prev_summary: str, messages: list) -> str | None:
-        return await ai_router.generate_rolling_summary(self.key_pool, self.api_keys, prev_summary, messages)
 
     # --- 3. ПЕСОЧНИЦА ANTIGRAVITY ---
     async def run_antigravity_agent(
-        self, prompt_text: str, status_callback=None, target_files: list = None, input_files: dict = None,
-        previous_interaction_id: str = None, environment_id: str = None, assigned_key: int = None,
-        chat_uid: str = None, recent_history: list = None, summary: str = None, force_reset_chain: bool = False
+        self,
+        prompt_text: str,
+        status_callback=None,
+        assigned_key: int = None,
+        chat_uid: str = None,
+        recent_history: list = None,
+        project_tree: str = None,
+        file_manifest: list = None,
+        selected_files: list = None,
+        need_network: bool = False,
+        max_total_tokens: int = 60_000,
+        **kwargs,
     ):
         return await ag.run_antigravity_agent(
-            self.key_pool, self.api_keys, prompt_text,
+            self.key_pool,
+            self.api_keys,
+            prompt_text,
             status_callback=status_callback,
-            previous_interaction_id=previous_interaction_id,
-            environment_id=environment_id,
             assigned_key=assigned_key,
             chat_uid=chat_uid,
             recent_history=recent_history,
-            summary=summary,
-            force_reset_chain=force_reset_chain
+            project_tree=project_tree,
+            file_manifest=file_manifest,
+            selected_files=selected_files,
+            need_network=need_network,
+            max_total_tokens=max_total_tokens,
         )
 
     async def list_environment_files(self, env_id: str, key_index: int = None):

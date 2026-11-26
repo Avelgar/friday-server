@@ -5,6 +5,7 @@ import time
 import asyncio
 import logging
 import urllib.parse
+from collections import deque
 from .key_pool import GeminiKeyPool, create_genai_client, extract_interaction_text, extract_usage_tokens
 from .prompts import AGENT_SYSTEM_INSTRUCTION
 from .router import format_stateless_prompt
@@ -14,49 +15,113 @@ logger = logging.getLogger("AI_Service")
 SYS_DIRS = {".", "..", "usr", "bin", "lib", "lib64", "lib32", "libx32", "sbin", "proc", "sys", "dev", "etc", "var", "boot", "run", "srv", "snap", "media", "mnt"}
 
 
+class AsyncAntigravityLimiter:
+    """Асинхронное скользящее окно RPM и TPM (60 сек) для квоты Antigravity (100K TPM)."""
+
+    def __init__(self, max_rpm: int = 50, max_tpm: int = 90_000, min_headroom: int = 25_000):
+        self.max_rpm = max_rpm
+        self.max_tpm = max_tpm
+        self.min_headroom = min_headroom
+        self._lock = asyncio.Lock()
+        self._entries: deque[list] = deque()  # [timestamp, tokens]
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - 60.0
+        while self._entries and self._entries[0][0] < cutoff:
+            self._entries.popleft()
+
+    async def acquire(self, estimated_tokens: int, status_callback=None) -> list:
+        need = max(self.min_headroom, estimated_tokens)
+        while True:
+            sleep_for = 0.0
+            async with self._lock:
+                now = time.monotonic()
+                self._prune(now)
+                used_rpm = len(self._entries)
+                used_tpm = sum(item[1] for item in self._entries)
+
+                if used_rpm < self.max_rpm and (used_tpm + need <= self.max_tpm or used_rpm == 0):
+                    slot = [now, estimated_tokens]
+                    self._entries.append(slot)
+                    return slot
+
+                if self._entries:
+                    sleep_for = max(1.0, (self._entries[0][0] + 60.5) - now)
+                else:
+                    sleep_for = 1.0
+
+            logger.info(f"⏳ [AG LIMITER] Окно TPM заполнено, ждём {sleep_for:.1f}с...")
+            if status_callback:
+                await status_callback({"status": f"Ожидание окна лимита TPM ({sleep_for:.0f}с)..."})
+            await asyncio.sleep(sleep_for)
+
+    async def finalize(self, slot: list, actual_tokens: int) -> None:
+        if actual_tokens <= 0:
+            return
+        async with self._lock:
+            slot[0] = time.monotonic()
+            slot[1] = actual_tokens
+
+
+ag_limiter = AsyncAntigravityLimiter(max_rpm=50, max_tpm=90_000, min_headroom=25_000)
+
+
+def _is_dead_project_error(err_str: str) -> bool:
+    return (
+        "'quota_limit_value': '0'" in err_str
+        or "ApiRequestsPerMinutePerProjectPerRegion" in err_str
+        or "API_KEY_INVALID" in err_str
+        or "401" in err_str
+    )
+
+
 async def run_antigravity_agent(
     key_pool: GeminiKeyPool,
     api_keys: list[str],
     prompt_text: str,
     status_callback=None,
-    previous_interaction_id: str = None,
-    environment_id: str = None,
     assigned_key: int = None,
     chat_uid: str = None,
     recent_history: list = None,
-    summary: str = None,
-    force_reset_chain: bool = False
+    project_tree: str = None,
+    file_manifest: list = None,
+    selected_files: list = None,
+    need_network: bool = False,
+    max_total_tokens: int = 60_000,
+    **kwargs,
 ):
     total_keys = len(api_keys)
-
     model_tag = "antigravity"
     tried: set[int] = set()
 
     if assigned_key is None or not key_pool.is_usable(assigned_key, model=model_tag):
         assigned_key = key_pool.get_best_key(model=model_tag)
-        previous_interaction_id = None
-        environment_id = None
 
-    if force_reset_chain:
-        previous_interaction_id = None
-
-    max_attempts = min(total_keys, 12) if total_keys > 0 else 3
+    max_attempts = min(total_keys, 6) if total_keys > 0 else 2
     attempt = 0
     ag_model = normalize_model_name(get_models_config()["antigravity_model"])
 
+    full_input = format_stateless_prompt(
+        prompt_text=prompt_text,
+        recent_history=recent_history,
+        project_tree=project_tree,
+        file_manifest=file_manifest,
+        selected_files=selected_files,
+    )
+    est_tokens = max(2000, len(full_input) // 3)
+
+    tools = [{"type": "code_execution"}]
+    if need_network:
+        tools.extend([{"type": "google_search"}, {"type": "url_context"}])
+
     while attempt < max_attempts:
         tried.add(assigned_key)
+        slot = await ag_limiter.acquire(est_tokens, status_callback=status_callback)
         try:
             if status_callback:
-                await status_callback({"status": f"Подключение к контейнеру (ключ #{assigned_key})..."})
+                await status_callback({"status": f"Запуск чистой песочницы ({ag_model}, ключ #{assigned_key})..."})
 
-            tools = [
-                {"type": "code_execution"},
-                {"type": "google_search"},
-                {"type": "url_context"},
-            ]
-
-            kwargs = {
+            req_kwargs = {
                 "agent": "antigravity-preview-09-2026",
                 "background": True,
                 "system_instruction": AGENT_SYSTEM_INSTRUCTION,
@@ -64,44 +129,27 @@ async def run_antigravity_agent(
                 "agent_config": {
                     "type": "antigravity",
                     "model": ag_model,
-                }
-            }
-            if previous_interaction_id and environment_id:
-                kwargs["previous_interaction_id"] = previous_interaction_id
-                kwargs["environment"] = environment_id
-                kwargs["input"] = prompt_text
-                logger.info(f"🔗 [GOOGLE CALL] Продолжение среды {environment_id[:10]} | Ключ #{assigned_key}")
-            elif environment_id:
-                # Мягкий сброс раздутой цепочки с сохранением Linux-контейнера и его файлов!
-                kwargs["environment"] = environment_id
-                kwargs["input"] = format_stateless_prompt(prompt_text, summary=summary, recent_history=recent_history)
-                logger.info(f"♻️ [GOOGLE CALL] Сжатие контекста в среде {environment_id[:10]} | Ключ #{assigned_key}")
-            else:
-                kwargs["environment"] = {
+                    "max_total_tokens": str(max_total_tokens),
+                },
+                "environment": {
                     "type": "remote",
-                    "sources": [
-                        {
-                            "type": "inline",
-                            "target": ".agents/AGENTS.md",
-                            "content": AGENT_SYSTEM_INSTRUCTION
-                        }
-                    ]
-                }
-                kwargs["input"] = format_stateless_prompt(prompt_text, summary=summary, recent_history=recent_history)
-                logger.info(f"✨ [GOOGLE CALL] Новый контейнер | Ключ #{assigned_key}")
+                },
+                "input": full_input,
+            }
+            logger.info(f"✨ [GOOGLE CALL] Новая ВМ | модель={ag_model} | max_tokens={max_total_tokens} | network={need_network} | Ключ #{assigned_key}")
 
             create_client = create_genai_client(api_keys, assigned_key, timeout=25000)
             interaction = await asyncio.wait_for(
-                asyncio.to_thread(create_client.interactions.create, **kwargs),
+                asyncio.to_thread(create_client.interactions.create, **req_kwargs),
                 timeout=30.0
             )
 
             new_interaction_id = interaction.id
-            env_id = interaction.environment_id or environment_id
+            env_id = interaction.environment_id
             logger.info(f"🆔 [GOOGLE CREATED] interaction_id={new_interaction_id} | env_id={env_id}")
 
             if status_callback:
-                await status_callback({"status": "Агент думает (контейнер запущен)...", "interaction_id": new_interaction_id})
+                await status_callback({"status": "Агент работает в песочнице...", "interaction_id": new_interaction_id})
 
             poll_count = 0
             consecutive_poll_errors = 0
@@ -111,6 +159,7 @@ async def run_antigravity_agent(
                 await asyncio.sleep(2.5)
                 poll_count += 1
                 try:
+                    # Опрос ВСЕГДА тем же ключом, который создал interaction_id!
                     interaction = await asyncio.wait_for(
                         asyncio.to_thread(poll_client.interactions.get, id=new_interaction_id),
                         timeout=25.0
@@ -119,48 +168,41 @@ async def run_antigravity_agent(
                 except asyncio.CancelledError:
                     raise
                 except Exception as poll_err:
-                    key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
-                    assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                     consecutive_poll_errors += 1
-                    logger.warning(f"⚠️ [POLL RETRY {consecutive_poll_errors}/10] Ключ #{assigned_key}: {type(poll_err).__name__}: {poll_err}")
-                    if consecutive_poll_errors >= 10:
+                    logger.warning(f"⚠️ [POLL RETRY {consecutive_poll_errors}/8] Ключ #{assigned_key}: {type(poll_err).__name__}: {poll_err}")
+                    if consecutive_poll_errors >= 8:
                         raise Exception(f"Потеряна связь при опросе статуса: {poll_err}")
-                    poll_client = create_genai_client(api_keys, assigned_key, timeout=180000)
-                    if status_callback:
-                        await status_callback({"status": f"Переподключение к проверке статуса ({consecutive_poll_errors}/10)..."})
                     await asyncio.sleep(2.0)
                     continue
 
-                status_raw = str(getattr(interaction, 'status', '')).lower().strip()
+                status_raw = str(getattr(interaction, "status", "")).lower().strip()
                 if poll_count % 5 == 0:
                     logger.info(f"⏳ [ANTIGRAVITY POLLING] Статус: {status_raw} (шаг {poll_count})")
 
                 if status_callback:
-                    await status_callback({"status": f"Агент думает ({poll_count * 2.5:.0f}с)..."})
+                    await status_callback({"status": f"Агент работает ({poll_count * 2.5:.0f}с)..."})
 
                 if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
                     logger.info(f"🏁 [ANTIGRAVITY DONE] Статус: {status_raw}")
                     break
-                #if poll_count >= 100:
-                    #raise Exception("Превышено время ожидания от контейнера Antigravity (5 мин)")
-
-            if "fail" in str(getattr(interaction, 'status', '')).lower():
-                key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
-                assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
-                raise Exception(f"Задача Antigravity завершилась ошибкой: {getattr(interaction, 'error', 'Unknown error')}")
 
             usage = extract_usage_tokens(interaction)
+            await ag_limiter.finalize(slot, usage["total"] or est_tokens)
             logger.info(f"📊 [ANTIGRAVITY USAGE] Ключ #{assigned_key} | in={usage['input']} cached={usage['cached']} out={usage['output']} total={usage['total']}")
+
+            if "fail" in str(getattr(interaction, "status", "")).lower():
+                err_obj = str(getattr(interaction, "error", "Unknown error"))
+                raise Exception(f"Задача Antigravity завершилась ошибкой: {err_obj}")
 
             output_text = extract_interaction_text(interaction)
             sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
             file_urls = {}
 
-            if sync_matches:
+            if sync_matches and env_id:
                 logger.info(f"📦 [SYNC LIST] Запрошена синхронизация: {sync_matches}")
                 save_dir = os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid or 'common'))
                 os.makedirs(save_dir, exist_ok=True)
-                client = create_genai_client(api_keys, assigned_key, timeout=180000)
+                env_client = create_genai_client(api_keys, assigned_key, timeout=180000)
 
                 async def try_download_path(path_to_get: str):
                     for retry in range(2):
@@ -181,6 +223,7 @@ async def run_antigravity_agent(
                             logger.warning(f"⚠️ [SYNC RETRY {retry+1}/2] '{path_to_get}': {type(dl_err).__name__}: {dl_err}")
                             await asyncio.sleep(1.5)
                     return None
+
                 real_paths_in_env = None
                 for sync_path in sync_matches:
                     clean_path = sync_path.strip().replace("\\", "/").lstrip("./")
@@ -206,7 +249,7 @@ async def run_antigravity_agent(
                         real_paths_in_env = []
                         try:
                             top_resp = await asyncio.wait_for(
-                                asyncio.to_thread(client.environments.files.list, environment=env_id, path="", recursive=False),
+                                asyncio.to_thread(env_client.environments.files.list, environment=env_id, path="", recursive=False),
                                 timeout=30.0
                             )
                             for top_f in getattr(top_resp, "files", []) or []:
@@ -218,7 +261,7 @@ async def run_antigravity_agent(
                                     real_paths_in_env.append(getattr(top_f, "path", None) or tname)
                                 else:
                                     sub_resp = await asyncio.wait_for(
-                                        asyncio.to_thread(client.environments.files.list, environment=env_id, path=tname, recursive=True),
+                                        asyncio.to_thread(env_client.environments.files.list, environment=env_id, path=tname, recursive=True),
                                         timeout=30.0
                                     )
                                     for sf_item in getattr(sub_resp, "files", []) or []:
@@ -228,8 +271,6 @@ async def run_antigravity_agent(
                                         if spath and "__pycache__" not in spath:
                                             real_paths_in_env.append(spath)
                         except Exception as le:
-                            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
-                            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
                             logger.warning(f"⚠️ [ENV FILES] Ошибка поиска: {le}")
 
                     for rp in real_paths_in_env:
@@ -243,67 +284,43 @@ async def run_antigravity_agent(
                                     sf.write(content)
                                 file_url = f"https://friday-assistant.ru/uploads/{os.path.basename(chat_uid or 'common')}/{urllib.parse.quote(clean_path)}?v={int(time.time())}"
                                 file_urls[clean_path] = file_url
-                                download_success = True
                                 break
+
             key_pool.mark_success(assigned_key, model=model_tag)
             return {
                 "text": output_text,
                 "files": {},
                 "file_urls": file_urls,
                 "environment_id": env_id,
-                "interaction_id": new_interaction_id,
+                "interaction_id": None,  # Никогда не продолжаем цепочку
                 "assigned_key": assigned_key,
                 "usage": usage,
             }
 
+        except asyncio.CancelledError:
+            raise
         except (asyncio.TimeoutError, TimeoutError):
-            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
-            assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
             logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} не ответил за 30с.")
-            key_pool.mark_exhausted(assigned_key, duration_seconds=1800)
-            assigned_key = key_pool.get_next_key(exclude_index=assigned_key)
-            previous_interaction_id = None
-            environment_id = None
-            attempt += 1
-
-        except Exception as e:
-            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)  # или 10800 при 429/quota
+            key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)
             assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
-            err_lower = str(e).lower()
-            logger.warning(f"[Antigravity Ошибка на ключе #{assigned_key}]: {e}")
+            attempt += 1
+        except Exception as e:
             err_str = str(e)
-            if "'quota_limit_value': '0'" in err_str or "ApiRequestsPerMinutePerProjectPerRegion" in err_str or "API_KEY_INVALID" in err_str or "401" in err_str:
+            err_lower = err_str.lower()
+            logger.warning(f"⚠️ [Antigravity Ошибка на ключе #{assigned_key}]: {e}")
+
+            if _is_dead_project_error(err_str):
                 key_pool.mark_dead_all_models(assigned_key)
                 assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
-                previous_interaction_id = None
-                environment_id = None
-                attempt += 1
-                continue
+            elif "429" in err_lower or "resource_exhausted" in err_lower or "quota" in err_lower:
+                key_pool.mark_exhausted(assigned_key, duration_seconds=10800, model=model_tag)
+                assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
+            elif any(net_err in err_lower for net_err in ["eof", "ssl", "connection reset", "connection refused", "broken pipe"]):
+                await asyncio.sleep(2.0)
+            else:
+                key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)
+                assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
 
-            if "timed out" in err_lower or "timeout" in err_lower:
-                key_pool.mark_exhausted(assigned_key, duration_seconds=1800)
-                assigned_key = key_pool.get_next_key(exclude_index=assigned_key)
-                previous_interaction_id = None
-                environment_id = None
-                attempt += 1
-                continue
-
-            if ("not found" in err_lower or "permission" in err_lower or "403" in err_lower or "404" in err_lower) and (previous_interaction_id or environment_id):
-                logger.info(f"🔄 Сброс чужой среды #{environment_id} для ключа #{assigned_key}.")
-                previous_interaction_id = None
-                environment_id = None
-                attempt += 1
-                continue
-
-            if any(net_err in err_lower for net_err in ["eof", "ssl", "connection reset", "connection refused", "broken pipe"]):
-                await asyncio.sleep(2)
-                attempt += 1
-                continue
-
-            key_pool.mark_exhausted(assigned_key, duration_seconds=3600)
-            assigned_key = key_pool.get_next_key(exclude_index=assigned_key)
-            previous_interaction_id = None
-            environment_id = None
             attempt += 1
 
     raise Exception("Все доступные ключи не отвечают или исчерпали квоту.")

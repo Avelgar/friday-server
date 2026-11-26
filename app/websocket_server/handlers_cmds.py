@@ -1,30 +1,47 @@
 import base64
-import json
 import logging
 import asyncio
 import aiomysql
 from datetime import datetime
+import time
+
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
 from app.websocket_server import state
 from app.websocket_server.utils import async_send, broadcast_to_user, get_device_type
-import time
-import os
-import shutil
-import re
-import urllib.parse
-import hashlib
+
+# Реэкспорт на случай, если какие-то сторонние модули импортируют Antigravity-обработчики из handlers_cmds
+from app.websocket_server.handlers_antigravity_crud import (  # noqa: F401
+    handle_antigravity_register_client,
+    handle_antigravity_delete_synced_file,
+    handle_antigravity_save_system_log,
+    handle_antigravity_get_chats,
+    handle_antigravity_get_messages,
+    handle_antigravity_create_chat,
+    handle_antigravity_delete_chat,
+    handle_antigravity_list_server_files,
+    handle_antigravity_delete_server_file,
+    handle_antigravity_list_env_files,
+    handle_antigravity_download_env_file,
+    handle_antigravity_upload_env_file,
+)
+from app.websocket_server.handlers_antigravity_task import (  # noqa: F401
+    handle_antigravity_cancel_task,
+    handle_antigravity_task,
+)
 
 logger = logging.getLogger("WS_Server")
 
-HISTORY_LIMIT = 10 
-active_media_queues = {} 
+HISTORY_LIMIT = 10
+active_media_queues = {}
 device_audio_locks = {}
+
 
 def get_device_audio_lock(client_id: int) -> asyncio.Lock:
     if client_id not in device_audio_locks:
         device_audio_locks[client_id] = asyncio.Lock()
     return device_audio_locks[client_id]
+
 
 # =========================================================================
 # СПИСОК И ОПИСАНИЕ ВСЕХ ВОЗМОЖНОСТЕЙ СИСТЕМЫ
@@ -86,7 +103,6 @@ CLIENT_NAMES = {
 
 ALL_ACTIONS = list(ACTION_DESCRIPTIONS.keys())
 
-antigravity_user_sockets = {}
 
 def format_action_list(action_keys):
     caps = []
@@ -95,14 +111,19 @@ def format_action_list(action_keys):
         caps.append(f"  • {k} (параметр: {desc})")
     return "\n".join(caps)
 
+
 def normalize_client_type(raw_type):
     t = str(raw_type or '').strip().lower()
     if t in CLIENT_ACTIONS:
         return t
-    if any(k in t for k in ['phone', 'тел', 'android']): return 'phone'
-    if any(k in t for k in ['robot', 'робот', 'pi']): return 'robot'
-    if any(k in t for k in ['web', 'браузер', 'сайт']): return 'web'
+    if any(k in t for k in ['phone', 'тел', 'android']):
+        return 'phone'
+    if any(k in t for k in ['robot', 'робот', 'pi']):
+        return 'robot'
+    if any(k in t for k in ['web', 'браузер', 'сайт']):
+        return 'web'
     return 'pc'
+
 
 def get_user_online_devices(user_id, current_ws, sender_name, device_type_code):
     current_type = normalize_client_type(device_type_code)
@@ -135,11 +156,13 @@ def get_user_online_devices(user_id, current_ws, sender_name, device_type_code):
 
     return devices
 
+
 async def handle_audio_chunk(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
     if ui_msg_id in active_media_queues:
         chunk = base64.b64decode(data.get("audio_base64", ""))
         active_media_queues[ui_msg_id].put_nowait({"type": "audio", "data": chunk})
+
 
 async def handle_video_chunk(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
@@ -147,25 +170,27 @@ async def handle_video_chunk(websocket, data):
         chunk = base64.b64decode(data.get("video_base64", ""))
         active_media_queues[ui_msg_id].put_nowait({"type": "video", "data": chunk})
 
+
 async def handle_audio_end(websocket, data):
     ui_msg_id = data.get("ui_msg_id")
     if ui_msg_id in active_media_queues:
         active_media_queues[ui_msg_id].put_nowait(None)
         active_media_queues.pop(ui_msg_id, None)
 
+
 def get_target_websocket(user_id, target_device_name, fallback_ws, action_type=None):
     """Поиск целевого веб-сокета в RAM по имени или типу устройства с умной маршрутизацией."""
     clean_name = target_device_name.lower().strip() if target_device_name else ""
     user_ws_set = state.user_connections.get(user_id, set()) if user_id else set()
-    
-    # 1. Прямое совпадение по имени или типу
+
     if clean_name:
         for ws in user_ws_set:
             session = state.ws_sessions.get(ws)
-            if not session: continue
+            if not session:
+                continue
             d_name = session.get('device_name', '').lower()
             d_type = normalize_client_type(session.get('device_type', 'pc'))
-            
+
             if clean_name in d_name or d_name in clean_name:
                 return ws
             if any(k in clean_name for k in ["комп", "пк", "pc", "компе"]) and d_type == "pc":
@@ -177,14 +202,12 @@ def get_target_websocket(user_id, target_device_name, fallback_ws, action_type=N
             if any(k in clean_name for k in ["браузер", "web", "сайт"]) and d_type == "web":
                 return ws
 
-    # 2. Если fallback_ws поддерживает действие — остаемся на нем
     if action_type:
         fallback_session = state.ws_sessions.get(fallback_ws, {})
         fallback_type = normalize_client_type(fallback_session.get('device_type', 'pc'))
         if action_type in CLIENT_ACTIONS.get(fallback_type, []):
             return fallback_ws
 
-        # 3. Умная переадресация: fallback не умеет это делать, перенаправляем на подходящее онлайн-устройство пользователя
         for ws in user_ws_set:
             session = state.ws_sessions.get(ws, {})
             d_type = normalize_client_type(session.get('device_type', 'pc'))
@@ -196,30 +219,31 @@ def get_target_websocket(user_id, target_device_name, fallback_ws, action_type=N
 
 
 # =========================================================================
-# 1. ПЕРВИЧНЫЙ АГЕНТ (ФАСАД) С ПРЯМЫМ УПРАВЛЕНИЕМ УСТРОЙСТВАМИ
+# ПЕРВИЧНЫЙ АГЕНТ (ФАСАД) С ПРЯМЫМ УПРАВЛЕНИЕМ УСТРОЙСТВАМИ
 # =========================================================================
 async def handle_command(websocket, data):
     conn = None; cursor = None; user_msg_id = None; bot_message_id = None; dialog_id = None
     audio_chunks_count = 0; has_commands = False
     final_user_text_full = ""; final_bot_text_full = ""
+    user_id = None
+    ui_msg_id = data.get('ui_msg_id')
 
     try:
         command = data.get('command', '').strip()
         name = data.get('name', 'Пятница')
         voice_name = data.get('voice_type', 'Aoede')
         screenshot_base64 = data.get('screenshot')
-        audio_base64 = data.get('audio_base64') 
-        ui_msg_id = data.get('ui_msg_id')
+        audio_base64 = data.get('audio_base64')
         message_history = data.get('message_history', [])
-        
+
         is_streaming = data.get('stream_audio', False)
         media_queue = asyncio.Queue() if is_streaming else None
-        
+
         if is_streaming and ui_msg_id:
             active_media_queues[ui_msg_id] = media_queue
             if audio_base64:
                 media_queue.put_nowait({"type": "audio", "data": base64.b64decode(audio_base64)})
-        
+
         session = state.ws_sessions.get(websocket, {})
         user_id = session.get('user_id')
         sender_name = session.get('device_name') or data.get('device_name') or data.get('DeviceName') or 'Компьютер'
@@ -231,30 +255,31 @@ async def handle_command(websocket, data):
 
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
-        
+
         db_user_text = command if command else ("[Аудиосообщение]" if (audio_bytes or is_streaming) else "🖼️ [Фото]")
-        
-        logger.info("\n" + "="*50)
+
+        logger.info("\n" + "=" * 50)
         logger.info(f"[ФАСАД] Инициатор: {sender_name} ({device_type}) | Стрим: {is_streaming}")
 
         client_dialog_id = data.get('dialog_id')
         sender_ws = websocket
-        
+
         formatted_history = []
 
         if user_id:
             create_new = False
             norm_type = normalize_client_type(device_type_code)
-            if 'dialog_id' in data and client_dialog_id is None: 
+            if 'dialog_id' in data and client_dialog_id is None:
                 create_new = True
             elif norm_type == 'robot' and not client_dialog_id and not session.get('robot_dialog_id'):
                 create_new = True
             elif client_dialog_id:
                 await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (client_dialog_id, user_id))
-                if not await cursor.fetchone(): create_new = True
-                else: dialog_id = client_dialog_id
+                if not await cursor.fetchone():
+                    create_new = True
+                else:
+                    dialog_id = client_dialog_id
             elif norm_type == 'robot' and session.get('robot_dialog_id'):
-                # Важно: проверяем, что робот не ссылается на удаленный диалог в БД!
                 await cursor.execute("SELECT id FROM dialogs WHERE id = %s AND user_id = %s", (session['robot_dialog_id'], user_id))
                 if await cursor.fetchone():
                     dialog_id = session['robot_dialog_id']
@@ -264,9 +289,11 @@ async def handle_command(websocket, data):
             else:
                 await cursor.execute("SELECT id FROM dialogs WHERE user_id = %s ORDER BY created_at DESC LIMIT 1", (user_id,))
                 dlg = await cursor.fetchone()
-                if dlg: dialog_id = dlg['id']
-                else: create_new = True
-                    
+                if dlg:
+                    dialog_id = dlg['id']
+                else:
+                    create_new = True
+
             if create_new:
                 dialog_name = f"Робот ({sender_name})" if norm_type == 'robot' else "Новый диалог"
                 await cursor.execute("INSERT INTO dialogs (name, user_id) VALUES (%s, %s)", (dialog_name, user_id))
@@ -274,7 +301,6 @@ async def handle_command(websocket, data):
                 await conn.commit()
                 if norm_type == 'robot':
                     session['robot_dialog_id'] = dialog_id
-                # Рассылаем создание нового диалога ВСЕМ активным устройствам пользователя
                 await broadcast_to_user(user_id, {"type": "dialog_created", "dialog_id": dialog_id, "name": dialog_name})
 
             if dialog_id:
@@ -290,26 +316,22 @@ async def handle_command(websocket, data):
                 bot_message_id = cursor.lastrowid
                 await conn.commit()
 
-                # Сразу транслируем сообщение пользователя на все другие устройства,
-                # чтобы на них пузырь пользователя гарантированно создавался ПЕРВЫМ (до ответа бота).
-                if user_id:
-                    await broadcast_to_user(user_id, {
-                        "type": "new_message",
-                        "dialog_id": dialog_id,
-                        "message_id": user_msg_id,
-                        "ui_msg_id": ui_msg_id,
-                        "sender": "Вы",
-                        "device_name": sender_name,
-                        "text": db_user_text,
-                        "actions": []
-                    }, exclude_ws=websocket)
+                await broadcast_to_user(user_id, {
+                    "type": "new_message",
+                    "dialog_id": dialog_id,
+                    "message_id": user_msg_id,
+                    "ui_msg_id": ui_msg_id,
+                    "sender": "Вы",
+                    "device_name": sender_name,
+                    "text": db_user_text,
+                    "actions": []
+                }, exclude_ws=websocket)
 
-                # Строгая хронологическая сортировка по id ASC (гарантирует порядок)
                 await cursor.execute("""
                     SELECT sender, text FROM messages
                     WHERE dialog_id = %s AND id < %s AND sender != 'Действие' ORDER BY id ASC
                 """, (dialog_id, user_msg_id))
-                
+
                 raw_history = await cursor.fetchall()
                 if raw_history:
                     for msg in raw_history[-HISTORY_LIMIT:]:
@@ -340,11 +362,9 @@ async def handle_command(websocket, data):
         if sender_ws and ui_msg_id and dialog_id:
             await async_send(sender_ws, {"type": "msg_id_map", "ui_msg_id": ui_msg_id, "user_msg_id": user_msg_id, "bot_msg_id": bot_message_id})
 
-        # === ОПРЕДЕЛЯЕМ ОНЛАЙН-УСТРОЙСТВА И ИХ ВОЗМОЖНОСТИ ===
         all_online_devs = get_user_online_devices(user_id, websocket, sender_name, device_type_code)
         online_types = set([d["type"] for d in all_online_devs])
 
-        # Собираем действия, доступные хотя бы на одном из устройств онлайн:
         allowed_action_keys = []
         for c_type in ["pc", "phone", "robot", "web"]:
             if c_type in online_types:
@@ -355,20 +375,17 @@ async def handle_command(websocket, data):
         if not allowed_action_keys:
             allowed_action_keys = CLIENT_ACTIONS.get(normalize_client_type(device_type_code), ["название диалога", "смена голоса"])
 
-        # Если это не первое сообщение и диалог уже назван — убираем "название диалога" из схемы инструментов
         if not needs_dialog_naming and "название диалога" in allowed_action_keys:
             allowed_action_keys.remove("название диалога")
 
         allowed_actions = {act: ACTION_DESCRIPTIONS.get(act, "параметр действия") for act in allowed_action_keys}
 
-        # Список подключенных устройств пользователя
         devices_lines = []
         for d in all_online_devs:
             mark = " (текущее устройство собеседника)" if d["is_current"] else ""
             devices_lines.append(f"• «{d['name']}» — {d['type_ru']}{mark}")
         current_dev_desc = "\n".join(devices_lines)
 
-        # Возможности ТОЛЬКО тех платформ, которые сейчас онлайн в сети пользователя
         caps_blocks = []
         for c_type in ["pc", "phone", "robot", "web"]:
             if c_type in online_types:
@@ -421,16 +438,19 @@ async def handle_command(websocket, data):
                 if chunk["type"] == "user_text":
                     final_user_text_full += chunk["text"] + " "
                     logger.info(f"[STT] Пользователь: {chunk['text'].strip()}")
-                    if sender_ws: await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
+                    if sender_ws:
+                        await async_send(sender_ws, {"type": "user_transcription", "ui_msg_id": ui_msg_id, "text": final_user_text_full.strip()})
 
                 elif chunk["type"] == "bot_text":
                     text_chunk = chunk["text"]
-                    if "call:send_device_commands" in text_chunk or "send_device_commands{" in text_chunk: continue
-                    if "⚡" in text_chunk or "[Действие" in text_chunk or "action_type" in text_chunk: continue
-                    if any(t in text_chunk.lower() for t in ["</td>", "<script", "<html>", "</div>", "<table>", "<svg", "<tr>"]): continue
+                    if "call:send_device_commands" in text_chunk or "send_device_commands{" in text_chunk:
+                        continue
+                    if "⚡" in text_chunk or "[Действие" in text_chunk or "action_type" in text_chunk:
+                        continue
+                    if any(t in text_chunk.lower() for t in ["</td>", "<script", "<html>", "</div>", "<table>", "<svg", "<tr>"]):
+                        continue
                     final_bot_text_full += text_chunk + " "
                     logger.info(f"[TTS] Фасад: {text_chunk.strip()}")
-                    # Отправляем на устройство инициатора
                     if sender_ws:
                         await async_send(sender_ws, {
                             "type": "new_message",
@@ -441,7 +461,6 @@ async def handle_command(websocket, data):
                             "text": text_chunk,
                             "actions": []
                         })
-                    # Синхронизируем текст бота в реальном времени на все остальные устройства пользователя
                     if user_id:
                         await broadcast_to_user(user_id, {
                             "type": "new_message",
@@ -454,13 +473,15 @@ async def handle_command(websocket, data):
                         }, exclude_ws=websocket)
 
                 elif chunk["type"] == "commands":
-                    if chunk["commands"]: has_commands = True
+                    if chunk["commands"]:
+                        has_commands = True
                     extracted_commands = chunk["commands"]
-                    
+
                     for cmd in extracted_commands:
                         target_device_name = cmd.get('target_device', '').strip()
                         actions = cmd.get('actions', [])
-                        if not actions: continue
+                        if not actions:
+                            continue
 
                         acts_summary = ", ".join([f"{a.get('action_type')}: '{a.get('action_value')}'" for a in actions])
                         logger.info(f"🛠️ [TOOL CALL] ИИ вызвал: [{acts_summary}] -> цель: '{target_device_name or sender_name}'")
@@ -473,7 +494,6 @@ async def handle_command(websocket, data):
                                 new_name = str(act.get('action_value', '')).strip()
                                 await cursor.execute("UPDATE dialogs SET name = %s WHERE id = %s", (new_name, dialog_id))
                                 await conn.commit()
-                                # Оповещаем все устройства пользователя о новом имени диалога
                                 if user_id:
                                     await broadcast_to_user(user_id, {"type": "dialog_renamed", "dialog_id": dialog_id, "name": new_name})
                                 elif sender_ws:
@@ -491,7 +511,6 @@ async def handle_command(websocket, data):
                             tgt_name = tgt_session.get('device_name', sender_name)
                             logger.info(f"🚀 [DIRECT DISPATCH] Фасад отправляет {len(real_actions)} действий на '{tgt_name}'")
 
-                            # Сохраняем и отправляем каждое действие отдельным сообщением с маркировкой
                             for act in real_actions:
                                 a_type = act.get('action_type', '')
                                 a_val = str(act.get('action_value', '')).strip()
@@ -511,7 +530,6 @@ async def handle_command(websocket, data):
                                 else:
                                     action_msg_id = int(time.time() * 1000)
 
-                                # 1. Отправляем на целевое устройство для исполнения действия и отображения
                                 await async_send(tgt_ws, {
                                     "type": "new_message",
                                     "dialog_id": dialog_id,
@@ -523,7 +541,6 @@ async def handle_command(websocket, data):
                                     "actions": [act]
                                 })
 
-                                # 2. Информационно синхронизируем плашку действия на ВСЕ остальные устройства пользователя
                                 if user_id:
                                     await broadcast_to_user(user_id, {
                                         "type": "new_message",
@@ -549,15 +566,13 @@ async def handle_command(websocket, data):
 
                 elif chunk["type"] == "audio":
                     audio_chunks_count += 1
-                    # Голос воспроизводится строго на устройстве, с которого говорят
-                    if sender_ws: await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
-        
+                    if sender_ws:
+                        await async_send(sender_ws, {"type": "audio_chunk", "audio_base64": base64.b64encode(chunk["data"]).decode('utf-8')})
+
         if dialog_id and user_msg_id and bot_message_id:
-            if (audio_bytes or is_streaming):
+            if audio_bytes or is_streaming:
                 if final_user_text_full.strip():
-                    # Сохраняем исходное created_at, предотвращая авто-сдвиг даты в MySQL при UPDATE
                     await cursor.execute("UPDATE messages SET text = %s, created_at = created_at WHERE id = %s", (final_user_text_full.strip(), user_msg_id))
-                    # Обновляем текст на устройстве-инициаторе
                     if sender_ws:
                         await async_send(sender_ws, {
                             "type": "new_message",
@@ -569,7 +584,6 @@ async def handle_command(websocket, data):
                             "text": final_user_text_full.strip(),
                             "actions": []
                         })
-                    # Синхронизируем распознанный голос на другие устройства (обновление заготовки)
                     if user_id:
                         await broadcast_to_user(user_id, {
                             "type": "new_message",
@@ -583,20 +597,20 @@ async def handle_command(websocket, data):
                         }, exclude_ws=websocket)
 
             if not final_bot_text_full.strip():
-                # Удаляем пустую текстовую заготовку бота, чтобы не оставался пустой пузырь
                 await cursor.execute("DELETE FROM messages WHERE id = %s", (bot_message_id,))
                 if audio_chunks_count == 0 and not has_commands:
                     await cursor.execute("DELETE FROM messages WHERE id = %s", (user_msg_id,))
             else:
-                # Сохраняем исходное created_at
                 await cursor.execute("UPDATE messages SET text = %s, created_at = created_at WHERE id = %s", (final_bot_text_full.strip(), bot_message_id))
             await conn.commit()
-            
+
         if not dialog_id:
             if not final_bot_text_full.strip() and audio_chunks_count == 0 and not has_commands:
-                if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
             else:
-                if sender_ws: await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
+                if sender_ws:
+                    await async_send(sender_ws, {"type": "new_message", "message_id": None, "ui_msg_id": ui_msg_id, "sender": "Бот", "text": "", "actions": []})
         elif sender_ws:
             final_bot_id = bot_message_id if final_bot_text_full.strip() else None
             finish_msg = {
@@ -612,809 +626,22 @@ async def handle_command(websocket, data):
             if user_id:
                 await broadcast_to_user(user_id, finish_msg, exclude_ws=websocket)
 
-        logger.info(f"[DONE] Фасад отработал.\n" + "="*50)
+        logger.info("[DONE] Фасад отработал.\n" + "=" * 50)
 
     except Exception as e:
         logger.error(f"[ERROR] {e}", exc_info=True)
         try:
             if cursor and bot_message_id and user_msg_id:
-                await cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id)); await conn.commit()
+                await cursor.execute("DELETE FROM messages WHERE id IN (%s, %s)", (bot_message_id, user_msg_id))
+                await conn.commit()
             sender_ws = websocket
-            if sender_ws: await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
-            if user_id: await broadcast_to_user(user_id, {"type": "delete_message", "ui_msg_id": ui_msg_id}, exclude_ws=websocket)
-        except: pass
+            if sender_ws:
+                await async_send(sender_ws, {"type": "delete_message", "ui_msg_id": ui_msg_id})
+            if user_id:
+                await broadcast_to_user(user_id, {"type": "delete_message", "ui_msg_id": ui_msg_id}, exclude_ws=websocket)
+        except Exception:
+            pass
     finally:
         if cursor: await cursor.close()
         if conn: conn.close()
         active_media_queues.pop(data.get('ui_msg_id', ''), None)
-
-async def get_least_used_key_index(cursor=None):
-    return ai_instance.key_pool.get_best_key(model="antigravity")
-
-active_antigravity_tasks = {}
-
-# ==============================================================================
-# CRUD ДИАЛОГОВ И СООБЩЕНИЙ ANTIGRAVITY (С ПРИВЯЗКОЙ К АККАУНТУ И ПАПКЕ)
-# ==============================================================================
-
-async def handle_antigravity_register_client(websocket, data):
-    user_token = data.get("user_token")
-    if user_token:
-        antigravity_user_sockets[user_token] = websocket
-
-async def send_antigravity_event(user_token, fallback_ws, payload):
-    ws = antigravity_user_sockets.get(user_token) if user_token else None
-    if ws and ws in state.active_connections:
-        await async_send(ws, payload)
-        return
-    if fallback_ws and fallback_ws in state.active_connections:
-        await async_send(fallback_ws, payload)
-
-async def handle_antigravity_delete_synced_file(websocket, data):
-    chat_uid = data.get("chat_uid")
-    file_path = (data.get("file_path") or "").strip().replace("\\", "/").lstrip("./")
-    if not chat_uid or not file_path:
-        return
-
-    # 1. Безопасно удаляем физический файл с диска сервера
-    try:
-        base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid)))
-        target_path = os.path.abspath(os.path.join(base_dir, file_path))
-        if target_path.startswith(base_dir + os.sep) and os.path.exists(target_path):
-            if os.path.isdir(target_path):
-                shutil.rmtree(target_path, ignore_errors=True)
-            else:
-                os.remove(target_path)
-            logger.info(f"🗑️ [SERVER FILE DELETED] {target_path}")
-    except Exception as e:
-        logger.warning(f"⚠️ [SERVER FILE DELETE ERR] {e}")
-
-    # 2. Вычищаем запись из synced_files в MySQL
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        await cursor.execute("SELECT synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        row = await cursor.fetchone()
-        if row and row.get("synced_files"):
-            sf = json.loads(row["synced_files"]) if isinstance(row["synced_files"], str) else row["synced_files"]
-            if isinstance(sf, dict):
-                keys_to_del = [k for k in sf.keys() if k.replace("\\", "/").lstrip("./") == file_path]
-                for k in keys_to_del:
-                    sf.pop(k, None)
-                await cursor.execute(
-                    "UPDATE antigravity_chats SET synced_files = %s WHERE chat_uid = %s",
-                    (json.dumps(sf, ensure_ascii=False), chat_uid)
-                )
-                await conn.commit()
-                logger.info(f"🧹 [DB SYNCED CLEANED] Удален '{file_path}' из чата {chat_uid}")
-    except Exception as dbe:
-        logger.error(f"[DB delete_synced_file error] {dbe}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-async def handle_antigravity_save_system_log(websocket, data):
-    chat_uid = data.get("chat_uid")
-    text = (data.get("text") or "").strip()
-    if not chat_uid or not text:
-        return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor()
-        await cursor.execute(
-            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'system', %s)",
-            (chat_uid, text)
-        )
-        await conn.commit()
-    except Exception as e:
-        logger.error(f"[DB save_system_log error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-async def handle_antigravity_get_chats(websocket, data):
-    user_token = data.get("user_token")
-    conn = None; cursor = None
-    if user_token:
-        antigravity_user_sockets[user_token] = websocket
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        
-        if not user_token:
-            await async_send(websocket, {
-                "type": "antigravity_chats_list",
-                "chats": [],
-                "silent": bool(data.get("silent", False))
-            })
-            return
-
-        await cursor.execute(
-            """INSERT INTO antigravity_users (user_token, username) VALUES (%s, %s)
-               ON DUPLICATE KEY UPDATE username = VALUES(username)""",
-            (user_token, data.get("username", "Developer"))
-        )
-        await conn.commit()
-
-        await cursor.execute(
-            """SELECT chat_uid, title, key_index, last_interaction_id, environment_id, 
-                      workspace_path, updated_at 
-               FROM antigravity_chats 
-               WHERE user_token = %s 
-               ORDER BY updated_at DESC""",
-            (user_token,)
-        )
-        chats = await cursor.fetchall()
-        for c in chats:
-            if c.get("updated_at"): c["updated_at"] = str(c["updated_at"])
-
-        await async_send(websocket, {
-            "type": "antigravity_chats_list",
-            "chats": chats or [],
-            "silent": bool(data.get("silent", False))
-        })
-    except Exception as e:
-        logger.error(f"[DB get_chats error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_get_messages(websocket, data):
-    chat_uid = data.get("chat_uid")
-    if not chat_uid: return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        
-        await cursor.execute(
-            "SELECT role, text, created_at FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
-            (chat_uid,)
-        )
-        msgs = await cursor.fetchall()
-        for m in msgs:
-            if m.get("created_at"): m["created_at"] = str(m["created_at"])
-
-        await cursor.execute("SELECT synced_files, workspace_path FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        chat_row = await cursor.fetchone()
-        synced_files = {}
-        ws_path = None
-        if chat_row:
-            ws_path = chat_row.get("workspace_path")
-            if chat_row.get("synced_files"):
-                try:
-                    synced_files = json.loads(chat_row["synced_files"]) if isinstance(chat_row["synced_files"], str) else chat_row["synced_files"]
-                except Exception: pass
-
-        await async_send(websocket, {
-            "type": "antigravity_chat_history",
-            "chat_uid": chat_uid,
-            "messages": msgs or [],
-            "synced_files": synced_files or {},
-            "synced_meta": build_synced_meta(chat_uid, synced_files or {})
-        })
-    except Exception as e:
-        logger.error(f"[DB get_messages error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-def build_synced_meta(chat_uid: str, synced_files: dict) -> dict:
-    meta = {}
-    if not synced_files or not isinstance(synced_files, dict):
-        return meta
-    safe_uid = os.path.basename(chat_uid or 'common')
-    base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
-    for rel_p, f_url in synced_files.items():
-        norm_rel = str(rel_p).replace("\\", "/").lstrip("./")
-        local_p = os.path.abspath(os.path.join(base_dir, norm_rel))
-        if not local_p.startswith(base_dir + os.sep) or not os.path.isfile(local_p):
-            continue
-        f_size = None
-        f_hash = None
-        try:
-            f_size = os.path.getsize(local_p)
-            if f_size <= 50 * 1024 * 1024:
-                h = hashlib.sha256()
-                with open(local_p, "rb") as hf:
-                    for chunk in iter(lambda: hf.read(65536), b""):
-                        h.update(chunk)
-                f_hash = h.hexdigest()
-        except Exception:
-            pass
-        meta[norm_rel] = {
-            "url": f_url,
-            "size": f_size,
-            "sha256": f_hash
-        }
-    return meta
-
-async def handle_antigravity_create_chat(websocket, data):
-    chat_uid = data.get("chat_uid") or f"chat_{int(time.time() * 1000)}"
-    title = data.get("title") or "Новый диалог"
-    user_token = data.get("user_token")
-    workspace_path = data.get("workspace_path")
-    if user_token:
-        antigravity_user_sockets[user_token] = websocket
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        assigned_key = await get_least_used_key_index(cursor)
-
-        await cursor.execute(
-            """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
-               VALUES (%s, %s, %s, %s, %s)""",
-            (chat_uid, title, assigned_key, user_token, workspace_path)
-        )
-        await conn.commit()
-
-        await async_send(websocket, {
-            "type": "antigravity_chat_created",
-            "chat": {
-                "chat_uid": chat_uid,
-                "title": title,
-                "key_index": assigned_key,
-                "user_token": user_token,
-                "workspace_path": workspace_path,
-                "last_interaction_id": None,
-                "environment_id": None
-            }
-        })
-    except Exception as e:
-        logger.error(f"[DB create_chat error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_delete_chat(websocket, data):
-    chat_uid = data.get("chat_uid")
-    if not chat_uid: return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor()
-        await cursor.execute("DELETE FROM antigravity_messages WHERE chat_uid = %s", (chat_uid,))
-        await cursor.execute("DELETE FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        await conn.commit()
-
-        upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
-        if os.path.exists(upload_dir):
-            shutil.rmtree(upload_dir, ignore_errors=True)
-
-        await async_send(websocket, {
-            "type": "antigravity_chat_deleted",
-            "chat_uid": chat_uid
-        })
-    except Exception as e:
-        logger.error(f"[DB delete_chat error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_cancel_task(websocket, data):
-    chat_uid = data.get("chat_id")
-    ui_msg_id = data.get("ui_msg_id")
-    logger.info(f"🛑 [WS CANCEL REQUEST] Запрос отмены для чата: {chat_uid}")
-
-    if chat_uid and chat_uid in active_antigravity_tasks:
-        task = active_antigravity_tasks[chat_uid]
-        if not task.done():
-            task.cancel()
-            logger.info(f"🛑 [WS CANCEL] Таск успешно отменен в памяти: {chat_uid}")
-
-    await async_send(websocket, {
-        "type": "antigravity_cancelled",
-        "chat_id": chat_uid,
-        "ui_msg_id": ui_msg_id
-    })
-
-
-async def _maybe_update_rolling_summary(chat_uid: str):
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        await cursor.execute("SELECT summary, summary_msg_id FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        row = await cursor.fetchone()
-        if not row:
-            return
-        prev_summary = row.get("summary") or ""
-        last_sum_id = int(row.get("summary_msg_id") or 0)
-
-        await cursor.execute(
-            "SELECT id, role, text FROM antigravity_messages WHERE chat_uid = %s AND id > %s ORDER BY id ASC",
-            (chat_uid, last_sum_id)
-        )
-        unsummarized = await cursor.fetchall() or []
-        # Оставляем последние 10 сообщений сырыми; если старше накопилось >= 6, сжимаем их в summary
-        if len(unsummarized) < 16:
-            return
-
-        to_compress = unsummarized[:-10]
-        new_cutoff_id = to_compress[-1]["id"]
-        new_summary = await ai_instance.generate_rolling_summary(prev_summary, to_compress)
-        if new_summary:
-            await cursor.execute(
-                "UPDATE antigravity_chats SET summary = %s, summary_msg_id = %s WHERE chat_uid = %s",
-                (new_summary, new_cutoff_id, chat_uid)
-            )
-            await conn.commit()
-    except Exception as e:
-        logger.warning(f"⚠️ [SUMMARY BG ERR] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_task(websocket, data):
-    prompt = data.get("prompt", "").strip()
-    is_tool_response = bool(data.get("is_tool_response", False))
-    db_summary = (data.get("db_summary") or "").strip()
-    target_files = data.get("target_files", [])
-    input_files = data.get("input_files", {})
-    user_token = data.get("user_token")
-    workspace_path = data.get("workspace_path")
-    chat_uid = data.get("chat_id") or data.get("chat_uid") or getattr(websocket, "active_chat_uid", None)
-    
-    if user_token:
-        antigravity_user_sockets[user_token] = websocket
-    if not chat_uid:
-        chat_uid = f"chat_{int(time.time() * 1000)}"
-    websocket.active_chat_uid = chat_uid
-
-    ui_msg_id = data.get("ui_msg_id", str(int(time.time() * 1000)))
-    if not prompt: return
-
-    logger.info(f"📥 [WS IN] Чат: {chat_uid} | Роль: {'tool' if is_tool_response else 'user'} | Задача: '{prompt[:70]}' | ui_msg_id: {ui_msg_id}")
-
-    conn = None; cursor = None
-    assigned_key = None
-    prev_interaction_id = None
-    environment_id = None
-    chat_summary = None
-    last_engine = None
-    last_input_tokens = 0
-    need_title_update = False
-    recent_history = []
-
-    if not is_tool_response:
-        clean_title_text = re.sub(r"\[Прикреплен.*?\]\s*Ссылка:.*?\n\n", "", prompt, flags=re.DOTALL).strip()
-        if not clean_title_text: clean_title_text = prompt
-        auto_title = clean_title_text[:30].replace("\n", " ").strip()
-        if len(clean_title_text) > 30: auto_title += "..."
-    else:
-        auto_title = "Новый диалог"
-
-    msg_role = "tool" if is_tool_response else "user"
-    text_for_db = db_summary if (is_tool_response and db_summary) else prompt
-
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-
-        await cursor.execute(
-            "SELECT key_index, last_interaction_id, environment_id, title, summary, last_engine, last_input_tokens FROM antigravity_chats WHERE chat_uid = %s",
-            (chat_uid,)
-        )
-        chat_row = await cursor.fetchone()
-
-        chat_summary = chat_row.get("summary") if chat_row else None
-        last_engine = chat_row.get("last_engine") if chat_row else None
-        last_input_tokens = int(chat_row.get("last_input_tokens") or 0) if chat_row else 0
-
-        if chat_row:
-            assigned_key = chat_row["key_index"]
-            prev_interaction_id = chat_row["last_interaction_id"]
-            environment_id = chat_row["environment_id"]
-            if chat_row.get("title") in ("Новый диалог", None, "") and not is_tool_response:
-                need_title_update = True
-        else:
-            assigned_key = await get_least_used_key_index(cursor)
-            await cursor.execute(
-                """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (chat_uid, auto_title, assigned_key, user_token, workspace_path)
-            )
-            await conn.commit()
-
-        logger.info(f"📋 [DB STATE] Чат: {chat_uid} | Ключ #{assigned_key} | prev_id: {prev_interaction_id[:12] if prev_interaction_id else 'None'} | env: {environment_id[:12] if environment_id else 'None'}")
-
-        await cursor.execute(
-            "SELECT role, text FROM antigravity_messages WHERE chat_uid = %s ORDER BY id ASC",
-            (chat_uid,)
-        )
-        recent_history = await cursor.fetchall() or []
-
-        await cursor.execute(
-            "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, %s, %s)",
-            (chat_uid, msg_role, text_for_db)
-        )
-        await conn.commit()
-
-    except Exception as dbe:
-        logger.error(f"[DB Error Before Task] {dbe}", exc_info=True)
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-    async def send_status_update(status_payload):
-        await send_antigravity_event(user_token, websocket, {
-            "type": "antigravity_status",
-            "ui_msg_id": ui_msg_id,
-            "chat_id": chat_uid,
-            **status_payload
-        })
-
-    async def send_chunk_update(delta: str):
-        if not delta:
-            return
-        await send_antigravity_event(user_token, websocket, {
-            "type": "antigravity_chunk",
-            "ui_msg_id": ui_msg_id,
-            "chat_id": chat_uid,
-            "delta": delta
-        })
-
-    active_antigravity_tasks[chat_uid] = asyncio.current_task()
-
-    try:
-        # Если это ответ IDE на тег — остаёмся на том же движке; иначе спрашиваем роутер 3.5-lite
-        if is_tool_response and last_engine in ("DIRECT", "ANTIGRAVITY"):
-            route = last_engine
-        else:
-            route = await ai_instance.classify_route(prompt)
-
-        used_engine = route
-        result = None
-
-        if route == "DIRECT":
-            direct_res = await ai_instance.run_direct_hydrogen(
-                prompt_text=prompt,
-                summary=chat_summary,
-                recent_history=recent_history,
-                status_callback=send_status_update,
-                chunk_callback=send_chunk_update,
-                assigned_key=assigned_key
-            )
-            if direct_res.get("escalate"):
-                logger.info("⬆️ [ESCALATE] Прямой Hydrogen запросил переход в Antigravity")
-                used_engine = "ANTIGRAVITY"
-            else:
-                result = {
-                    "text": direct_res["text"],
-                    "file_urls": {},
-                    "environment_id": environment_id,
-                    "interaction_id": prev_interaction_id,
-                    "assigned_key": direct_res.get("assigned_key", assigned_key),
-                    "usage": direct_res.get("usage", {})
-                }
-
-        if result is None:
-            used_engine = "ANTIGRAVITY"
-            # Если контекст в Antigravity раздулся > 120k токенов (или прошлый шаг был в DIRECT) —
-            # сбрасываем цепочку interaction_id, НО оставляем живой Linux-контейнер environment_id!
-            force_reset = (last_input_tokens > 120000) or (last_engine == "DIRECT")
-            result = await ai_instance.run_antigravity_agent(
-                prompt_text=prompt,
-                status_callback=send_status_update,
-                previous_interaction_id=prev_interaction_id,
-                environment_id=environment_id,
-                assigned_key=assigned_key,
-                chat_uid=chat_uid,
-                recent_history=recent_history,
-                summary=chat_summary,
-                force_reset_chain=force_reset
-            )
-
-        new_interaction_id = result["interaction_id"]
-        new_env_id = result["environment_id"]
-        agent_reply_text = result["text"]
-        final_assigned_key = result.get("assigned_key", assigned_key)
-        last_in_tokens = int((result.get("usage") or {}).get("input", 0) or 0)
-
-        logger.info(f"📤 [ANTIGRAVITY DONE] ({used_engine}) Ответ готов ({len(agent_reply_text)} симв.): '{agent_reply_text[:60]}...'")
-
-        try:
-            conn = await get_async_db_connection()
-            cursor = await conn.cursor()
-
-            new_files = result.get("file_urls", {})
-            synced_str = None
-            if new_files:
-                await cursor.execute("SELECT synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-                row_sf = await cursor.fetchone()
-                merged_files = {}
-                if row_sf and row_sf[0]:
-                    try:
-                        merged_files = json.loads(row_sf[0]) if isinstance(row_sf[0], str) else row_sf[0]
-                    except Exception: pass
-                merged_files.update(new_files)
-                synced_str = json.dumps(merged_files, ensure_ascii=False)
-            
-            if need_title_update:
-                await cursor.execute(
-                    """UPDATE antigravity_chats 
-                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, title = %s, 
-                           synced_files = COALESCE(%s, synced_files), last_engine = %s, last_input_tokens = %s, updated_at = NOW() 
-                       WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, final_assigned_key, auto_title, synced_str, used_engine, last_in_tokens, chat_uid)
-                )
-            else:
-                await cursor.execute(
-                    """UPDATE antigravity_chats 
-                       SET last_interaction_id = %s, environment_id = %s, key_index = %s, 
-                           synced_files = COALESCE(%s, synced_files), last_engine = %s, last_input_tokens = %s, updated_at = NOW() 
-                       WHERE chat_uid = %s""",
-                    (new_interaction_id, new_env_id, final_assigned_key, synced_str, used_engine, last_in_tokens, chat_uid)
-                )
-
-            await cursor.execute(
-                "INSERT INTO antigravity_messages (chat_uid, role, text) VALUES (%s, 'agent', %s)",
-                (chat_uid, agent_reply_text)
-            )
-            await conn.commit()
-        except Exception as dbe2:
-            logger.error(f"[DB Error After Task] {dbe2}")
-        finally:
-            if cursor: await cursor.close()
-            if conn: conn.close()
-
-        await send_antigravity_event(user_token, websocket, {
-            "type": "antigravity_result",
-            "ui_msg_id": ui_msg_id,
-            "text": agent_reply_text,
-            "file_urls": result.get("file_urls", {}),
-            "file_meta": build_synced_meta(chat_uid, result.get("file_urls", {})),
-            "environment_id": new_env_id,
-            "interaction_id": new_interaction_id,
-            "chat_id": chat_uid
-        })
-
-        #asyncio.create_task(_maybe_update_rolling_summary(chat_uid))
-
-    except asyncio.CancelledError:
-        logger.warning(f"🛑 [WS Antigravity] Задача {chat_uid} прервана! Очистка контекста...")
-        try:
-            conn = await get_async_db_connection()
-            cursor = await conn.cursor()
-            await cursor.execute(
-                "DELETE FROM antigravity_messages WHERE chat_uid = %s AND role IN ('user', 'tool') ORDER BY id DESC LIMIT 1",
-                (chat_uid,)
-            )
-            await cursor.execute(
-                "UPDATE antigravity_chats SET last_interaction_id = NULL, environment_id = NULL WHERE chat_uid = %s",
-                (chat_uid,)
-            )
-            await conn.commit()
-            logger.info(f"🧹 [CLEANUP SUCCESS] Окружение Google сброшено в NULL для чата {chat_uid}.")
-        except Exception as cle:
-            logger.warning(f"[WS Cleanup Error] {cle}")
-        finally:
-            if cursor: await cursor.close()
-            if conn: conn.close()
-
-        await send_antigravity_event(user_token, websocket, {
-            "type": "antigravity_cancelled",
-            "chat_id": chat_uid,
-            "ui_msg_id": ui_msg_id
-        })
-    except Exception as e:
-        logger.error(f"[WS Antigravity Error] {e}", exc_info=True)
-        await send_antigravity_event(user_token, websocket, {
-            "type": "antigravity_error",
-            "ui_msg_id": ui_msg_id,
-            "error": str(e)
-        })
-    finally:
-        active_antigravity_tasks.pop(chat_uid, None)
-
-
-async def handle_antigravity_list_server_files(websocket, data):
-    chat_uid = data.get("chat_uid")
-    if not chat_uid:
-        return
-    safe_uid = os.path.basename(chat_uid)
-    base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
-    files = []
-
-    if os.path.exists(base_dir):
-        for root, _, filenames in os.walk(base_dir):
-            for fname in filenames:
-                full_p = os.path.abspath(os.path.join(root, fname))
-                if not full_p.startswith(base_dir + os.sep):
-                    continue
-                rel_p = os.path.relpath(full_p, base_dir).replace("\\", "/")
-                try:
-                    st = os.stat(full_p)
-                    f_hash = None
-                    if st.st_size <= 50 * 1024 * 1024:
-                        h = hashlib.sha256()
-                        with open(full_p, "rb") as hf:
-                            for chunk in iter(lambda: hf.read(65536), b""):
-                                h.update(chunk)
-                        f_hash = h.hexdigest()
-                    files.append({
-                        "path": rel_p,
-                        "name": fname,
-                        "size": st.st_size,
-                        "mtime": int(st.st_mtime),
-                        "sha256": f_hash,
-                        "url": f"https://friday-assistant.ru/uploads/{safe_uid}/{urllib.parse.quote(rel_p)}?v={int(st.st_mtime)}"
-                    })
-                except Exception:
-                    pass
-    files.sort(key=lambda x: x["path"])
-    await async_send(websocket, {
-        "type": "server_files_list",
-        "chat_uid": chat_uid,
-        "files": files
-    })
-
-
-async def handle_antigravity_delete_server_file(websocket, data):
-    await handle_antigravity_delete_synced_file(websocket, data)
-    chat_uid = data.get("chat_uid")
-    file_path = (data.get("file_path") or "").strip().replace("\\", "/").lstrip("./")
-    if chat_uid and file_path:
-        base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', os.path.basename(chat_uid)))
-        parent = os.path.dirname(os.path.abspath(os.path.join(base_dir, file_path)))
-        while parent.startswith(base_dir + os.sep):
-            try:
-                if not os.listdir(parent):
-                    os.rmdir(parent)
-                    parent = os.path.dirname(parent)
-                else:
-                    break
-            except Exception:
-                break
-    await async_send(websocket, {
-        "type": "server_file_deleted",
-        "chat_uid": chat_uid,
-        "file_path": file_path
-    })
-
-
-async def handle_antigravity_list_env_files(websocket, data):
-    chat_uid = data.get("chat_uid")
-    if not chat_uid:
-        return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        await cursor.execute("SELECT environment_id, key_index FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        row = await cursor.fetchone()
-        env_id = row.get("environment_id") if row else None
-        key_idx = row.get("key_index") if row else None
-
-        if not env_id:
-            await async_send(websocket, {
-                "type": "env_files_list",
-                "chat_uid": chat_uid,
-                "has_env": False,
-                "files": []
-            })
-            return
-
-        files = await ai_instance.list_environment_files(env_id, key_index=key_idx)
-        await async_send(websocket, {
-            "type": "env_files_list",
-            "chat_uid": chat_uid,
-            "has_env": True,
-            "env_id": env_id,
-            "files": files
-        })
-    except Exception as e:
-        logger.error(f"[ENV LIST ERROR] {e}")
-        await async_send(websocket, {
-            "type": "env_files_list",
-            "chat_uid": chat_uid,
-            "has_env": True,
-            "error": str(e),
-            "files": []
-        })
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_download_env_file(websocket, data):
-    chat_uid = data.get("chat_uid")
-    remote_path = (data.get("remote_path") or "").strip()
-    if not chat_uid or not remote_path:
-        return
-    conn = None; cursor = None
-    try:
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        await cursor.execute("SELECT environment_id, key_index, synced_files FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        row = await cursor.fetchone()
-        if not row or not row.get("environment_id"):
-            await async_send(websocket, {
-                "type": "fm_error",
-                "chat_uid": chat_uid,
-                "error": "Песочница не создана для этого диалога"
-            })
-            return
-
-        res = await ai_instance.download_environment_file(
-            row["environment_id"], remote_path, chat_uid, key_index=row.get("key_index")
-        )
-
-        sf = {}
-        if row.get("synced_files"):
-            try:
-                sf = json.loads(row["synced_files"]) if isinstance(row["synced_files"], str) else dict(row["synced_files"])
-            except Exception:
-                sf = {}
-        sf[res["path"]] = res["url"]
-        await cursor.execute(
-            "UPDATE antigravity_chats SET synced_files = %s WHERE chat_uid = %s",
-            (json.dumps(sf, ensure_ascii=False), chat_uid)
-        )
-        await conn.commit()
-
-        await async_send(websocket, {
-            "type": "env_file_downloaded",
-            "chat_uid": chat_uid,
-            "file_path": res["path"],
-            "url": res["url"],
-            "size": res["size"]
-        })
-    except Exception as e:
-        logger.error(f"[ENV DOWNLOAD ERROR] {e}")
-        await async_send(websocket, {
-            "type": "fm_error",
-            "chat_uid": chat_uid,
-            "error": f"Ошибка скачивания из песочницы: {e}"
-        })
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
-
-
-async def handle_antigravity_upload_env_file(websocket, data):
-    chat_uid = data.get("chat_uid")
-    local_filename = os.path.basename(data.get("local_filename") or "")
-    remote_path = (data.get("remote_path") or "").strip()
-    if not chat_uid or not local_filename or not remote_path:
-        return
-    conn = None; cursor = None
-    try:
-        safe_uid = os.path.basename(chat_uid)
-        base_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', safe_uid))
-        local_server_path = os.path.abspath(os.path.join(base_dir, local_filename))
-        if not local_server_path.startswith(base_dir + os.sep) or not os.path.exists(local_server_path):
-            raise FileNotFoundError("Загруженный файл не найден на сервере")
-
-        conn = await get_async_db_connection()
-        cursor = await conn.cursor(aiomysql.DictCursor)
-        await cursor.execute("SELECT environment_id, key_index FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
-        row = await cursor.fetchone()
-        if not row or not row.get("environment_id"):
-            raise RuntimeError("Песочница ещё не создана")
-
-        uploaded_path = await ai_instance.upload_file_to_environment(
-            row["environment_id"], local_server_path, remote_path, key_index=row.get("key_index")
-        )
-        await async_send(websocket, {
-            "type": "env_file_uploaded",
-            "chat_uid": chat_uid,
-            "remote_path": uploaded_path
-        })
-    except Exception as e:
-        logger.error(f"[ENV UPLOAD ERROR] {e}")
-        await async_send(websocket, {
-            "type": "fm_error",
-            "chat_uid": chat_uid,
-            "error": f"Ошибка загрузки в песочницу: {e}"
-        })
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()

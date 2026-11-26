@@ -132,7 +132,7 @@ def render_admin_models_html() -> str:
   </div>
 
   <div class="field">
-    <label for="rt-model">Router (классификатор)</label>
+    <label for="rt-model">Direct Reserve (резервная модель при сбое Direct)</label>
     <input id="rt-model" list="model-presets" value="{rt}" placeholder="gemini-3.5-flash-lite">
   </div>
 
