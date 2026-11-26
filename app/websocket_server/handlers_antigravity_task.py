@@ -4,6 +4,7 @@ import time
 import asyncio
 import logging
 import aiomysql
+import os
 
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
