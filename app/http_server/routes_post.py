@@ -15,6 +15,7 @@ from app.database.connection import get_db_connection
 from app.services.ai_service import ai_instance
 from app.utils.email_sender import send_email
 import urllib.parse
+import re
 
 logger = logging.getLogger("HTTP_Server")
 
@@ -33,6 +34,19 @@ def notify_ws(user_id, payload):
     except Exception as e:
         logger.error(f"Failed to notify WS server: {e}")
 
+def _normalize_upload_rel_path(raw_name: str) -> str:
+    name = (raw_name or "file.bin").strip().replace("\\", "/")
+    name = re.sub(r"^(\./)+", "", name).lstrip("/")
+
+    base_only = os.path.basename(name)
+    m = re.match(r"^(?:[lmnpq][a-z0-9]{7}|(?=[a-z0-9]{7,10}_)(?=.*[0-9])[a-z0-9]{7,10})_(.+)$", base_only)
+    if m and ("/" not in name):
+        rest = m.group(1)
+        name = rest.replace("__", "/") if "__" in rest else rest
+
+    parts = [p for p in name.split("/") if p and p not in (".", "..")]
+    return "/".join(parts) if parts else "file.bin"
+
 def do_POST(self):
     if self.path == '/api/upload':
         try:
@@ -50,28 +64,44 @@ def do_POST(self):
                 raw_filename = self.headers.get('X-Filename', 'file.bin')
                 filename = urllib.parse.unquote(raw_filename)
 
-            clean_filename = os.path.basename(filename)
+            clean_rel_path = _normalize_upload_rel_path(filename)
             chat_uid = os.path.basename(self.headers.get('X-Chat-Uid', 'global'))
 
-            upload_dir = os.path.join('/opt/friday/storage/uploads', chat_uid)
+            upload_dir = os.path.abspath(os.path.join('/opt/friday/storage/uploads', chat_uid))
             os.makedirs(upload_dir, exist_ok=True)
-            dest_path = os.path.join(upload_dir, clean_filename)
+            dest_path = os.path.abspath(os.path.join(upload_dir, clean_rel_path))
+            if not dest_path.startswith(upload_dir + os.sep):
+                return self.send_json(400, {"status": "error", "message": "Некорректный путь файла"})
+
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
             remaining = content_length
             chunk_size = 64 * 1024
             with open(dest_path, 'wb') as f:
                 while remaining > 0:
                     chunk = self.rfile.read(min(remaining, chunk_size))
-                    if not chunk: break
+                    if not chunk:
+                        break
                     f.write(chunk)
                     remaining -= len(chunk)
 
-            logger.info(f"[Upload] Файл {clean_filename} ({content_length} байт) сохранен для чата {chat_uid}")
+            # Чистим старые префиксные дубли вида mwxmz98t_js__entities.js в корне чата
+            flat_suffix = "_" + clean_rel_path.replace("/", "__")
+            for old_name in os.listdir(upload_dir):
+                old_full = os.path.join(upload_dir, old_name)
+                if os.path.isfile(old_full) and old_name.endswith(flat_suffix):
+                    if re.match(r"^(?:[lmnpq][a-z0-9]{7}|(?=[a-z0-9]{7,10}_)(?=.*[0-9])[a-z0-9]{7,10})_", old_name):
+                        try:
+                            os.remove(old_full)
+                        except Exception:
+                            pass
 
-            download_url = f"https://friday-assistant.ru/uploads/{chat_uid}/{urllib.parse.quote(clean_filename)}"
+            logger.info(f"[Upload] Файл {clean_rel_path} ({content_length} байт) сохранен для чата {chat_uid}")
+
+            download_url = f"https://friday-assistant.ru/uploads/{chat_uid}/{urllib.parse.quote(clean_rel_path)}?v={int(time.time())}"
             return self.send_json(200, {
                 "status": "success",
-                "filename": clean_filename,
+                "filename": clean_rel_path,
                 "url": download_url,
                 "size": content_length
             })

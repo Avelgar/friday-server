@@ -105,6 +105,32 @@ def _sanitize_sync_path(raw_path: str) -> str | None:
         return None
     return p
 
+def _extract_and_normalize_sync_tags(output_text: str) -> tuple[str, list[str]]:
+    text = output_text or ""
+    found: list[str] = []
+
+    def _norm_bracket(m):
+        clean = _sanitize_sync_path(m.group(1))
+        if clean:
+            if clean not in found:
+                found.append(clean)
+            return f"[SYNC: {clean}]"
+        return m.group(0)
+
+    text = re.sub(r"\[SYNC:\s*([^\]]+)\]", _norm_bracket, text, flags=re.IGNORECASE)
+
+    if not found:
+        def _norm_bare(m):
+            clean = _sanitize_sync_path(m.group(1))
+            if clean and ("." in os.path.basename(clean) or "/" in clean):
+                if clean not in found:
+                    found.append(clean)
+                return f"[SYNC: {clean}]"
+            return m.group(0)
+
+        text = re.sub(r"(?im)^\s*sync:\s*([^\s,\]]+)\s*$", _norm_bare, text)
+
+    return text, found
 
 async def run_antigravity_agent(
     key_pool: GeminiKeyPool,
@@ -249,8 +275,30 @@ async def run_antigravity_agent(
                 err_obj = str(getattr(interaction, "error", "Unknown error"))
                 raise Exception(f"Задача Antigravity завершилась ошибкой: {err_obj}")
 
-            output_text = extract_interaction_text(interaction)
-            sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
+            output_text, sync_matches = _extract_and_normalize_sync_tags(extract_interaction_text(interaction))
+
+            # Если агент упёрся в лимит до вывода тега [SYNC: ...], забираем выбранные файлы из песочницы сами
+            if "incomplete" in status_raw and not sync_matches and env_id and selected_files:
+                try:
+                    env_files = await list_environment_files(api_keys, env_id, key_index=assigned_key)
+                    selected_norm = {
+                        re.sub(r"^(\./)+", "", f.strip().replace("\\", "/")).lstrip("/")
+                        for f in selected_files if f and f.strip()
+                    }
+                    selected_names = {os.path.basename(s) for s in selected_norm}
+                    auto_sync = []
+                    for ef in env_files:
+                        ep = re.sub(r"^(\./)+", "", str(ef.get("path") or "").lstrip("/"))
+                        if ep.startswith("workspace/"):
+                            ep = ep[len("workspace/"):]
+                        if ep in selected_norm or os.path.basename(ep) in selected_names:
+                            if ep not in auto_sync:
+                                auto_sync.append(ep)
+                    if auto_sync:
+                        sync_matches = auto_sync
+                        output_text = (output_text.rstrip() + "\n\n" + "\n".join(f"[SYNC: {p}]" for p in auto_sync)).strip()
+                except Exception as auto_e:
+                    logger.warning(f"⚠️ [INCOMPLETE AUTO-SYNC ERR] {auto_e}")
             file_urls = {}
 
             if sync_matches and env_id:

@@ -28,7 +28,7 @@ def do_GET(self):
     elif path == '/ui.js': self.serve_file('ui.js', 'application/javascript; charset=utf-8') 
     elif path == '/media.js': self.serve_file('media.js', 'application/javascript; charset=utf-8') 
     elif path == '/images/f.png': self.serve_file('images/f.png', 'image/png')
-    if path == '/admin/models':
+    elif path == '/admin/models':
         from app.services.ai.model_config import render_admin_models_html
         body = render_admin_models_html().encode('utf-8')
         self.send_response(200)
