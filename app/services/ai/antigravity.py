@@ -75,6 +75,22 @@ def _is_dead_project_error(err_str: str) -> bool:
     )
 
 
+def _describe_step(step) -> str:
+    stype = getattr(step, "type", None) or getattr(step, "step_type", None) or type(step).__name__
+    content = getattr(step, "content", None) or []
+    preview = ""
+    if isinstance(content, list) and content:
+        first = content[0]
+        preview = (
+            getattr(first, "text", None)
+            or getattr(first, "name", None)
+            or getattr(first, "command", None)
+            or ""
+        )
+    preview = str(preview).replace("\n", " ").strip()[:80]
+    return f"{stype}: {preview}" if preview else str(stype)
+
+
 async def run_antigravity_agent(
     key_pool: GeminiKeyPool,
     api_keys: list[str],
@@ -97,9 +113,10 @@ async def run_antigravity_agent(
     if assigned_key is None or not key_pool.is_usable(assigned_key, model=model_tag):
         assigned_key = key_pool.get_best_key(model=model_tag)
 
-    max_attempts = min(total_keys, 6) if total_keys > 0 else 2
-    attempt = 0
-    ag_model = normalize_model_name(get_models_config()["antigravity_model"])
+    primary_ag_model = normalize_model_name(get_models_config()["antigravity_model"])
+    ag_models_queue = [primary_ag_model]
+    if primary_ag_model != "gemini-3.5-flash-lite":
+        ag_models_queue.append("gemini-3.5-flash-lite")
 
     full_input = format_stateless_prompt(
         prompt_text=prompt_text,
@@ -114,12 +131,16 @@ async def run_antigravity_agent(
     if need_network:
         tools.extend([{"type": "google_search"}, {"type": "url_context"}])
 
-    while attempt < max_attempts:
+    max_attempts = min(max(total_keys, 2), 6)
+    model_idx = 0
+
+    for attempt in range(max_attempts):
+        ag_model = ag_models_queue[min(model_idx, len(ag_models_queue) - 1)]
         tried.add(assigned_key)
         slot = await ag_limiter.acquire(est_tokens, status_callback=status_callback)
         try:
             if status_callback:
-                await status_callback({"status": f"Запуск чистой песочницы ({ag_model}, ключ #{assigned_key})..."})
+                await status_callback({"status": f"Запуск песочницы ({ag_model}, ключ #{assigned_key})..."})
 
             req_kwargs = {
                 "agent": "antigravity-preview-09-2026",
@@ -149,17 +170,17 @@ async def run_antigravity_agent(
             logger.info(f"🆔 [GOOGLE CREATED] interaction_id={new_interaction_id} | env_id={env_id}")
 
             if status_callback:
-                await status_callback({"status": "Агент работает в песочнице...", "interaction_id": new_interaction_id})
+                await status_callback({"status": f"Агент работает ({ag_model})...", "interaction_id": new_interaction_id})
 
             poll_count = 0
             consecutive_poll_errors = 0
+            logged_steps = 0
             poll_client = create_genai_client(api_keys, assigned_key, timeout=180000)
 
             while True:
                 await asyncio.sleep(2.5)
                 poll_count += 1
                 try:
-                    # Опрос ВСЕГДА тем же ключом, который создал interaction_id!
                     interaction = await asyncio.wait_for(
                         asyncio.to_thread(poll_client.interactions.get, id=new_interaction_id),
                         timeout=25.0
@@ -175,26 +196,48 @@ async def run_antigravity_agent(
                     await asyncio.sleep(2.0)
                     continue
 
+                steps = getattr(interaction, "steps", None) or []
+                while logged_steps < len(steps):
+                    logger.info(f"🧩 [ANTIGRAVITY STEP #{logged_steps + 1}] {_describe_step(steps[logged_steps])}")
+                    logged_steps += 1
+
                 status_raw = str(getattr(interaction, "status", "")).lower().strip()
                 if poll_count % 5 == 0:
-                    logger.info(f"⏳ [ANTIGRAVITY POLLING] Статус: {status_raw} (шаг {poll_count})")
+                    logger.info(f"⏳ [ANTIGRAVITY POLLING] Статус: {status_raw} (шаг {poll_count}, {poll_count * 2.5:.0f}с)")
 
                 if status_callback:
-                    await status_callback({"status": f"Агент работает ({poll_count * 2.5:.0f}с)..."})
+                    await status_callback({"status": f"Агент работает ({poll_count * 2.5:.0f}с, шагов: {len(steps)})..."})
 
-                if "complete" in status_raw or "fail" in status_raw or "cancel" in status_raw:
+                if status_raw in ("completed", "incomplete", "failed", "cancelled") or any(k in status_raw for k in ("complete", "fail", "cancel")):
                     logger.info(f"🏁 [ANTIGRAVITY DONE] Статус: {status_raw}")
                     break
+
+                if poll_count >= 72:  # 180 секунд
+                    raise TimeoutError(f"Песочница ({ag_model}) зависла дольше 180 секунд.")
 
             usage = extract_usage_tokens(interaction)
             await ag_limiter.finalize(slot, usage["total"] or est_tokens)
             logger.info(f"📊 [ANTIGRAVITY USAGE] Ключ #{assigned_key} | in={usage['input']} cached={usage['cached']} out={usage['output']} total={usage['total']}")
 
-            if "fail" in str(getattr(interaction, "status", "")).lower():
+            if "cancel" in status_raw:
+                # Google сам прервал задачу (часто бывает при зависании в песочнице на 4-hydrogen / 3.6-flash)
+                if model_idx + 1 < len(ag_models_queue):
+                    logger.warning(f"⚠️ [SANDBOX CANCELLED] {ag_model} отменён Google; повторяем на {ag_models_queue[model_idx + 1]}...")
+                    model_idx += 1
+                    continue
+                raise RuntimeError("Google прервал выполнение задачи в песочнице (status=cancelled).")
+
+            if "fail" in status_raw:
                 err_obj = str(getattr(interaction, "error", "Unknown error"))
                 raise Exception(f"Задача Antigravity завершилась ошибкой: {err_obj}")
 
             output_text = extract_interaction_text(interaction)
+            if "incomplete" in status_raw:
+                if output_text.strip():
+                    output_text += "\n\n[Достигнут лимит 60K токенов на 1 запуск — часть работы выполнена. Напиши «продолжай», чтобы продолжить с текущего места.]"
+                else:
+                    raise RuntimeError("Достигнут лимит 60K токенов внутри песочницы до формирования ответа. Уменьши число файлов или разбей задачу.")
+
             sync_matches = re.findall(r"\[SYNC:\s*([^\]]+)\]", output_text)
             file_urls = {}
 
@@ -292,18 +335,20 @@ async def run_antigravity_agent(
                 "files": {},
                 "file_urls": file_urls,
                 "environment_id": env_id,
-                "interaction_id": None,  # Никогда не продолжаем цепочку
+                "interaction_id": None,
                 "assigned_key": assigned_key,
                 "usage": usage,
             }
 
         except asyncio.CancelledError:
             raise
-        except (asyncio.TimeoutError, TimeoutError):
-            logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} не ответил за 30с.")
+        except (asyncio.TimeoutError, TimeoutError) as te:
+            logger.warning(f"⏰ [ТАЙМАУТ] Ключ #{assigned_key} ({ag_model}): {te}")
+            if "зависла дольше" in str(te) and model_idx + 1 < len(ag_models_queue):
+                model_idx += 1
+                continue
             key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)
             assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
-            attempt += 1
         except Exception as e:
             err_str = str(e)
             err_lower = err_str.lower()
@@ -321,9 +366,7 @@ async def run_antigravity_agent(
                 key_pool.mark_exhausted(assigned_key, duration_seconds=1800, model=model_tag)
                 assigned_key = key_pool.get_best_key(model=model_tag, exclude_indices=tried)
 
-            attempt += 1
-
-    raise Exception("Все доступные ключи не отвечают или исчерпали квоту.")
+    raise Exception("Не удалось выполнить задачу в Antigravity.")
 
 
 async def list_environment_files(api_keys: list[str], env_id: str, key_index: int = 0):

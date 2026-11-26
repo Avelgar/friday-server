@@ -196,13 +196,36 @@ async def handle_antigravity_task(websocket, data):
                 assigned_key=assigned_key,
             )
             if direct_res.get("escalate"):
-                logger.info("⬆️ [DIRECT -> ANTIGRAVITY] Передача задачи в песочницу")
-                used_engine = "ANTIGRAVITY"
-                if direct_res.get("ag_task"):
-                    ag_task_prompt = direct_res["ag_task"]
-                if direct_res.get("ag_files"):
-                    ag_selected_files = direct_res["ag_files"]
-                ag_need_network = bool(direct_res.get("need_network", False))
+                cand_files = direct_res.get("ag_files") or []
+                manifest_paths = {f["path"] for f in file_manifest}
+                manifest_names = {os.path.basename(p) for p in manifest_paths}
+
+                missing_on_server = [
+                    f for f in cand_files
+                    if f not in manifest_paths
+                    and os.path.basename(f) not in manifest_names
+                    and project_tree
+                    and os.path.basename(f) in project_tree
+                ]
+
+                if missing_on_server:
+                    logger.info(f"📥 [PRE-FETCH] Файлы не на сервере, запрашиваем через IDE без Antigravity: {missing_on_server}")
+                    result = {
+                        "text": f"[GET_FILES: {', '.join(missing_on_server)}]",
+                        "file_urls": {},
+                        "environment_id": None,
+                        "interaction_id": None,
+                        "assigned_key": direct_res.get("assigned_key", assigned_key),
+                        "usage": {},
+                    }
+                else:
+                    logger.info("⬆️ [DIRECT -> ANTIGRAVITY] Передача задачи в песочницу")
+                    used_engine = "ANTIGRAVITY"
+                    if direct_res.get("ag_task"):
+                        ag_task_prompt = direct_res["ag_task"]
+                    if cand_files:
+                        ag_selected_files = cand_files
+                    ag_need_network = bool(direct_res.get("need_network", False))
             else:
                 result = {
                     "text": direct_res["text"],

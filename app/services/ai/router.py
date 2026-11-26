@@ -236,12 +236,16 @@ async def run_direct(
 
     for model_name in model_candidates:
         is_25 = "2.5" in model_name
-        thinking_cfg = types.ThinkingConfig(thinking_budget=0) if is_25 else types.ThinkingConfig(thinking_level="low")
-        config = types.GenerateContentConfig(
-            system_instruction=full_system_instruction,
-            max_output_tokens=8192,
-            thinking_config=thinking_cfg,
-        )
+        thinking_cfg = types.ThinkingConfig(thinking_budget=0) if is_25 else types.ThinkingConfig(thinking_level="high")
+        afc_cfg = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
+        config_kwargs = {
+            "system_instruction": full_system_instruction,
+            "max_output_tokens": 8192,
+            "thinking_config": thinking_cfg,
+        }
+        if afc_cfg is not None:
+            config_kwargs["automatic_function_calling"] = afc_cfg
+        config = types.GenerateContentConfig(**config_kwargs)
 
         tried: set[int] = set()
         for _ in range(max_key_attempts):
