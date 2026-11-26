@@ -138,6 +138,24 @@ def _extract_and_normalize_sync_tags(output_text: str) -> tuple[str, list[str]]:
 
     return text, found
 
+def _extract_text_any(interaction, streamed_fallback: str = "") -> str:
+    txt = extract_interaction_text(interaction)
+    if txt and txt.strip():
+        return txt
+    outputs = getattr(interaction, "outputs", None) or []
+    parts = []
+    for out in outputs:
+        t = getattr(out, "text", None)
+        if not t and isinstance(out, dict):
+            t = out.get("text")
+        if t:
+            parts.append(t)
+    if parts:
+        return "\n".join(parts)
+    if streamed_fallback and streamed_fallback.strip():
+        return streamed_fallback.strip()
+    return ""
+
 
 async def _cancel_interaction_safe(api_keys: list[str], key_index: int, interaction_id: str):
     try:
@@ -155,12 +173,14 @@ async def _observe_interaction(
     ag_model: str,
     status_callback=None,
     timeout_sec: float = 300.0,
-):
+) -> tuple[object, str]:
     loop = asyncio.get_running_loop()
     start_ts = time.monotonic()
     deadline = start_ts + timeout_sec
     last_event_id = None
     live_step_num = 0
+    current_step_type = ""
+    streamed_text_parts: list[str] = []
     consecutive_errors = 0
     use_streaming = True
 
@@ -206,7 +226,7 @@ async def _observe_interaction(
                 if status_callback:
                     await status_callback({"status": f"Агент работает ({elapsed:.0f}с)..."})
                 if status_raw in ("completed", "incomplete", "failed", "cancelled") or any(k in status_raw for k in ("complete", "fail", "cancel")):
-                    return interaction
+                    return interaction, "".join(streamed_text_parts)
 
         event_queue: asyncio.Queue = asyncio.Queue()
         stop_event = threading.Event()
@@ -244,7 +264,8 @@ async def _observe_interaction(
                     pass
 
         worker_task = asyncio.create_task(asyncio.to_thread(_stream_worker))
-        final_interaction = None
+        event_interaction = None
+        got_terminal_event = False
 
         try:
             while True:
@@ -272,10 +293,18 @@ async def _observe_interaction(
                     if etype == "step.start":
                         live_step_num += 1
                         step_obj = getattr(ev, "step", None)
-                        stype = getattr(step_obj, "type", None) or "step"
-                        logger.info(f"🧩 [AG LIVE #{live_step_num}] Старт: {stype} ({elapsed:.0f}с)")
+                        current_step_type = str(getattr(step_obj, "type", None) or "step").lower()
+                        logger.info(f"🧩 [AG LIVE #{live_step_num}] Старт: {current_step_type} ({elapsed:.0f}с)")
                         if status_callback:
-                            await status_callback({"status": f"Шаг #{live_step_num}: {stype} ({elapsed:.0f}с)..."})
+                            await status_callback({"status": f"Шаг #{live_step_num}: {current_step_type} ({elapsed:.0f}с)..."})
+
+                    elif etype == "step.delta":
+                        delta = getattr(ev, "delta", None)
+                        if delta is not None:
+                            dtype = str(getattr(delta, "type", "") or "").lower()
+                            dtext = getattr(delta, "text", None)
+                            if dtext and dtype != "thought_summary" and (dtype == "text" or current_step_type == "model_output"):
+                                streamed_text_parts.append(str(dtext))
 
                     elif etype == "step.stop":
                         u = getattr(ev, "usage", None) or getattr(ev, "step_usage", None)
@@ -287,7 +316,8 @@ async def _observe_interaction(
                             logger.info(f"   ↳ [STEP #{live_step_num} TOKENS] in={inp} cached={cac} out={out} total={tot}")
 
                     elif etype in ("interaction.completed", "interaction.incomplete", "interaction.failed", "interaction.cancelled"):
-                        final_interaction = getattr(ev, "interaction", None)
+                        event_interaction = getattr(ev, "interaction", None)
+                        got_terminal_event = True
                         logger.info(f"🏁 [ANTIGRAVITY STREAM DONE] {etype} ({elapsed:.0f}с)")
                         break
 
@@ -322,14 +352,20 @@ async def _observe_interaction(
                 except BaseException:
                     pass
 
-        if final_interaction is not None:
-            return final_interaction
+        # Дочитываем полный объект Interaction (в нём есть steps/output_text, которых нет в SSE-событии)
+        checked = None
+        try:
+            check_client = create_genai_client(api_keys, assigned_key, timeout=30000)
+            checked = await asyncio.wait_for(asyncio.to_thread(check_client.interactions.get, id=interaction_id), timeout=25.0)
+        except Exception as ge:
+            logger.warning(f"⚠️ [GET FINAL INTERACTION ERR] {ge}")
 
-        check_client = create_genai_client(api_keys, assigned_key, timeout=30000)
-        checked = await asyncio.wait_for(asyncio.to_thread(check_client.interactions.get, id=interaction_id), timeout=25.0)
-        st_raw = str(getattr(checked, "status", "")).lower().strip()
-        if st_raw in ("completed", "incomplete", "failed", "cancelled") or any(k in st_raw for k in ("complete", "fail", "cancel")):
-            return checked
+        final_obj = checked or event_interaction
+        if final_obj is not None:
+            st_raw = str(getattr(final_obj, "status", "")).lower().strip()
+            if got_terminal_event or st_raw in ("completed", "incomplete", "failed", "cancelled") or any(k in st_raw for k in ("complete", "fail", "cancel")):
+                return final_obj, "".join(streamed_text_parts)
+
         await asyncio.sleep(1.5)
 
 
@@ -425,7 +461,7 @@ async def run_antigravity_agent(
         if status_callback:
             await status_callback({"status": f"Агент запущен ({ag_model})...", "interaction_id": new_interaction_id})
 
-        interaction = await _observe_interaction(
+        interaction, streamed_text = await _observe_interaction(
             api_keys=api_keys,
             assigned_key=assigned_key,
             interaction_id=new_interaction_id,
@@ -453,7 +489,8 @@ async def run_antigravity_agent(
             err_obj = str(getattr(interaction, "error", "Unknown error"))
             raise Exception(f"Задача Antigravity завершилась ошибкой: {err_obj}")
 
-        output_text, sync_matches = _extract_and_normalize_sync_tags(extract_interaction_text(interaction))
+        raw_text = _extract_text_any(interaction, streamed_fallback=streamed_text)
+        output_text, sync_matches = _extract_and_normalize_sync_tags(raw_text)
 
         if "incomplete" in status_raw and not sync_matches and env_id and selected_files:
             try:
