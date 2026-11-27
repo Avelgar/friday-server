@@ -24,6 +24,28 @@ from app.websocket_server.antigravity_storage import (
 logger = logging.getLogger("WS_Server")
 
 
+def _format_plan_message(plan: dict) -> str:
+    summary = (plan.get("summary") or "").strip()
+    steps = plan.get("steps") or []
+    lines = ["📋 **План выполнения:**"]
+    if summary:
+        lines.append(summary)
+    lines.append("")
+    for idx, st in enumerate(steps, start=1):
+        f_name = st.get("file") or "новый файл"
+        lr = (st.get("line_ranges") or "").strip()
+        lr_str = f" (строки `{lr}`)" if lr else ""
+        title = (st.get("title") or "").strip()
+        instr = (st.get("instruction") or "").strip()
+        head = f"**{idx}. `{f_name}`{lr_str}**" + (f" — {title}" if title else "")
+        lines.append(head)
+        if instr:
+            lines.append(f"   {instr}")
+    lines.append("")
+    lines.append("[ASK_USER: Запустить выполнение этого плана? | Выполнить план | Отмена]")
+    return "\n".join(lines)
+
+
 async def handle_antigravity_cancel_task(websocket, data):
     chat_uid = data.get("chat_id")
     ui_msg_id = data.get("ui_msg_id")
@@ -175,16 +197,109 @@ async def handle_antigravity_task(websocket, data):
     try:
         project_tree = chat_state.get("project_tree")
         file_manifest = build_server_file_manifest(chat_uid, synced_files_dict)
+        pending_plan = chat_state.get("pending_plan")
 
-        run_direct_first = not (is_tool_response and last_engine == "ANTIGRAVITY")
-        used_engine = "DIRECT" if run_direct_first else "ANTIGRAVITY"
+        used_engine = "DIRECT"
         result = None
 
-        ag_task_prompt = prompt
-        ag_selected_files = list(target_files) if target_files else []
-        ag_need_network = False
+        # === ВЕТКА 1: Ответ пользователя на предложенный план ===
+        if pending_plan:
+            ans_low = prompt.strip().lower()
+            if any(w in ans_low for w in ("отмен", "cancel", "не надо", "стоп")) or ans_low == "нет":
+                chat_state.pop("pending_plan", None)
+                save_chat_state(chat_uid, chat_state)
+                result = {
+                    "text": "План отменён.",
+                    "file_urls": {},
+                    "environment_id": None,
+                    "assigned_key": assigned_key,
+                    "usage": {},
+                }
+            elif any(w in ans_low for w in ("выполн", "запуст", "поехали", "да", "ok", "ок", "старт")):
+                chat_state.pop("pending_plan", None)
+                save_chat_state(chat_uid, chat_state)
 
-        if run_direct_first:
+                steps = pending_plan.get("steps") or []
+                need_network = bool(pending_plan.get("need_network", False))
+                used_engine = "ANTIGRAVITY"
+
+                all_file_urls = {}
+                step_reports = []
+                last_env_id = None
+                total_in_acc = 0
+
+                for idx, st in enumerate(steps, start=1):
+                    st_file = (st.get("file") or "").strip()
+                    st_lines = (st.get("line_ranges") or "").strip()
+                    st_title = (st.get("title") or st_file or f"Шаг {idx}").strip()
+                    st_instr = (st.get("instruction") or "").strip()
+
+                    await send_status_update({"status": f"Выполнение плана: шаг {idx}/{len(steps)} ({st_file or 'новый файл'})..."})
+                    await send_chunk_update(f"\n⚙️ **Шаг {idx}/{len(steps)}** (`{st_file}`): в работе...\n")
+
+                    # Обновляем манифест перед каждым шагом (на случай если прошлый шаг уже изменил файл)
+                    cur_manifest = build_server_file_manifest(chat_uid, {**synced_files_dict, **all_file_urls})
+                    sel = [st_file] if st_file else []
+
+                    step_res = await ai_instance.run_antigravity_agent(
+                        prompt_text=st_instr,
+                        status_callback=send_status_update,
+                        assigned_key=assigned_key,
+                        chat_uid=chat_uid,
+                        recent_history=recent_history[-4:],
+                        project_tree=project_tree,
+                        file_manifest=cur_manifest,
+                        selected_files=sel,
+                        line_ranges=st_lines,
+                        need_network=need_network,
+                        max_total_tokens=85_000,
+                    )
+
+                    last_env_id = step_res.get("environment_id") or last_env_id
+                    assigned_key = step_res.get("assigned_key", assigned_key)
+                    total_in_acc += int((step_res.get("usage") or {}).get("input", 0) or 0)
+
+                    step_urls = step_res.get("file_urls") or {}
+                    all_file_urls.update(step_urls)
+
+                    clean_step_txt = re.sub(r"\[SYNC:\s*[^\]]+\]", "", step_res.get("text") or "", flags=re.IGNORECASE).strip()
+                    step_reports.append(f"✅ **Шаг {idx}/{len(steps)} ({st_title}):** {clean_step_txt or 'готово'}")
+
+                sync_block = "\n".join(f"[SYNC: {p}]" for p in all_file_urls.keys())
+                final_txt = "\n\n".join(step_reports)
+                if sync_block:
+                    final_txt = f"{sync_block}\n\n{final_txt}"
+
+                result = {
+                    "text": final_txt.strip(),
+                    "file_urls": all_file_urls,
+                    "environment_id": last_env_id,
+                    "assigned_key": assigned_key,
+                    "usage": {"input": total_in_acc},
+                }
+            else:
+                # Пользователь написал правку к плану — сбрасываем старый план и идём дальше как новый запрос
+                chat_state.pop("pending_plan", None)
+                save_chat_state(chat_uid, chat_state)
+
+        # === ВЕТКА 2: Ответ IDE на тег, который запросил сам Antigravity ===
+        if result is None and is_tool_response and last_engine == "ANTIGRAVITY":
+            used_engine = "ANTIGRAVITY"
+            result = await ai_instance.run_antigravity_agent(
+                prompt_text=prompt,
+                status_callback=send_status_update,
+                assigned_key=assigned_key,
+                chat_uid=chat_uid,
+                recent_history=recent_history,
+                project_tree=project_tree,
+                file_manifest=file_manifest,
+                selected_files=list(target_files) if target_files else [],
+                need_network=False,
+                max_total_tokens=85_000,
+            )
+
+        # === ВЕТКА 3: Обычный вход через Direct (3.5-flash-lite) -> при работе с файлами в Планировщик ===
+        if result is None:
             direct_res = await ai_instance.run_direct(
                 prompt_text=prompt,
                 recent_history=recent_history,
@@ -194,7 +309,17 @@ async def handle_antigravity_task(websocket, data):
                 chunk_callback=send_chunk_update,
                 assigned_key=assigned_key,
             )
-            if direct_res.get("escalate"):
+
+            if not direct_res.get("escalate"):
+                used_engine = "DIRECT"
+                result = {
+                    "text": direct_res["text"],
+                    "file_urls": {},
+                    "environment_id": None,
+                    "assigned_key": direct_res.get("assigned_key", assigned_key),
+                    "usage": direct_res.get("usage", {}),
+                }
+            else:
                 cand_files = direct_res.get("ag_files") or []
                 manifest_paths = {f["path"] for f in file_manifest}
                 manifest_names = {os.path.basename(p) for p in manifest_paths}
@@ -208,47 +333,74 @@ async def handle_antigravity_task(websocket, data):
                 ]
 
                 if missing_on_server:
-                    logger.info(f"📥 [PRE-FETCH] Файлы не на сервере, запрашиваем через IDE без Antigravity: {missing_on_server}")
+                    logger.info(f"📥 [PRE-FETCH] Файлы не на сервере, запрашиваем через IDE: {missing_on_server}")
+                    used_engine = "DIRECT"
                     result = {
                         "text": f"[GET_FILES: {', '.join(missing_on_server)}]",
                         "file_urls": {},
                         "environment_id": None,
-                        "interaction_id": None,
                         "assigned_key": direct_res.get("assigned_key", assigned_key),
                         "usage": {},
                     }
                 else:
-                    logger.info("⬆️ [DIRECT -> ANTIGRAVITY] Передача задачи в песочницу")
-                    used_engine = "ANTIGRAVITY"
-                    if direct_res.get("ag_task"):
-                        ag_task_prompt = direct_res["ag_task"]
-                    if cand_files:
-                        ag_selected_files = cand_files
-                    ag_need_network = bool(direct_res.get("need_network", False))
-            else:
-                result = {
-                    "text": direct_res["text"],
-                    "file_urls": {},
-                    "environment_id": None,
-                    "interaction_id": None,
-                    "assigned_key": direct_res.get("assigned_key", assigned_key),
-                    "usage": direct_res.get("usage", {}),
-                }
+                    # Всегда идём через Планировщик (Hydrogen, 250K TPM)
+                    used_engine = "PLANNER"
+                    planner_task = direct_res.get("ag_task") or prompt
+                    need_network = bool(direct_res.get("need_network", False))
 
-        if result is None:
-            used_engine = "ANTIGRAVITY"
-            result = await ai_instance.run_antigravity_agent(
-                prompt_text=ag_task_prompt,
-                status_callback=send_status_update,
-                assigned_key=assigned_key,
-                chat_uid=chat_uid,
-                recent_history=recent_history,
-                project_tree=project_tree,
-                file_manifest=file_manifest,
-                selected_files=ag_selected_files,
-                need_network=ag_need_network,
-                max_total_tokens=85_000,
-            )
+                    plan_res = await ai_instance.run_planner(
+                        task_prompt=planner_task,
+                        recent_history=recent_history,
+                        project_tree=project_tree,
+                        file_manifest=file_manifest,
+                        selected_files=cand_files,
+                        status_callback=send_status_update,
+                        assigned_key=assigned_key,
+                    )
+                    plan = plan_res["plan"]
+                    assigned_key = plan_res.get("assigned_key", assigned_key)
+
+                    need_files = [
+                        re.sub(r"^(\./)+", "", str(nf).strip().replace("\\", "/")).lstrip("/")
+                        for nf in (plan.get("need_files") or [])
+                        if str(nf).strip()
+                    ]
+                    need_files = [nf for nf in need_files if nf not in manifest_paths]
+
+                    if need_files:
+                        logger.info(f"📥 [PLANNER NEED FILES] Дозапрашиваем файлы: {need_files}")
+                        result = {
+                            "text": f"[GET_FILES: {', '.join(need_files)}]",
+                            "file_urls": {},
+                            "environment_id": None,
+                            "assigned_key": assigned_key,
+                            "usage": plan_res.get("usage", {}),
+                        }
+                    elif not (plan.get("steps") or []):
+                        # Чистый анализ/ответ без правки файлов — Планировщик уже ответил сам!
+                        result = {
+                            "text": (plan.get("summary") or "Готово.").strip(),
+                            "file_urls": {},
+                            "environment_id": None,
+                            "assigned_key": assigned_key,
+                            "usage": plan_res.get("usage", {}),
+                        }
+                    else:
+                        # Сохраняем план и выводим его пользователю в чат с кнопками подтверждения
+                        chat_state["pending_plan"] = {
+                            "summary": plan.get("summary", ""),
+                            "steps": plan.get("steps", []),
+                            "need_network": need_network,
+                        }
+                        save_chat_state(chat_uid, chat_state)
+                        plan_text = _format_plan_message(plan)
+                        result = {
+                            "text": plan_text,
+                            "file_urls": {},
+                            "environment_id": None,
+                            "assigned_key": assigned_key,
+                            "usage": plan_res.get("usage", {}),
+                        }
 
         new_env_id = result.get("environment_id")
         agent_reply_text = result["text"]

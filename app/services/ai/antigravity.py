@@ -21,9 +21,9 @@ class BudgetExhaustedError(RuntimeError):
 
 
 class AsyncAntigravityLimiter:
-    """Асинхронное скользящее окно RPM и TPM (60 сек) для одного процесса."""
+    """Асинхронное скользящее окно RPM и TPM (60 сек) с учётом total (включая cached)."""
 
-    def __init__(self, max_rpm: int = 50, max_tpm: int = 90_000, min_headroom: int = 15_000):
+    def __init__(self, max_rpm: int = 50, max_tpm: int = 92_000, min_headroom: int = 45_000):
         self.max_rpm = max_rpm
         self.max_tpm = max_tpm
         self.min_headroom = min_headroom
@@ -58,18 +58,18 @@ class AsyncAntigravityLimiter:
 
             logger.info(f"⏳ [AG LIMITER] Окно TPM заполнено ({used_tpm}/{self.max_tpm}), ждём {sleep_for:.1f}с...")
             if status_callback:
-                await status_callback({"status": f"Ожидание окна лимита TPM ({sleep_for:.0f}с)..."})
+                await status_callback({"status": f"Ожидание сброса окна TPM ({sleep_for:.0f}с)..."})
             await asyncio.sleep(sleep_for)
 
-    async def finalize(self, slot: list, actual_billable_tokens: int) -> None:
-        if actual_billable_tokens <= 0:
+    async def finalize(self, slot: list, actual_total_tokens: int) -> None:
+        if actual_total_tokens <= 0:
             return
         async with self._lock:
             slot[0] = time.monotonic()
-            slot[1] = actual_billable_tokens
+            slot[1] = actual_total_tokens
 
 
-ag_limiter = AsyncAntigravityLimiter(max_rpm=50, max_tpm=90_000, min_headroom=15_000)
+ag_limiter = AsyncAntigravityLimiter(max_rpm=50, max_tpm=92_000, min_headroom=45_000)
 
 
 def _approx_tokens(text: str) -> int:
@@ -137,6 +137,7 @@ def _extract_and_normalize_sync_tags(output_text: str) -> tuple[str, list[str]]:
         text = re.sub(r"(?im)^\s*sync:\s*([^\s,\]]+)\s*$", _norm_bare, text)
 
     return text, found
+
 
 def _extract_text_any(interaction, streamed_fallback: str = "") -> str:
     txt = extract_interaction_text(interaction)
@@ -352,7 +353,6 @@ async def _observe_interaction(
                 except BaseException:
                     pass
 
-        # Дочитываем полный объект Interaction (в нём есть steps/output_text, которых нет в SSE-событии)
         checked = None
         try:
             check_client = create_genai_client(api_keys, assigned_key, timeout=30000)
@@ -380,6 +380,7 @@ async def run_antigravity_agent(
     project_tree: str = None,
     file_manifest: list = None,
     selected_files: list = None,
+    line_ranges: str = "",
     need_network: bool = False,
     max_total_tokens: int = 85_000,
     **kwargs,
@@ -388,11 +389,14 @@ async def run_antigravity_agent(
     if assigned_key is None or not key_pool.is_usable(assigned_key, model=model_tag):
         assigned_key = key_pool.get_best_key(model=model_tag)
 
-    # Строго ОДНА модель из настроек — без автопереключения моделей
     ag_model = normalize_model_name(get_models_config()["antigravity_model"])
 
+    effective_prompt = prompt_text
+    if line_ranges and line_ranges.strip():
+        effective_prompt = f"{prompt_text}\n\nСТРОКИ ДЛЯ ЧТЕНИЯ (используй sed -n, не выводи весь файл): {line_ranges.strip()}"
+
     parts = format_stateless_prompt_parts(
-        prompt_text=prompt_text,
+        prompt_text=effective_prompt,
         recent_history=recent_history,
         project_tree=project_tree,
         file_manifest=file_manifest,
@@ -407,7 +411,6 @@ async def run_antigravity_agent(
     task_tok = _approx_tokens(parts["task"])
     est_tokens = max(500, sys_tok + tree_tok + man_tok + hist_tok + task_tok)
 
-    # Полный прозрачный лог того, что именно улетает в Antigravity
     logger.info(
         "📤 [AG PAYLOAD BREAKDOWN]\n"
         f"   модель={ag_model} | max_total_tokens={max_total_tokens} | key=#{assigned_key} | network={need_network}\n"
@@ -473,8 +476,8 @@ async def run_antigravity_agent(
         status_raw = str(getattr(interaction, "status", "")).lower().strip()
         usage = extract_usage_tokens(interaction)
         new_in = max(0, usage["input"] - usage["cached"])
-        billable_tokens = max(est_tokens, max(0, usage["total"] - usage["cached"]))
-        await ag_limiter.finalize(slot, billable_tokens)
+        total_for_limiter = max(est_tokens, usage["total"])
+        await ag_limiter.finalize(slot, total_for_limiter)
 
         logger.info(
             f"📊 [AG FINAL TOKENS] ключ=#{assigned_key} | статус={status_raw} | "
@@ -668,7 +671,7 @@ async def list_environment_files(api_keys: list[str], env_id: str, key_index: in
                 if "dir" in str(getattr(sf_item, "type", "")).lower():
                     continue
                 spath = getattr(sf_item, "path", None) or getattr(sf_item, "name", "")
-                if not spath or "__pycache__" not in spath:
+                if not spath or "__pycache__" in spath:
                     continue
                 items.append({"path": spath, "name": os.path.basename(spath), "size": int(getattr(sf_item, "size_bytes", 0) or 0)})
     items.sort(key=lambda x: x["path"])

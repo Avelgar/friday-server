@@ -9,9 +9,9 @@ from datetime import datetime
 CONFIG_PATH = "/opt/friday/storage/ai_models.json"
 
 DEFAULT_MODELS = {
-    "antigravity_model": "gemini-3.5-flash-lite",
+    "antigravity_model": "gemini-4-hydrogen",
     "direct_model": "gemini-3.5-flash-lite",
-    "router_model": "gemini-3.5-flash-lite",
+    "router_model": "gemini-4-hydrogen",
 }
 
 _lock = threading.Lock()
@@ -114,32 +114,32 @@ def render_admin_models_html() -> str:
   <div class="sub">Последнее обновление: <span id="upd">{upd}</span></div>
 
   <datalist id="model-presets">
-    <option value="gemini-3.5-flash-lite">
-    <option value="gemini-3.6-flash">
-    <option value="gemini-3.8-flash">
     <option value="gemini-4-hydrogen">
+    <option value="gemini-3.8-flash">
+    <option value="gemini-3.6-flash">
+    <option value="gemini-3.5-flash-lite">
     <option value="gemini-2.5-flash">
   </datalist>
 
   <div class="field">
-    <label for="ag-model">Antigravity (песочница / файлы)</label>
-    <input id="ag-model" list="model-presets" value="{ag}" placeholder="gemini-3.5-flash-lite">
+    <label for="ag-model">Antigravity (песочница / исполнитель шагов)</label>
+    <input id="ag-model" list="model-presets" value="{ag}" placeholder="gemini-4-hydrogen">
   </div>
 
   <div class="field">
-    <label for="dr-model">Direct (быстрый стрим)</label>
+    <label for="dr-model">Direct (диспетчер и быстрые ответы)</label>
     <input id="dr-model" list="model-presets" value="{dr}" placeholder="gemini-3.5-flash-lite">
   </div>
 
   <div class="field">
-    <label for="rt-model">Direct Reserve (резервная модель при сбое Direct)</label>
-    <input id="rt-model" list="model-presets" value="{rt}" placeholder="gemini-3.5-flash-lite">
+    <label for="rt-model">Планировщик (чтение файлов, план со строками)</label>
+    <input id="rt-model" list="model-presets" value="{rt}" placeholder="gemini-4-hydrogen">
   </div>
 
   <div class="field">
     <label for="admin-key">Пароль админа (ADMIN_SECRET или JWT_SECRET)</label>
     <input id="admin-key" type="password" placeholder="Сохраняется в браузере">
-    <div class="hint">Формат моделей: gemini-3.8-flash, gemini-3.5-flash-lite и т.д.</div>
+    <div class="hint">Формат моделей: gemini-4-hydrogen, gemini-3.8-flash, gemini-3.5-flash-lite и т.д.</div>
   </div>
 
   <button id="save-btn">Сохранить модели</button>

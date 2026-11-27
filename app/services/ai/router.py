@@ -1,17 +1,23 @@
 # -*- coding: utf-8 -*-
+import os
 import re
+import json
+import struct
+import zipfile
 import asyncio
 import logging
+import xml.etree.ElementTree as ET
 from google.genai import types
 from .key_pool import GeminiKeyPool, create_genai_client
 from .model_config import get_models_config, to_api_model
-from .prompts import DIRECT_SYSTEM_INSTRUCTION
+from .prompts import DIRECT_SYSTEM_INSTRUCTION, PLANNER_SYSTEM_INSTRUCTION
 
 logger = logging.getLogger("AI_Service")
 
 DIRECT_HISTORY_CHAR_BUDGET = 12000
-ANTIGRAVITY_HISTORY_CHAR_BUDGET = 9000
-CALL_PREFIXES = ("[CALL_ANTIGRAVITY", "[ESCALATE_ANTIGRAVITY")
+ANTIGRAVITY_HISTORY_CHAR_BUDGET = 5000
+PLANNER_FILES_CHAR_BUDGET = 150000
+CALL_PREFIXES = ("[CALL_PLANNER", "[CALL_ANTIGRAVITY", "[ESCALATE_ANTIGRAVITY")
 
 
 def _compress_history_entries(
@@ -73,7 +79,7 @@ def format_manifest_block(
     if selected_norm:
         priority = [f for f in ordered if f["path"] in selected_norm]
         others = [f for f in ordered if f["path"] not in selected_norm]
-        ordered = priority + others[:8]
+        ordered = priority + others[:6]
     else:
         ordered = ordered[:15]
 
@@ -82,7 +88,7 @@ def format_manifest_block(
         size_kb = f["size"] / 1024.0
         size_str = f"{size_kb:.1f} КБ" if size_kb >= 0.1 else f"{f['size']} Б"
         lines_info = f", ~{f['lines']} строк" if f.get("lines") is not None else ""
-        mark = " [ВЫБРАН]" if f["path"] in selected_norm else ""
+        mark = " [ЦЕЛЕВОЙ ФАЙЛ]" if f["path"] in selected_norm else ""
         if with_urls:
             lines.append(f"• {f['path']}{mark} ({size_str}{lines_info}) | curl: {f['url']}")
         else:
@@ -100,23 +106,23 @@ def format_stateless_prompt_parts(
     tree_block = ""
     if project_tree and project_tree.strip():
         tree_txt = project_tree.strip()
-        if len(tree_txt) > 4500:
-            tree_txt = tree_txt[:4500] + "\n...[дерево обрезано]..."
+        if len(tree_txt) > 4000:
+            tree_txt = tree_txt[:4000] + "\n...[дерево обрезано]..."
         tree_block = f"# Дерево проекта:\n{tree_txt}"
 
     manifest_txt = format_manifest_block(file_manifest, selected_files=selected_files, with_urls=True)
     manifest_block = f"# Файлы на сервере:\n{manifest_txt}"
 
     history_block = ""
-    entries = _compress_history_entries(recent_history, char_budget=ANTIGRAVITY_HISTORY_CHAR_BUDGET)
+    entries = _compress_history_entries(recent_history, char_budget=ANTIGRAVITY_HISTORY_CHAR_BUDGET, max_items=6)
     if entries:
         lines = []
         for r, txt in entries:
             label = "Пользователь" if r == "user" else ("IDE" if r in ("system", "tool") else "Ассистент")
             lines.append(f"[{label}]: {txt}")
-        history_block = "# История диалога:\n" + "\n\n".join(lines)
+        history_block = "# Недавний контекст:\n" + "\n\n".join(lines)
 
-    task_block = f"# Запрос пользователя:\n{prompt_text}"
+    task_block = f"# Задача этого шага:\n{prompt_text}"
 
     sections = [b for b in (tree_block, manifest_block, history_block, task_block) if b]
     return {
@@ -128,20 +134,89 @@ def format_stateless_prompt_parts(
     }
 
 
-def format_stateless_prompt(
-    prompt_text: str,
-    recent_history: list = None,
-    project_tree: str = None,
-    file_manifest: list = None,
-    selected_files: list = None,
-) -> str:
-    return format_stateless_prompt_parts(
-        prompt_text=prompt_text,
-        recent_history=recent_history,
-        project_tree=project_tree,
-        file_manifest=file_manifest,
-        selected_files=selected_files,
-    )["full_text"]
+def _summarize_stl(disk_path: str, rel_path: str) -> str:
+    size = os.path.getsize(disk_path)
+    with open(disk_path, "rb") as f:
+        header = f.read(84)
+        if len(header) == 84:
+            tri_count = struct.unpack("<I", header[80:84])[0]
+            if tri_count > 0 and (84 + tri_count * 50) == size:
+                min_x = min_y = min_z = float("inf")
+                max_x = max_y = max_z = float("-inf")
+                for _ in range(min(tri_count, 500_000)):
+                    rec = f.read(50)
+                    if len(rec) < 50:
+                        break
+                    vals = struct.unpack("<12fH", rec)
+                    for vi in (3, 6, 9):
+                        x, y, z = vals[vi], vals[vi + 1], vals[vi + 2]
+                        if x < min_x: min_x = x
+                        if x > max_x: max_x = x
+                        if y < min_y: min_y = y
+                        if y > max_y: max_y = y
+                        if z < min_z: min_z = z
+                        if z > max_z: max_z = z
+                return (
+                    f"[Binary STL: {rel_path} | размер={size} байт | треугольников={tri_count}]\n"
+                    f"Габариты (Bounding Box):\n"
+                    f"  X: [{min_x:.3f} .. {max_x:.3f}] (размер {max_x - min_x:.3f})\n"
+                    f"  Y: [{min_y:.3f} .. {max_y:.3f}] (размер {max_y - min_y:.3f})\n"
+                    f"  Z: [{min_z:.3f} .. {max_z:.3f}] (размер {max_z - min_z:.3f})"
+                )
+
+    min_x = min_y = min_z = float("inf")
+    max_x = max_y = max_z = float("-inf")
+    tri_count = 0
+    with open(disk_path, "r", encoding="utf-8", errors="replace") as tf:
+        for line in tf:
+            s = line.strip()
+            if s.startswith("facet normal"):
+                tri_count += 1
+            elif s.startswith("vertex "):
+                parts = s.split()
+                if len(parts) >= 4:
+                    try:
+                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                        if x < min_x: min_x = x
+                        if x > max_x: max_x = x
+                        if y < min_y: min_y = y
+                        if y > max_y: max_y = y
+                        if z < min_z: min_z = z
+                        if z > max_z: max_z = z
+                    except ValueError:
+                        pass
+    if tri_count > 0 and min_x != float("inf"):
+        return (
+            f"[ASCII STL: {rel_path} | размер={size} байт | треугольников={tri_count}]\n"
+            f"Габариты (Bounding Box):\n"
+            f"  X: [{min_x:.3f} .. {max_x:.3f}] (размер {max_x - min_x:.3f})\n"
+            f"  Y: [{min_y:.3f} .. {max_y:.3f}] (размер {max_y - min_y:.3f})\n"
+            f"  Z: [{min_z:.3f} .. {max_z:.3f}] (размер {max_z - min_z:.3f})"
+        )
+    return f"[STL файл {rel_path}, {size} байт]"
+
+
+def _read_numbered_file_content(disk_path: str, rel_path: str) -> str | None:
+    if not disk_path or not os.path.isfile(disk_path):
+        return None
+    ext = os.path.splitext(rel_path)[1].lower()
+    try:
+        if ext == ".stl":
+            return _summarize_stl(disk_path, rel_path)
+        if ext == ".docx":
+            with zipfile.ZipFile(disk_path, "r") as z:
+                xml_bytes = z.read("word/document.xml")
+            root = ET.fromstring(xml_bytes)
+            lines = ["".join(p.itertext()) for p in root.iter() if p.tag.endswith("}p")]
+        else:
+            with open(disk_path, "rb") as f:
+                raw = f.read()
+            if b"\x00" in raw[:4096]:
+                return f"[Бинарный файл {rel_path}, {len(raw)} байт]"
+            lines = raw.decode("utf-8", errors="replace").splitlines()
+        return "\n".join(f"{idx}: {line}" for idx, line in enumerate(lines, start=1))
+    except Exception as e:
+        return f"[Не удалось прочитать {rel_path}: {e}]"
 
 
 def build_direct_contents(prompt_text: str, recent_history: list = None) -> list[types.Content]:
@@ -181,7 +256,7 @@ def parse_antigravity_call(text: str) -> dict | None:
     if "[ESCALATE_ANTIGRAVITY]" in s:
         return {"task": None, "files": [], "network": False}
 
-    m = re.search(r"\[CALL_ANTIGRAVITY:\s*(.+?)\]", s, flags=re.DOTALL | re.IGNORECASE)
+    m = re.search(r"\[CALL_(?:PLANNER|ANTIGRAVITY):\s*(.+?)\]", s, flags=re.DOTALL | re.IGNORECASE)
     if not m:
         return None
 
@@ -250,7 +325,6 @@ async def run_direct(
     context_sections.append(f"ФАЙЛЫ НА СЕРВЕРЕ:\n{manifest_txt}")
     full_system_instruction = "\n\n".join(context_sections)
 
-    # Строго ОДНА модель из настроек — без автоматического переключения моделей
     cfg = get_models_config()
     model_name = to_api_model(cfg["direct_model"])
 
@@ -328,7 +402,7 @@ async def run_direct(
         call_info = parse_antigravity_call(full_text)
         if call_info is not None:
             key_pool.mark_success(key_idx, model=model_name)
-            logger.info(f"⚡ [DIRECT {model_name}] Ключ #{key_idx} | in={usage_info['input']} out={usage_info['output']} total={usage_info['total']} -> ESCALATE")
+            logger.info(f"⚡ [DIRECT {model_name}] Ключ #{key_idx} | in={usage_info['input']} out={usage_info['output']} total={usage_info['total']} -> PLANNER")
             return {
                 "escalate": True,
                 "ag_task": call_info["task"],
@@ -371,6 +445,120 @@ async def run_direct(
                 await client.aio.aclose()
         except Exception:
             pass
+
+
+async def run_planner(
+    key_pool: GeminiKeyPool,
+    api_keys: list[str],
+    task_prompt: str,
+    recent_history: list = None,
+    project_tree: str = None,
+    file_manifest: list = None,
+    selected_files: list = None,
+    status_callback=None,
+    assigned_key: int = None,
+) -> dict:
+    """Читает файлы с диска с нумерацией строк и строит пошаговый план через модель Планировщика (250K TPM)."""
+    cfg = get_models_config()
+    planner_model = to_api_model(cfg["router_model"])
+    key_idx = assigned_key if (assigned_key is not None and key_pool.is_usable(assigned_key, model=planner_model)) else key_pool.get_best_key(model=planner_model)
+
+    selected_norm = {
+        re.sub(r"^(\./)+", "", f.strip().replace("\\", "/")).lstrip("/")
+        for f in (selected_files or [])
+        if f and f.strip()
+    }
+
+    ordered_files = list(file_manifest or [])
+    if selected_norm:
+        ordered_files.sort(key=lambda f: (0 if f["path"] in selected_norm else 1, -f.get("mtime", 0)))
+
+    file_blocks = []
+    used_chars = 0
+    for f in ordered_files:
+        numbered = _read_numbered_file_content(f.get("disk_path"), f["path"])
+        if not numbered:
+            continue
+        block = f"=== ФАЙЛ: {f['path']} ===\n{numbered}"
+        if used_chars + len(block) > PLANNER_FILES_CHAR_BUDGET:
+            if not file_blocks:
+                block = block[:PLANNER_FILES_CHAR_BUDGET] + "\n...[файл обрезан по бюджету]..."
+                file_blocks.append(block)
+            break
+        file_blocks.append(block)
+        used_chars += len(block)
+
+    parts = []
+    if project_tree and project_tree.strip():
+        parts.append(f"# Дерево проекта:\n{project_tree.strip()[:5000]}")
+    if file_blocks:
+        parts.append("# Содержимое файлов с сервера:\n\n" + "\n\n".join(file_blocks))
+    else:
+        parts.append("# Файлы на сервере:\nФайлов на сервере нет.")
+
+    entries = _compress_history_entries(recent_history, char_budget=5000, max_items=6)
+    if entries:
+        h_lines = [f"[{'Пользователь' if r == 'user' else ('IDE' if r in ('tool', 'system') else 'Ассистент')}]: {t}" for r, t in entries]
+        parts.append("# Недавний контекст:\n" + "\n\n".join(h_lines))
+
+    parts.append(f"# Задача:\n{task_prompt}")
+    planner_input = "\n\n".join(parts)
+
+    is_25 = "2.5" in planner_model
+    thinking_cfg = types.ThinkingConfig(thinking_budget=1024) if is_25 else types.ThinkingConfig(thinking_level="low")
+    afc_cfg = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
+    cfg_kwargs = {
+        "system_instruction": PLANNER_SYSTEM_INSTRUCTION,
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json",
+        "thinking_config": thinking_cfg,
+    }
+    if afc_cfg is not None:
+        cfg_kwargs["automatic_function_calling"] = afc_cfg
+    gen_cfg = types.GenerateContentConfig(**cfg_kwargs)
+
+    if status_callback:
+        short_m = planner_model.replace("models/", "")
+        await status_callback({"status": f"Планировщик ({short_m}) изучает файлы..."})
+
+    logger.info(f"🧠 [PLANNER {planner_model}] Ключ #{key_idx} | файлов={len(file_blocks)} | символов входа={len(planner_input)}")
+
+    client = create_genai_client(api_keys, key_idx, timeout=60000)
+    try:
+        resp = await asyncio.wait_for(
+            asyncio.to_thread(
+                client.models.generate_content,
+                model=planner_model,
+                contents=planner_input,
+                config=gen_cfg,
+            ),
+            timeout=65.0,
+        )
+        key_pool.mark_success(key_idx, model=planner_model)
+
+        um = getattr(resp, "usage_metadata", None)
+        u_in = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
+        u_cac = int(getattr(um, "cached_content_token_count", 0) or 0) if um else 0
+        u_out = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
+        u_tot = int(getattr(um, "total_token_count", 0) or 0) if um else 0
+        logger.info(f"📊 [PLANNER TOKENS] {planner_model} | in={u_in} cached={u_cac} out={u_out} total={u_tot}")
+
+        raw_json = (getattr(resp, "text", None) or "").strip()
+        raw_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_json, flags=re.IGNORECASE | re.DOTALL).strip()
+        plan_data = json.loads(raw_json)
+        if not isinstance(plan_data, dict):
+            raise ValueError("Planner JSON is not an object")
+
+        return {
+            "plan": plan_data,
+            "assigned_key": key_idx,
+            "usage": {"input": u_in, "cached": u_cac, "output": u_out, "total": u_tot},
+        }
+    except Exception as e:
+        logger.warning(f"⚠️ [PLANNER ERROR] {e}")
+        if _is_dead_project_error(str(e)):
+            key_pool.mark_dead_all_models(key_idx)
+        raise
 
 
 run_direct_hydrogen = run_direct

@@ -44,7 +44,7 @@ class AIService:
         ):
             yield item
 
-    # --- 2. DIRECT (без роутера и без summary) ---
+    # --- 2. DIRECT И ПЛАНИРОВЩИК ---
     async def run_direct(
         self,
         prompt_text: str,
@@ -67,6 +67,28 @@ class AIService:
             assigned_key=assigned_key,
         )
 
+    async def run_planner(
+        self,
+        task_prompt: str,
+        recent_history: list = None,
+        project_tree: str = None,
+        file_manifest: list = None,
+        selected_files: list = None,
+        status_callback=None,
+        assigned_key: int = None,
+    ):
+        return await ai_router.run_planner(
+            self.key_pool,
+            self.api_keys,
+            task_prompt,
+            recent_history=recent_history,
+            project_tree=project_tree,
+            file_manifest=file_manifest,
+            selected_files=selected_files,
+            status_callback=status_callback,
+            assigned_key=assigned_key,
+        )
+
     # --- 3. ПЕСОЧНИЦА ANTIGRAVITY ---
     async def run_antigravity_agent(
         self,
@@ -78,6 +100,7 @@ class AIService:
         project_tree: str = None,
         file_manifest: list = None,
         selected_files: list = None,
+        line_ranges: str = "",
         need_network: bool = False,
         max_total_tokens: int = 85_000,
         **kwargs,
@@ -93,6 +116,7 @@ class AIService:
             project_tree=project_tree,
             file_manifest=file_manifest,
             selected_files=selected_files,
+            line_ranges=line_ranges,
             need_network=need_network,
             max_total_tokens=max_total_tokens,
         )
