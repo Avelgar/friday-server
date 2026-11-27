@@ -76,15 +76,6 @@ def _approx_tokens(text: str) -> int:
     return max(0, (len(text or "") + 2) // 3)
 
 
-def _is_dead_project_error(err_str: str) -> bool:
-    return (
-        "'quota_limit_value': '0'" in err_str
-        or "ApiRequestsPerMinutePerProjectPerRegion" in err_str
-        or "API_KEY_INVALID" in err_str
-        or "401" in err_str
-    )
-
-
 def _describe_step(step) -> str:
     stype = getattr(step, "type", None) or getattr(step, "step_type", None) or type(step).__name__
     content = getattr(step, "content", None) or []
@@ -383,10 +374,14 @@ async def run_antigravity_agent(
     line_ranges: str = "",
     need_network: bool = False,
     max_total_tokens: int = 85_000,
+    per_request_key: bool = True,
     **kwargs,
 ):
     model_tag = "antigravity"
-    if assigned_key is None or not key_pool.is_usable(assigned_key, model=model_tag):
+    # Каждый новый запуск песочницы — на самом свободном ключе пула.
+    if per_request_key:
+        assigned_key = key_pool.pick_key_for_request(model=model_tag, avoid_index=assigned_key)
+    elif assigned_key is None or not key_pool.is_usable(assigned_key, model=model_tag):
         assigned_key = key_pool.get_best_key(model=model_tag)
 
     ag_model = normalize_model_name(get_models_config()["antigravity_model"])
@@ -641,9 +636,7 @@ async def run_antigravity_agent(
             await _cancel_interaction_safe(api_keys, assigned_key, new_interaction_id)
         raise
     except Exception as e:
-        err_str = str(e)
-        if _is_dead_project_error(err_str):
-            key_pool.mark_dead_all_models(assigned_key)
+        key_pool.register_key_error(assigned_key, model=model_tag, exc=e)
         raise
 
 

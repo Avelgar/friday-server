@@ -54,6 +54,7 @@ class AIService:
         status_callback=None,
         chunk_callback=None,
         assigned_key: int = None,
+        per_request_key: bool = True,
     ):
         return await ai_router.run_direct(
             self.key_pool,
@@ -65,6 +66,7 @@ class AIService:
             status_callback=status_callback,
             chunk_callback=chunk_callback,
             assigned_key=assigned_key,
+            per_request_key=per_request_key,
         )
 
     async def run_planner(
@@ -76,6 +78,7 @@ class AIService:
         selected_files: list = None,
         status_callback=None,
         assigned_key: int = None,
+        per_request_key: bool = True,
     ):
         return await ai_router.run_planner(
             self.key_pool,
@@ -87,6 +90,7 @@ class AIService:
             selected_files=selected_files,
             status_callback=status_callback,
             assigned_key=assigned_key,
+            per_request_key=per_request_key,
         )
 
     # --- 3. ПЕСОЧНИЦА ANTIGRAVITY ---
@@ -103,6 +107,7 @@ class AIService:
         line_ranges: str = "",
         need_network: bool = False,
         max_total_tokens: int = 85_000,
+        per_request_key: bool = True,
         **kwargs,
     ):
         return await ag.run_antigravity_agent(
@@ -119,6 +124,7 @@ class AIService:
             line_ranges=line_ranges,
             need_network=need_network,
             max_total_tokens=max_total_tokens,
+            per_request_key=per_request_key,
         )
 
     async def list_environment_files(self, env_id: str, key_index: int = None):

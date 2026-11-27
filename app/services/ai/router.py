@@ -305,15 +305,6 @@ def parse_antigravity_call(text: str) -> dict | None:
     return {"task": task or None, "files": files, "network": need_network}
 
 
-def _is_dead_project_error(err_str: str) -> bool:
-    return (
-        "'quota_limit_value': '0'" in err_str
-        or "ApiRequestsPerMinutePerProjectPerRegion" in err_str
-        or "API_KEY_INVALID" in err_str
-        or "401" in err_str
-    )
-
-
 def _could_be_call_tag(text_upper: str) -> bool:
     return any(p.startswith(text_upper) or text_upper.startswith(p) for p in CALL_PREFIXES)
 
@@ -328,6 +319,7 @@ async def run_direct(
     status_callback=None,
     chunk_callback=None,
     assigned_key: int = None,
+    per_request_key: bool = True,
     **kwargs,
 ):
     contents = build_direct_contents(prompt_text, recent_history=recent_history)
@@ -360,7 +352,14 @@ async def run_direct(
         config_kwargs["automatic_function_calling"] = afc_cfg
     config = types.GenerateContentConfig(**config_kwargs)
 
-    key_idx = assigned_key if (assigned_key is not None and key_pool.is_usable(assigned_key, model=model_name)) else key_pool.get_best_key(model=model_name)
+    # Каждый новый запрос выбирает самый свободный ключ пула (assigned_key — только подсказка).
+    if per_request_key:
+        key_idx = key_pool.pick_key_for_request(model=model_name, avoid_index=assigned_key)
+    elif assigned_key is not None and key_pool.is_usable(assigned_key, model=model_name):
+        key_idx = assigned_key
+    else:
+        key_idx = key_pool.get_best_key(model=model_name)
+
     client = create_genai_client(api_keys, key_idx, timeout=25000)
 
     flushed_any = False
@@ -446,7 +445,6 @@ async def run_direct(
         }
 
     except Exception as e:
-        err_str = str(e)
         logger.warning(f"⚠️ [DIRECT {model_name}] Ошибка на ключе #{key_idx}: {e}")
         if flushed_any:
             return {
@@ -456,8 +454,7 @@ async def run_direct(
                 "assigned_key": key_idx,
                 "usage": usage_info,
             }
-        if _is_dead_project_error(err_str):
-            key_pool.mark_dead_all_models(key_idx)
+        key_pool.register_key_error(key_idx, model=model_name, exc=e)
         raise
     finally:
         try:
@@ -477,11 +474,18 @@ async def run_planner(
     selected_files: list = None,
     status_callback=None,
     assigned_key: int = None,
+    per_request_key: bool = True,
 ) -> dict:
     """Читает файлы (и скриншоты) с диска и строит пошаговый план через модель Планировщика (250K TPM)."""
     cfg = get_models_config()
     planner_model = to_api_model(cfg["router_model"])
-    key_idx = assigned_key if (assigned_key is not None and key_pool.is_usable(assigned_key, model=planner_model)) else key_pool.get_best_key(model=planner_model)
+    # Планировщик берёт самый свободный ключ на момент запроса, а не ключ чата.
+    if per_request_key:
+        key_idx = key_pool.pick_key_for_request(model=planner_model, avoid_index=assigned_key)
+    elif assigned_key is not None and key_pool.is_usable(assigned_key, model=planner_model):
+        key_idx = assigned_key
+    else:
+        key_idx = key_pool.get_best_key(model=planner_model)
 
     selected_norm = {
         re.sub(r"^(\./)+", "", f.strip().replace("\\", "/")).lstrip("/")
@@ -606,8 +610,7 @@ async def run_planner(
                 await asyncio.sleep(2.5)
                 continue
             logger.warning(f"⚠️ [PLANNER ERROR] {e}")
-            if _is_dead_project_error(err_s):
-                key_pool.mark_dead_all_models(key_idx)
+            key_pool.register_key_error(key_idx, model=planner_model, exc=e)
             raise
 
     raise last_err
