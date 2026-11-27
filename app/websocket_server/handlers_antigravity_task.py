@@ -9,7 +9,11 @@ import aiomysql
 
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
-from app.services.ai.router import _inject_sync_tag
+from app.services.ai.router import (
+    _inject_sync_tag,
+    _strip_run_command,
+    extract_mentioned_files,
+)
 from app.websocket_server.utils import async_send
 from app.websocket_server.antigravity_storage import (
     antigravity_user_sockets,
@@ -60,6 +64,23 @@ def _apply_direct_edits(chat_uid: str, edits: dict) -> dict:
         except Exception as e:
             logger.warning(f"⚠️ [DIRECT EDIT WRITE] {clean}: {e}")
     return applied
+
+
+def _summary_need_files(plan: dict, project_tree, manifest_paths) -> list:
+    """
+    Файлы, которые планировщик перечислил в прозе вместо "need_files".
+
+    Такой план (steps=[]) без этого превращался в ответ пользователю
+    «необходимо проверить такие-то файлы» вместо запроса файлов у IDE.
+    """
+    if not isinstance(plan, dict) or (plan.get("steps") or []):
+        return []
+    text = f"{plan.get('summary') or ''} {plan.get('need_reason') or ''}".strip()
+    if not text:
+        return []
+    known = set(manifest_paths or set())
+    known |= {str(nf).strip() for nf in (plan.get("need_files") or [])}
+    return [p for p in extract_mentioned_files(text, project_tree) if p not in known]
 
 
 def _manifest_has_url(file_manifest, url: str) -> bool:
@@ -354,6 +375,16 @@ async def handle_antigravity_task(websocket, data):
                 max_total_tokens=85_000,
             )
 
+        # === ВЕТКА 2.5: IDE принесла файлы по [GET_FILES] от Планировщика ===
+        # Пользователь не должен писать «Запроси эти файлы» руками: файлы уже на
+        # сервере, поэтому один раз молча повторяем исходную задачу — DIRECT
+        # увидит их в манифесте и сразу уйдёт в [CALL_PLANNER].
+        auto_retry_task = chat_state.pop("planner_waiting_files", None)
+        if result is None and is_tool_response and auto_retry_task:
+            logger.info(f"🔁 [AUTO-RETRY] Файлы от IDE получены → повторяем задачу планировщика: {auto_retry_task[:80]}")
+            prompt = auto_retry_task
+            is_tool_response = False
+
         # === ВЕТКА 3: Обычный вход через Direct (3.5-flash-lite) -> при работе с файлами в Планировщик ===
         if result is None:
             direct_res = await ai_instance.run_direct(
@@ -453,15 +484,29 @@ async def handle_antigravity_task(websocket, data):
                     plan = plan_res["plan"]
                     assigned_key = plan_res.get("assigned_key", assigned_key)
 
-                    need_files = [
-                        re.sub(r"^(\./)+", "", str(nf).strip().replace("\\", "/")).lstrip("/")
-                        for nf in (plan.get("need_files") or [])
-                        if str(nf).strip()
-                    ]
+                    def _norm_need(raw):
+                        return re.sub(r"^(\./)+", "", str(raw).strip().replace("\\", "/")).lstrip("/")
+
+                    need_files = [_norm_need(nf) for nf in (plan.get("need_files") or []) if str(nf).strip()]
                     need_files = [nf for nf in need_files if nf not in manifest_paths]
+
+                    # Планировщик иногда вместо "need_files" пишет в summary
+                    # «необходимо проверить js/entities.js, js/interiors.js…».
+                    # Пользователю это читать незачем: сами запрашиваем файлы у IDE.
+                    mentioned = _summary_need_files(plan, project_tree, manifest_paths)
+                    if mentioned:
+                        logger.info(
+                            f"📥 [PLANNER MENTIONS] Файлы названы в summary, а не в need_files: {mentioned}"
+                        )
+                        need_files = mentioned
+                        plan = dict(plan)
+                        plan["need_files"] = mentioned
+                        plan["summary"] = ""
 
                     if need_files:
                         logger.info(f"📥 [PLANNER NEED FILES] Дозапрашиваем файлы: {need_files}")
+                        chat_state["planner_waiting_files"] = planner_task
+                        save_chat_state(chat_uid, chat_state)
                         result = {
                             "text": f"[GET_FILES: {', '.join(need_files)}]",
                             "file_urls": {},
@@ -495,16 +540,16 @@ async def handle_antigravity_task(websocket, data):
                             "usage": plan_res.get("usage", {}),
                         }
 
-        # Страховка: DIRECT иногда всё же возвращает «Действие: cmd.exe … curl …».
-        # Команда ничего не меняет на сервере и ломает виджет «Действия» в IDE,
-        # поэтому такой ответ превращаем в обычную текстовую подсказку.
+        # Страховка: DIRECT не имеет терминала. Даже если модель всё-таки выдала
+        # команду — вырезаем её из финального текста (иначе IDE выполнит cmd.exe).
         agent_text_raw = result["text"]
-        if detect_run_command_urls(agent_text_raw):
-            logger.warning("🛑 [CURL GUARD] Подавляем RUN_COMMAND с curl в итоговом ответе")
-            result["text"] = (
-                "⚠️ Файлы уже лежат на сервере, скачивать их командой не нужно. "
-                "Напиши, что именно поправить — я запущу правку в песочнице."
+        agent_text_clean, stripped_cmds = _strip_run_command(agent_text_raw)
+        if stripped_cmds:
+            logger.warning(
+                f"🚫 [NO TERMINAL] В итоговом ответе вырезано команд: {len(stripped_cmds)} "
+                f"({str(stripped_cmds[0])[:100]})"
             )
+            result["text"] = agent_text_clean
 
         new_env_id = result.get("environment_id")
         agent_reply_text = result["text"]

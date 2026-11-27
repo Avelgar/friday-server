@@ -37,7 +37,11 @@ IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 CALL_PREFIXES = ("[CALL_PLANNER", "[CALL_ANTIGRAVITY", "[ESCALATE_ANTIGRAVITY")
 # DECIDE_PREFIXES — теги, которые DIRECT разбирает сам, а не отправляет в чат
 # (иначе «Действие: cmd.exe /d /s /c chcp 65001 && curl …» уходит как команда IDE).
-DECIDE_PREFIXES = CALL_PREFIXES + ("[RUN_COMMAND", "[GET_FILES", "[GET_TREE", "[DELETE:")
+# Теги, которые DIRECT обрабатывает сам и НЕ стримит в UI.
+DECIDE_PREFIXES = CALL_PREFIXES + ("[GET_FILES", "[GET_TREE", "[DELETE:")
+# Ответ, который начинается с команды терминала, тоже нельзя стримить: сервер
+# всё равно вырежет команду (у DIRECT нет терминала).
+CMD_PREFIXES = ("[RUN_COMMAND", "CMD.EXE", "POWERSHELL", "CHCP ", "```CMD", "```POWERSHELL")
 
 
 def _compress_history_entries(
@@ -306,6 +310,83 @@ def _norm_tag_start(text: str) -> str:
     return t[m.end():] if m else t
 
 
+# DIRECT больше не имеет права на терминал: любые [RUN_COMMAND: ...] вырезаем
+# ещё до того, как ответ уйдёт в чат/IDE (у модели 3.5-flash-lite промпт не гарантия).
+_RUN_COMMAND_RE = re.compile(r"\[RUN_COMMAND[^\]]*\]", re.IGNORECASE)
+_CMD_FENCE_RE = re.compile(
+    r"```(?:cmd|powershell|powershell5|bat|shell|sh|bash|console|terminal)\b[^\n]*\n.*?(?:```|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CMD_LINE_RE = re.compile(
+    r"(?im)^\s*(?:\$\s*)?(?:cmd(?:\.exe)?\s+/|powershell(?:\.exe)?\s|chcp\s|curl\s|wget\s|npm\s+(?:i|install|run)|pip\s+install|git\s+(?:clone|pull|push)|python\s+-m\s+pip)\S*.*$"
+)
+
+
+def _strip_run_command(text: str) -> tuple[str, list[str]]:
+    """
+    Убирает из ответа модели [RUN_COMMAND: ...] и «голые» терминальные команды.
+
+    Возвращает (очищенный текст, список вырезанных команд) — команды можно
+    показать пользователю как «предложено, но не выполнено».
+    """
+    if not text:
+        return text, []
+
+    found: list[str] = []
+
+    def _grab(m):
+        body = m.group(1).strip() if m.groups() else m.group(0).strip()
+        if body and body not in found:
+            found.append(body)
+        return ""
+
+    cleaned = re.sub(r"\[RUN_COMMAND:\s*([^\]]*)\]", _grab, text, flags=re.IGNORECASE)
+    cleaned = _RUN_COMMAND_RE.sub("", cleaned)
+    cleaned = _CMD_FENCE_RE.sub("", cleaned)
+
+    kept_lines = []
+    for line in cleaned.splitlines():
+        if _CMD_LINE_RE.match(line):
+            cmd = line.strip()
+            if cmd and cmd not in found:
+                found.append(cmd)
+            continue
+        kept_lines.append(line)
+
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, found
+
+
+_FILE_MENTION_RE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)*[\w-]+\.(?:js|mjs|cjs|ts|tsx|jsx|json|css|scss|html|py|lua|glsl|vert|frag|md|txt|yml|yaml|xml|java|c|cpp|h|cs|go|rs|rb|php|sql))\b",
+    re.IGNORECASE,
+)
+
+
+def extract_mentioned_files(text: str, project_tree: str | None = None) -> list[str]:
+    """
+    Достаёт пути файлов, о которых модель говорит в прозе.
+
+    Нужно для Планировщика: вместо "need_files" он иногда пишет
+    «необходимо проверить js/entities.js и js/interiors.js». Такой ответ нельзя
+    показывать пользователю — сервер сам должен запросить эти файлы у IDE.
+    """
+    if not text:
+        return []
+    tree = project_tree or ""
+    found: list[str] = []
+    for m in _FILE_MENTION_RE.finditer(text):
+        path = re.sub(r"^(\./)+", "", m.group(1).replace("\\", "/")).lstrip("/")
+        if not path or path in found:
+            continue
+        # Берём только реальные файлы проекта: либо есть в дереве, либо уже на сервере.
+        if tree and os.path.basename(path) not in tree and path not in tree:
+            continue
+        found.append(path)
+    return found
+
+
 def _sync_paths_exist(files: list[str], file_manifest: list | None) -> bool:
     """Для прямых (DIRECT) правок: все [SYNC: ...] в ответе — это реальные файлы на сервере."""
     if not files or not file_manifest:
@@ -488,11 +569,12 @@ def parse_antigravity_call(text: str) -> dict | None:
 
 
 def _could_be_call_tag(text_upper: str) -> bool:
+    """True, пока ответ похож на служебный тег/команду — такой текст не стримим в UI."""
     compact = "".join(text_upper.split())
-    return any(
-        p.startswith(compact) or compact.startswith(p)
-        for p in DECIDE_PREFIXES
-    )
+    for p in DECIDE_PREFIXES + CMD_PREFIXES:
+        if p.startswith(compact) or compact.startswith(p):
+            return True
+    return False
 
 
 async def run_direct(
@@ -603,6 +685,16 @@ async def run_direct(
                     await chunk_callback(delta)
 
         full_text = "".join(full_parts).strip()
+
+        # У DIRECT нет терминала: команды вырезаем ПЕРЕД всеми разборами,
+        # иначе [RUN_COMMAND: ...] уедет в IDE как действие (и попадёт в лог
+        # как «cmd.exe /d /s /c chcp 65001 && curl ...»).
+        full_text, stripped_cmds = _strip_run_command(full_text)
+        if stripped_cmds:
+            logger.warning(
+                f"🚫 [NO TERMINAL] DIRECT предложил {len(stripped_cmds)} команд(ы) — вырезано: "
+                f"{str(stripped_cmds[0])[:120]}"
+            )
 
         call_info = parse_antigravity_call(full_text)
         if call_info is not None:
