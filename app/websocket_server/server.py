@@ -162,6 +162,12 @@ async def start_ws_server():
         logger.error(f"Не удалось запустить IPC UDP-слушатель: {e}")
 
     asyncio.create_task(check_pings())
-    async with websockets.serve(websocket_handler, "0.0.0.0", 8114, ping_interval=None, max_size=100 * 1024 * 1024):
+    # ping_interval: сервер сам держит соединение живым на уровне WS-протокола.
+    # Без этого NAT/прокси/балансировщик молча роняет «тихий» сокет, пока
+    # Antigravity считает задачу в песочнице (в логах это «Disconnected»).
+    async with websockets.serve(
+        websocket_handler, "0.0.0.0", 8114,
+        ping_interval=30, ping_timeout=90, max_size=100 * 1024 * 1024,
+    ):
         logger.info("WebSocket Server started on 8114 (100MB limit, RAM session management)")
         await asyncio.Future()

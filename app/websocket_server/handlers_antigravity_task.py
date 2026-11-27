@@ -149,9 +149,12 @@ async def handle_antigravity_task(websocket, data):
                     synced_files_dict = {}
         else:
             assigned_key = await get_least_used_key_index(cursor)
+            # ON DUPLICATE KEY: два параллельных запроса (реконнект, retry клиента)
+            # не должны падать на «Duplicate entry ... for key 'chat_uid'».
             await cursor.execute(
                 """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
-                   VALUES (%s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE chat_uid = chat_uid""",
                 (chat_uid, auto_title, assigned_key, user_token, workspace_path)
             )
             await conn.commit()

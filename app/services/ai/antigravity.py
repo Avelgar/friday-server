@@ -7,12 +7,25 @@ import logging
 import threading
 import urllib.parse
 from collections import deque
-from .key_pool import GeminiKeyPool, create_genai_client, extract_interaction_text, extract_usage_tokens
+from .key_pool import (
+    GeminiKeyPool,
+    create_genai_client,
+    extract_interaction_text,
+    extract_usage_tokens,
+    is_transient_error,
+    run_in_ai_executor,
+)
 from .prompts import AGENT_SYSTEM_INSTRUCTION
 from .router import format_stateless_prompt_parts
 from .model_config import get_models_config, normalize_model_name
 
 logger = logging.getLogger("AI_Service")
+# --- Настройки наблюдения за песочницей ---
+# Сколько живёт одна песочница. 300с не хватало: агент с 6 файлами работал 4+ минуты.
+AG_INTERACTION_TIMEOUT_SEC = float(os.environ.get("AG_INTERACTION_TIMEOUT_SEC", 600))
+# Сколько раз переподключаться к стриму, прежде чем уйти в polling, и база backoff.
+STREAM_MAX_ERRORS = max(1, int(os.environ.get("AG_STREAM_MAX_ERRORS", 4)))
+STREAM_RECONNECT_BASE_DELAY = 2.0
 SYS_DIRS = {".", "..", "usr", "bin", "lib", "lib64", "lib32", "libx32", "sbin", "proc", "sys", "dev", "etc", "var", "boot", "run", "srv", "snap", "media", "mnt"}
 
 
@@ -152,7 +165,7 @@ def _extract_text_any(interaction, streamed_fallback: str = "") -> str:
 async def _cancel_interaction_safe(api_keys: list[str], key_index: int, interaction_id: str):
     try:
         c = create_genai_client(api_keys, key_index, timeout=10000, with_retry_opt=False)
-        await asyncio.wait_for(asyncio.to_thread(c.interactions.cancel, id=interaction_id), timeout=10.0)
+        await asyncio.wait_for(run_in_ai_executor(c.interactions.cancel, id=interaction_id), timeout=10.0)
         logger.info(f"🛑 [GOOGLE CANCELLED] Отменили {interaction_id}")
     except Exception:
         pass
@@ -175,6 +188,7 @@ async def _observe_interaction(
     streamed_text_parts: list[str] = []
     consecutive_errors = 0
     use_streaming = True
+    stream_client = None
 
     while True:
         remaining = deadline - time.monotonic()
@@ -192,7 +206,7 @@ async def _observe_interaction(
                 poll_count += 1
                 try:
                     interaction = await asyncio.wait_for(
-                        asyncio.to_thread(poll_client.interactions.get, id=interaction_id),
+                        run_in_ai_executor(poll_client.interactions.get, id=interaction_id),
                         timeout=25.0,
                     )
                     consecutive_errors = 0
@@ -224,9 +238,14 @@ async def _observe_interaction(
         stop_event = threading.Event()
         stream_holder = {"stream": None}
 
+        # Клиент переиспользуем между реконнектами: создание нового на каждый
+        # обрыв — это новый httpx-пул соединений и лишний «ключ в лог», а не лечение.
+        if stream_client is None:
+            stream_client = create_genai_client(api_keys, assigned_key, timeout=120000, with_retry_opt=False)
+        sc = stream_client
+
         def _stream_worker():
             try:
-                sc = create_genai_client(api_keys, assigned_key, timeout=120000, with_retry_opt=False)
                 get_kwargs = {"id": interaction_id, "stream": True}
                 if last_event_id:
                     get_kwargs["last_event_id"] = last_event_id
@@ -255,7 +274,7 @@ async def _observe_interaction(
                 except Exception:
                     pass
 
-        worker_task = asyncio.create_task(asyncio.to_thread(_stream_worker))
+        worker_task = asyncio.create_task(run_in_ai_executor(_stream_worker))
         event_interaction = None
         got_terminal_event = False
 
@@ -319,15 +338,54 @@ async def _observe_interaction(
                 elif kind == "err":
                     err_obj = payload
                     err_low = str(err_obj).lower()
-                    if any(w in err_low for w in ("stream", "unexpected keyword", "invalid_argument", "not implemented")):
-                        logger.warning(f"⚠️ [STREAM UNSUPPORTED] Переключаемся на polling: {err_obj}")
+                    err_status = getattr(err_obj, "code", None) or getattr(err_obj, "status_code", None)
+                    try:
+                        err_status = int(err_status)
+                    except (TypeError, ValueError):
+                        err_status = None
+
+                    # 400 FAILED_PRECONDITION / invalid_request на стриме не лечится
+                    # реконнектом: повтор с тем же last_event_id даст тот же ответ.
+                    # Уходим в polling СРАЗУ и БЕЗ last_event_id (иначе Google снова
+                    # ответит 400), чтобы не сжигать минуту из дедлайна песочницы.
+                    client_error = (
+                        err_status is not None and 400 <= err_status < 500 and err_status != 429
+                    ) or any(
+                        w in err_low
+                        for w in (
+                            "invalid_argument",
+                            "invalid_request",
+                            "precondition",
+                            "failed_precondition",
+                            "unexpected keyword",
+                            "not implemented",
+                            "unsupported",
+                        )
+                    )
+                    if client_error:
+                        logger.warning(
+                            f"⚠️ [STREAM UNSUPPORTED] {type(err_obj).__name__}: {str(err_obj)[:200]} "
+                            f"→ переключаемся на polling без last_event_id"
+                        )
                         use_streaming = False
+                        last_event_id = None
+                        consecutive_errors = 0
                         break
+
                     consecutive_errors += 1
-                    logger.warning(f"⚠️ [STREAM RECONNECT {consecutive_errors}/6] {err_obj}")
-                    if consecutive_errors >= 6:
+                    transient = is_transient_error(err_obj)
+                    logger.warning(
+                        f"⚠️ [STREAM RECONNECT {consecutive_errors}/{STREAM_MAX_ERRORS}] "
+                        f"{'временная ошибка' if transient else 'ошибка'}: {str(err_obj)[:200]}"
+                    )
+                    if consecutive_errors >= STREAM_MAX_ERRORS:
+                        logger.warning("⚠️ [STREAM GIVE UP] Слишком много обрывов стрима → polling")
                         use_streaming = False
-                    await asyncio.sleep(2.0)
+                        last_event_id = None
+                        break
+                    # backoff: 2с, 4с, 8с... (но не дольше дедлайна песочницы)
+                    delay = min(STREAM_RECONNECT_BASE_DELAY * (2 ** (consecutive_errors - 1)), 10.0)
+                    await asyncio.sleep(min(delay, max(0.5, deadline - time.monotonic() - 1.0)))
                     break
 
         finally:
@@ -347,7 +405,7 @@ async def _observe_interaction(
         checked = None
         try:
             check_client = create_genai_client(api_keys, assigned_key, timeout=30000)
-            checked = await asyncio.wait_for(asyncio.to_thread(check_client.interactions.get, id=interaction_id), timeout=25.0)
+            checked = await asyncio.wait_for(run_in_ai_executor(check_client.interactions.get, id=interaction_id), timeout=25.0)
         except Exception as ge:
             logger.warning(f"⚠️ [GET FINAL INTERACTION ERR] {ge}")
 
@@ -448,7 +506,7 @@ async def run_antigravity_agent(
 
         create_client = create_genai_client(api_keys, assigned_key, timeout=25000)
         interaction = await asyncio.wait_for(
-            asyncio.to_thread(create_client.interactions.create, **req_kwargs),
+            run_in_ai_executor(create_client.interactions.create, **req_kwargs),
             timeout=30.0
         )
 
@@ -465,7 +523,7 @@ async def run_antigravity_agent(
             interaction_id=new_interaction_id,
             ag_model=ag_model,
             status_callback=status_callback,
-            timeout_sec=300.0,
+            timeout_sec=AG_INTERACTION_TIMEOUT_SEC,
         )
 
         status_raw = str(getattr(interaction, "status", "")).lower().strip()
@@ -524,7 +582,7 @@ async def run_antigravity_agent(
                     try:
                         dl_client = create_genai_client(api_keys, assigned_key, timeout=60000, with_retry_opt=False)
                         file_data = await asyncio.wait_for(
-                            asyncio.to_thread(dl_client.environments.files.download, environment=env_id, path=path_to_get),
+                            run_in_ai_executor(dl_client.environments.files.download, environment=env_id, path=path_to_get),
                             timeout=60.0
                         )
                         content = file_data.read() if hasattr(file_data, "read") else file_data
@@ -570,7 +628,7 @@ async def run_antigravity_agent(
                     real_paths_in_env = []
                     try:
                         top_resp = await asyncio.wait_for(
-                            asyncio.to_thread(env_client.environments.files.list, environment=env_id, path="", recursive=False),
+                            run_in_ai_executor(env_client.environments.files.list, environment=env_id, path="", recursive=False),
                             timeout=30.0
                         )
                         for top_f in getattr(top_resp, "files", []) or []:
@@ -582,7 +640,7 @@ async def run_antigravity_agent(
                                 real_paths_in_env.append(getattr(top_f, "path", None) or tname)
                             else:
                                 sub_resp = await asyncio.wait_for(
-                                    asyncio.to_thread(env_client.environments.files.list, environment=env_id, path=tname, recursive=True),
+                                    run_in_ai_executor(env_client.environments.files.list, environment=env_id, path=tname, recursive=True),
                                     timeout=30.0
                                 )
                                 for sf_item in getattr(sub_resp, "files", []) or []:
@@ -644,7 +702,7 @@ async def list_environment_files(api_keys: list[str], env_id: str, key_index: in
     client = create_genai_client(api_keys, key_index or 0, timeout=30000)
     items = []
     top_resp = await asyncio.wait_for(
-        asyncio.to_thread(client.environments.files.list, environment=env_id, path="", recursive=False),
+        run_in_ai_executor(client.environments.files.list, environment=env_id, path="", recursive=False),
         timeout=30.0
     )
     for top_f in getattr(top_resp, "files", []) or []:
@@ -657,7 +715,7 @@ async def list_environment_files(api_keys: list[str], env_id: str, key_index: in
             items.append({"path": spath, "name": os.path.basename(spath), "size": int(getattr(top_f, "size_bytes", 0) or 0)})
         else:
             sub_resp = await asyncio.wait_for(
-                asyncio.to_thread(client.environments.files.list, environment=env_id, path=tname, recursive=True),
+                run_in_ai_executor(client.environments.files.list, environment=env_id, path=tname, recursive=True),
                 timeout=30.0
             )
             for sf_item in getattr(sub_resp, "files", []) or []:
@@ -674,7 +732,7 @@ async def list_environment_files(api_keys: list[str], env_id: str, key_index: in
 async def download_environment_file(api_keys: list[str], env_id: str, remote_path: str, chat_uid: str, key_index: int = 0):
     dl_client = create_genai_client(api_keys, key_index or 0, timeout=60000, with_retry_opt=False)
     file_data = await asyncio.wait_for(
-        asyncio.to_thread(dl_client.environments.files.download, environment=env_id, path=remote_path),
+        run_in_ai_executor(dl_client.environments.files.download, environment=env_id, path=remote_path),
         timeout=60.0
     )
     content = file_data.read() if hasattr(file_data, "read") else file_data
@@ -714,5 +772,5 @@ async def upload_file_to_environment(api_keys: list[str], env_id: str, local_ser
                 overwrite=True
             )
 
-    await asyncio.wait_for(asyncio.to_thread(_do_upload), timeout=180.0)
+    await asyncio.wait_for(run_in_ai_executor(_do_upload), timeout=180.0)
     return clean_remote
