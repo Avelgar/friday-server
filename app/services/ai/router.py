@@ -23,10 +23,14 @@ logger = logging.getLogger("AI_Service")
 
 DIRECT_HISTORY_CHAR_BUDGET = 12000
 ANTIGRAVITY_HISTORY_CHAR_BUDGET = 5000
-PLANNER_FILES_CHAR_BUDGET = 70_000
+# 70K символов хватало только на 2 больших JS-файла из 5: остальные молча
+# выпадали из промпта, планировщик просил их снова, а сервер отвечал «они уже
+# на сервере» и выкидывал запрос — получался пустой план. Gemini 3.6 спокойно
+# держит 200K символов (~85K токенов), поэтому отдаём проекту целиком.
+PLANNER_FILES_CHAR_BUDGET = 200_000
 # На повторных попытках (после 503/504) режем контекст: так запрос реально
 # успевает в дедлайн Google, а не просто повторяет ту же «тяжёлую» ошибку.
-PLANNER_RETRY_CHAR_BUDGET = 25_000
+PLANNER_RETRY_CHAR_BUDGET = 60_000
 # Таймауты планировщика: http-таймаут клиента и «жёсткий» asyncio-дедлайн (больше него).
 PLANNER_HTTP_TIMEOUT_MS = 120_000
 PLANNER_WAIT_TIMEOUT_SEC = 125.0
@@ -318,6 +322,29 @@ class EmptyPlanError(RuntimeError):
     """
 
 
+class PlannerFailedError(EmptyPlanError):
+    """
+    Планировщик не дал план, и мы знаем, что именно он ответил.
+
+    Наследуется от EmptyPlanError: обработчику важно одно — плана нет.
+    raw_text/out_tokens нужны, чтобы показать пользователю реальную причину.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        raw_text: str = "",
+        out_tokens: int = 0,
+        reason: str = "empty",
+        asked_files: list | None = None,
+    ):
+        super().__init__(message)
+        self.raw_text = raw_text or ""
+        self.out_tokens = int(out_tokens or 0)
+        self.reason = reason or "empty"
+        self.asked_files = list(asked_files or [])
+
+
 # Ответы-пустышки: если они попадают в историю, планировщик копирует их форму
 # и снова выдаёт пустой план («работа же уже сделана»).
 _FILLER_REPLY_RE = re.compile(
@@ -339,6 +366,60 @@ def is_empty_plan(plan) -> bool:
     steps = plan.get("steps") or []
     summary = (plan.get("summary") or "").strip()
     return not need and not steps and not summary
+
+
+# Слова-пустышки: такой summary — не ответ пользователю, а «отписка».
+_FILLER_SUMMARY_RE = re.compile(
+    r"^(?:готово|сделано|выполнено|план отменён|отменено|ок|ok|принято|done)[.!]?$",
+    re.IGNORECASE,
+)
+
+
+def summarize_planner_failure(
+    raw_text: str,
+    out_tokens: int = 0,
+    reason: str = "",
+    asked_files: list | None = None,
+) -> str:
+    """
+    Человеческая причина, почему планировщик не дал план.
+
+    Раньше на этом месте в чат уходило «Готово.», теперь — честная причина
+    с куском сырого ответа модели (без него дебажить невозможно).
+    """
+    asked = [a for a in (asked_files or []) if a]
+    if reason == "asked_present_files" and asked:
+        return (
+            f"⚠️ Планировщик зациклился: он снова просит файлы, которые уже есть "
+            f"на сервере ({', '.join(asked[:5])}).\n\n"
+            "Скорее всего файл слишком большой и попал в промпт обрезанным. "
+            "Попробуй сузить задачу: назови один файл и конкретное место "
+            "(например «в js/world.js функция drawDistrict»)."
+        )
+
+    raw = (raw_text or "").strip()
+    snippet = re.sub(r"\s+", " ", raw)[:300]
+    if not raw:
+        return (
+            "⚠️ Планировщик вернул ПУСТОЙ ответ"
+            + (f" ({out_tokens} ток. на выходе)" if out_tokens else "")
+            + " — модель не написала ничего.\n\n"
+            "Файлы на сервер пришли, дело не в них: ключ или модель отдали пустой "
+            "ответ. Повтори задачу — на другой попытке обычно проходит."
+        )
+
+    if reason == "filler":
+        return (
+            f"⚠️ Вместо плана планировщик прислал отписку: «{snippet[:120]}».\n\n"
+            "Работы в ней нет. Повтори задачу или уточни: какой файл менять "
+            "и что именно в нём сделать."
+        )
+
+    return (
+        f"⚠️ Планировщик выдал не план, а «{snippet}».\n\n"
+        "Это не по делу. Повтори задачу или уточни её: какой файл менять "
+        "и что именно в нём сделать."
+    )
 
 
 # DIRECT больше не имеет права на терминал: любые [RUN_COMMAND: ...] вырезаем
@@ -833,11 +914,20 @@ async def run_planner(
         ordered_files.sort(key=lambda f: (0 if f["path"] in selected_norm else 1, -f.get("mtime", 0)))
 
     def _build_planner_messages(budget: int, shrink_images: bool = False) -> tuple[list, list]:
-        """Собирает (file_blocks, image_parts) под заданный символьный бюджет."""
+        """
+        Собирает (file_blocks, image_parts) под заданный символьный бюджет.
+
+        ВАЖНО: бюджет — это сумма на ВСЕ файлы, а не «первые N, пока не кончится
+        место». Раньше цикл делал `break` на третьем файле, и планировщик видел
+        2 файла из 5: он просил остальные через need_files, сервер отвечал «они
+        уже на сервере» и выбрасывал запрос — модель оставалась без данных и
+        возвращала пустой план.
+        """
         blocks: list[str] = []
         imgs: list = []
-        used = 0
 
+        # 1. Читаем все текстовые файлы (дёшево, локально).
+        texts: list[tuple[str, str]] = []
         for f in ordered_files:
             disk_p = _resolve_disk_path(f)
             if not disk_p:
@@ -859,15 +949,20 @@ async def run_planner(
             numbered = _read_numbered_file_content(disk_p, f["path"])
             if not numbered:
                 continue
-            block = f"=== ФАЙЛ: {f['path']} ===\n{numbered}"
-            if used + len(block) > budget:
-                if not blocks:
-                    block = block[:budget] + "\n...[файл обрезан по бюджету]..."
-                    blocks.append(block)
-                    used += len(block)
-                break
-            blocks.append(block)
-            used += len(block)
+            texts.append((f["path"], numbered))
+
+        if not texts:
+            return blocks, imgs
+
+        # 2. Делим бюджет поровну, чтобы в промпт попал КАЖДЫЙ файл.
+        per_file = max(budget // len(texts), 4_000)
+        for path, numbered in texts:
+            if len(numbered) > per_file:
+                numbered = numbered[:per_file] + (
+                    f"\n...[файл {path} обрезан: он больше лимита на файл "
+                    f"({per_file} симв.) — дальше не читай, пиши план по началу]..."
+                )
+            blocks.append(f"=== ФАЙЛ: {path} ===\n{numbered}")
 
         return blocks, imgs
 
@@ -875,9 +970,15 @@ async def run_planner(
         parts = []
         if project_tree and project_tree.strip():
             parts.append(f"# Дерево проекта:\n{project_tree.strip()[:5000]}")
+        if ordered_files:
+            listed = ", ".join(f["path"] for f in ordered_files)
+            parts.append(
+                "# Файлы на сервере (ВСЕ они уже переданы ниже, запрашивать их снова НЕЛЬЗЯ):\n"
+                f"{listed}"
+            )
         if blocks:
             parts.append("# Содержимое файлов с сервера:\n\n" + "\n\n".join(blocks))
-        else:
+        elif not ordered_files:
             parts.append("# Файлы на сервере:\nФайлов на сервере нет.")
 
         clean_history = [
@@ -914,6 +1015,12 @@ async def run_planner(
     attempts = PLANNER_ATTEMPTS
     last_err = None
     last_empty = None
+    last_raw_text = ""
+    last_out_tokens = 0
+    # Файлы, которые уже лежат на сервере: их повторный запрос — гарантированный
+    # тупик (сервер ответит «они уже на сервере» и выбросит задачу).
+    have_paths = {f["path"] for f in (file_manifest or [])}
+    have_names = {os.path.basename(p) for p in have_paths}
 
     for attempt in range(attempts):
         if attempt > 0:
@@ -929,8 +1036,8 @@ async def run_planner(
             planner_input += (
                 "\n\n# ВАЖНО:\n"
                 "Предыдущий ответ был пустым планом (steps=[], need_files=[], summary=\"\").\n"
-                "Это НЕ ответ пользователю. Либо заполни need_files (если не хватает файлов),\n"
-                "либо составь steps с точными инструкциями, либо напиши содержательный summary."
+                "Все файлы с сервера уже переданы выше — повторно просить их нельзя.\n"
+                "Либо составь steps с точными инструкциями, либо напиши содержательный summary."
             )
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=planner_input), *image_parts])]
 
@@ -958,16 +1065,60 @@ async def run_planner(
             logger.info(f"📊 [PLANNER TOKENS] {planner_model} | in={u_in} cached={u_cac} out={u_out} total={u_tot}")
 
             raw_json = (getattr(resp, "text", None) or "").strip()
+            last_raw_text = raw_json
+            last_out_tokens = u_out
             raw_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_json, flags=re.IGNORECASE | re.DOTALL).strip()
-            plan_data = json.loads(raw_json)
+            try:
+                plan_data = json.loads(raw_json)
+            except json.JSONDecodeError as je:
+                raise PlannerFailedError(
+                    f"Планировщик вернул не JSON ({je}), out={u_out} ток.: {raw_json[:200]!r}",
+                    raw_text=raw_json,
+                    out_tokens=u_out,
+                    reason="bad_json",
+                )
             if not isinstance(plan_data, dict):
-                raise ValueError("Planner JSON is not an object")
+                raise PlannerFailedError(
+                    f"Планировщик вернул JSON не-объект, out={u_out} ток.: {str(plan_data)[:200]!r}",
+                    raw_text=str(plan_data),
+                    out_tokens=u_out,
+                    reason="bad_json",
+                )
 
             # Пустой план — это НЕ «Готово.»: модель либо не разобралась, либо
             # скопировала форму прошлых пустых ответов из истории. Пробуем снова.
             if is_empty_plan(plan_data):
-                raise EmptyPlanError(
-                    f"Пустой план (steps=0, need_files=0, summary пустой), out={u_out} ток."
+                raise PlannerFailedError(
+                    f"Пустой план (steps=0, need_files=0, summary пустой), out={u_out} ток.",
+                    raw_text=raw_json,
+                    out_tokens=u_out,
+                    reason="empty",
+                )
+
+            # Модель просит файлы, которые уже переданы -> повтор смысла не имеет:
+            # сервер сам отфильтрует их, и задача молча умрёт.
+            requested_again = []
+            for nf in (plan_data.get("need_files") or []):
+                clean_nf = re.sub(r"^(\./)+", "", str(nf).strip().replace("\\", "/")).lstrip("/")
+                if clean_nf in have_paths or os.path.basename(clean_nf) in have_names:
+                    requested_again.append(clean_nf)
+            if requested_again:
+                raise PlannerFailedError(
+                    f"Просит файлы, которые уже переданы: {', '.join(requested_again[:4])}, out={u_out} ток.",
+                    raw_text=raw_json,
+                    out_tokens=u_out,
+                    reason="asked_present_files",
+                    asked_files=requested_again,
+                )
+
+            # Summary-«отписка» («Готово», «Сделано») — это не ответ.
+            summary_txt = (plan_data.get("summary") or "").strip()
+            if not (plan_data.get("steps") or []) and summary_txt and _FILLER_SUMMARY_RE.match(summary_txt):
+                raise PlannerFailedError(
+                    f"Вместо плана — отписка «{summary_txt[:60]}», out={u_out} ток.",
+                    raw_text=raw_json,
+                    out_tokens=u_out,
+                    reason="filler",
                 )
 
             return {
@@ -983,7 +1134,12 @@ async def run_planner(
             if empty_plan:
                 last_empty = e
 
-            if (transient or empty_plan) and attempt < attempts - 1:
+            # «Просит файлы, которые уже переданы» — детерминированный тупик:
+            # второй повтор даёт тот же ответ. Один раз пробуем с пометкой в
+            # промпте, дальше сразу отдаём ошибку, а не жжём время впустую.
+            hopeless = empty_plan and getattr(e, "reason", "") == "asked_present_files" and attempt >= 1
+
+            if (transient or empty_plan) and not hopeless and attempt < attempts - 1:
                 delay = PLANNER_RETRY_DELAYS[attempt] if attempt < len(PLANNER_RETRY_DELAYS) else 8.0
                 reason = "пустой план" if empty_plan else "временная ошибка бэкенда"
                 logger.warning(
@@ -997,8 +1153,8 @@ async def run_planner(
 
             if empty_plan:
                 logger.warning(
-                    f"⚠️ [PLANNER EMPTY] {attempts} попытки, план так и пустой — "
-                    f"возвращаем ошибку вместо «Готово.»"
+                    f"⚠️ [PLANNER EMPTY] Как плана не дал (попыток: {attempt + 1}/{attempts}) — "
+                    f"возвращаем ошибку вместо «Готово.»: {str(e)[:300]}"
                 )
                 raise
 
@@ -1010,6 +1166,10 @@ async def run_planner(
                 key_pool.register_key_error(key_idx, model=planner_model, exc=e)
             raise
 
+    if isinstance(last_err, EmptyPlanError) and not isinstance(last_err, PlannerFailedError):
+        raise PlannerFailedError(
+            str(last_err), raw_text=last_raw_text, out_tokens=last_out_tokens
+        )
     raise last_err or last_empty
 
 
