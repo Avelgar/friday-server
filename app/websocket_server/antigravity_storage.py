@@ -71,17 +71,39 @@ def delete_chat_state(chat_uid: str) -> None:
         logger.warning(f"⚠️ [CHAT STATE DELETE ERR] {e}")
 
 
+# Теги, которые исполняет IDE. RUN_COMMAND намеренно НЕ отслеживается: раньше он
+# оставался в last_requested_tag после любого curl'а, и следующие 12 сообщений
+# модели шли в ветку «ответ песочницы» вместо обычной логики.
+TRACKED_TAGS = ("GET_FILES", "GET_TREE", "ASK_USER")
+_TAG_PATTERNS = {
+    "GET_TREE": re.compile(r"\[GET_TREE\]"),
+    "GET_FILES": re.compile(r"\[GET_FILES:\s*([^\]]+)\]", re.IGNORECASE),
+    "ASK_USER": re.compile(r"\[ASK_USER:\s*[^\]]*\]", re.IGNORECASE),
+}
+
+
 def detect_requested_ide_tag(text: str) -> str | None:
     t = text or ""
-    if "[GET_TREE]" in t:
-        return "GET_TREE"
-    if "[GET_FILES:" in t:
-        return "GET_FILES"
-    if "[RUN_COMMAND:" in t:
-        return "RUN_COMMAND"
-    if "[ASK_USER:" in t:
-        return "ASK_USER"
+    for tag in TRACKED_TAGS:
+        if _TAG_PATTERNS[tag].search(t):
+            return tag
     return None
+
+
+def detect_run_command_urls(text: str) -> list[str]:
+    """
+    Достаёт URL из [RUN_COMMAND: ...] вида `curl ... "https://..." -o js/app.js`
+    (и просто [RUN_COMMAND: curl URL]). Нужно, чтобы перехватить бесполезные
+    «curl по уже скачанному файлу» и превратить их в обычную эскалацию.
+    """
+    urls: list[str] = []
+    for m in re.finditer(r"\[RUN_COMMAND:\s*([^\]]*)\]", text or "", flags=re.IGNORECASE):
+        body = m.group(1)
+        for u in re.findall(r"https?://[^\s\"']+", body):
+            u = u.rstrip(".,;)")
+            if u not in urls:
+                urls.append(u)
+    return urls
 
 
 def _canonical_upload_path(rel_p: str) -> str:

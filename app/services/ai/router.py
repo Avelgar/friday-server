@@ -35,6 +35,13 @@ PLANNER_RETRY_DELAYS = (3.0, 8.0)
 UPLOADS_DIR = "/opt/friday/storage/uploads"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 CALL_PREFIXES = ("[CALL_PLANNER", "[CALL_ANTIGRAVITY", "[ESCALATE_ANTIGRAVITY")
+# DECIDE_PREFIXES — теги, которые DIRECT разбирает сам, а не отправляет в чат
+# (иначе «Действие: cmd.exe /d /s /c chcp 65001 && curl …» уходит как команда IDE).
+# Теги, которые DIRECT обрабатывает сам и НЕ стримит в UI.
+DECIDE_PREFIXES = CALL_PREFIXES + ("[GET_FILES", "[GET_TREE", "[DELETE:")
+# Ответ, который начинается с команды терминала, тоже нельзя стримить: сервер
+# всё равно вырежет команду (у DIRECT нет терминала).
+CMD_PREFIXES = ("[RUN_COMMAND", "CMD.EXE", "POWERSHELL", "CHCP ", "```CMD", "```POWERSHELL")
 
 
 def _compress_history_entries(
@@ -284,16 +291,259 @@ def build_direct_contents(prompt_text: str, recent_history: list = None) -> list
     ]
 
 
-def parse_antigravity_call(text: str) -> dict | None:
-    s = (text or "").strip()
-    if "[ESCALATE_ANTIGRAVITY]" in s:
-        return {"task": None, "files": [], "network": False}
+_SYNC_TAG_RE = re.compile(r"\[SYNC:\s*([^\]]+)\]", re.IGNORECASE)
 
-    m = re.search(r"\[CALL_(?:PLANNER|ANTIGRAVITY):\s*(.+?)\]", s, flags=re.DOTALL | re.IGNORECASE)
-    if not m:
+
+# Модель иногда открывает тег разговорным префиксом («Сейчас выполню: [CALL…»).
+_FILLER_PREFIX_RE = re.compile(
+    r"^[^\[]{0,120}?[:\-—]\s*(?=\[(?:CALL_|ESCALATE_|GET_FILES|GET_TREE|SYNC:))",
+    re.DOTALL,
+)
+
+
+def _norm_tag_start(text: str) -> str:
+    """Срезает «Сейчас сделаю:» перед тегом, чтобы стрим не считал это обычным ответом."""
+    t = (text or "").lstrip()
+    if t.startswith("["):
+        return t
+    m = _FILLER_PREFIX_RE.match(t)
+    return t[m.end():] if m else t
+
+
+# DIRECT больше не имеет права на терминал: любые [RUN_COMMAND: ...] вырезаем
+# ещё до того, как ответ уйдёт в чат/IDE (у модели 3.5-flash-lite промпт не гарантия).
+_RUN_COMMAND_RE = re.compile(r"\[RUN_COMMAND[^\]]*\]", re.IGNORECASE)
+_CMD_FENCE_RE = re.compile(
+    r"```(?:cmd|powershell|powershell5|bat|shell|sh|bash|console|terminal)\b[^\n]*\n.*?(?:```|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_CMD_LINE_RE = re.compile(
+    r"(?im)^\s*(?:\$\s*)?(?:cmd(?:\.exe)?\s+/|powershell(?:\.exe)?\s|chcp\s|curl\s|wget\s|npm\s+(?:i|install|run)|pip\s+install|git\s+(?:clone|pull|push)|python\s+-m\s+pip)\S*.*$"
+)
+
+
+def _strip_run_command(text: str) -> tuple[str, list[str]]:
+    """
+    Убирает из ответа модели [RUN_COMMAND: ...] и «голые» терминальные команды.
+
+    Возвращает (очищенный текст, список вырезанных команд) — команды можно
+    показать пользователю как «предложено, но не выполнено».
+    """
+    if not text:
+        return text, []
+
+    found: list[str] = []
+
+    def _grab(m):
+        body = m.group(1).strip() if m.groups() else m.group(0).strip()
+        if body and body not in found:
+            found.append(body)
+        return ""
+
+    cleaned = re.sub(r"\[RUN_COMMAND:\s*([^\]]*)\]", _grab, text, flags=re.IGNORECASE)
+    cleaned = _RUN_COMMAND_RE.sub("", cleaned)
+    cleaned = _CMD_FENCE_RE.sub("", cleaned)
+
+    kept_lines = []
+    for line in cleaned.splitlines():
+        if _CMD_LINE_RE.match(line):
+            cmd = line.strip()
+            if cmd and cmd not in found:
+                found.append(cmd)
+            continue
+        kept_lines.append(line)
+
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, found
+
+
+_FILE_MENTION_RE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)*[\w-]+\.(?:js|mjs|cjs|ts|tsx|jsx|json|css|scss|html|py|lua|glsl|vert|frag|md|txt|yml|yaml|xml|java|c|cpp|h|cs|go|rs|rb|php|sql))\b",
+    re.IGNORECASE,
+)
+
+
+def extract_mentioned_files(text: str, project_tree: str | None = None) -> list[str]:
+    """
+    Достаёт пути файлов, о которых модель говорит в прозе.
+
+    Нужно для Планировщика: вместо "need_files" он иногда пишет
+    «необходимо проверить js/entities.js и js/interiors.js». Такой ответ нельзя
+    показывать пользователю — сервер сам должен запросить эти файлы у IDE.
+    """
+    if not text:
+        return []
+    tree = project_tree or ""
+    found: list[str] = []
+    for m in _FILE_MENTION_RE.finditer(text):
+        path = re.sub(r"^(\./)+", "", m.group(1).replace("\\", "/")).lstrip("/")
+        if not path or path in found:
+            continue
+        # Берём только реальные файлы проекта: либо есть в дереве, либо уже на сервере.
+        if tree and os.path.basename(path) not in tree and path not in tree:
+            continue
+        found.append(path)
+    return found
+
+
+def _sync_paths_exist(files: list[str], file_manifest: list | None) -> bool:
+    """Для прямых (DIRECT) правок: все [SYNC: ...] в ответе — это реальные файлы на сервере."""
+    if not files or not file_manifest:
+        return False
+    known = {f["path"] for f in file_manifest}
+    return all(f in known for f in files)
+
+
+def _inject_sync_tag(text: str, files: list[str]) -> str:
+    """Добавляет [SYNC: путь] к ответу, где модель забыла тег (иначе правки не уедут на ПК)."""
+    missing = [f for f in files if not re.search(rf"\[SYNC:\s*{re.escape(f)}\s*\]", text, re.IGNORECASE)]
+    if not missing:
+        return text
+    block = "\n".join(f"[SYNC: {p}]" for p in missing)
+    return f"{block}\n\n{text}".strip()
+
+
+# В подписи блока путь может содержать '/': ```js/entities.js — разрешаем его.
+_CODE_FENCE_RE = re.compile(r"```([^\s`]*)[ \t]*\n(.*?)(?:```|\Z)", re.DOTALL)
+# Если модель переписала почти весь файл — считаем это полной заменой.
+_FULL_REWRITE_MIN_LINES = 40
+
+
+def _find_manifest_entry(rel_path: str, file_manifest: list | None) -> dict | None:
+    for f in (file_manifest or []):
+        if f.get("path") == rel_path:
+            return f
+    return None
+
+
+def _apply_code_patch(text: str, rel_path: str, file_manifest: list | None = None) -> str | None:
+    """
+    Применяет ```-блок из ответа DIRECT к файлу на сервере.
+
+    Два формата, которые модель реально выдаёт:
+      • полная перезапись — блок подписан путём/именем файла (```js/entities.js)
+        или содержит почти весь файл;
+      • фрагмент — контекстные строки «как в файле» + строки с '+' (как в diff).
+    Возвращает новое содержимое или None (тогда ответ остаётся обычным текстом).
+    """
+    blocks = [(m.group(1) or "", m.group(2)) for m in _CODE_FENCE_RE.finditer(text or "")]
+    if not blocks:
         return None
 
-    body = m.group(1).strip()
+    entry = _find_manifest_entry(rel_path, file_manifest)
+    disk_p = _resolve_disk_path(entry) if entry else None
+    if not disk_p:
+        return None
+    try:
+        with open(disk_p, "r", encoding="utf-8", errors="replace") as fh:
+            current = fh.read()
+    except Exception:
+        return None
+
+    current_lines = current.splitlines()
+    fname = os.path.basename(rel_path)
+
+    def _named(lang: str) -> bool:
+        lang_l = (lang or "").strip().lower()
+        return bool(lang_l) and (rel_path.lower() in lang_l or fname.lower() in lang_l)
+
+    # 1) Фрагмент с '+'-строками (самый частый случай для мелких правок).
+    ordered = [b for b in blocks if _named(b[0])] + [b for b in blocks if not _named(b[0])]
+    for _lang, body in ordered:
+        raw_lines = body.split("\n")
+        segments: list[tuple[str, str]] = []
+        for line in raw_lines:
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+"):
+                segments.append(("add", line[1:]))
+            elif line.strip():
+                segments.append(("ctx", line))
+        added = [t for k, t in segments if k == "add"]
+        anchors = [t for k, t in segments if k == "ctx"]
+        if not added or not anchors:
+            continue
+
+        # Контекстные строки должны идти подряд в текущем файле.
+        match_at = None
+        for i in range(len(current_lines) - len(anchors) + 1):
+            if all(current_lines[i + j].rstrip() == anchors[j].rstrip() for j in range(len(anchors))):
+                match_at = i
+                break
+        if match_at is None:
+            continue
+
+        replacement: list[str] = []
+        file_i = match_at
+        for kind, line_text in segments:
+            if kind == "ctx":
+                replacement.append(current_lines[file_i])
+                file_i += 1
+            else:
+                replacement.append(line_text)
+        new_lines = current_lines[:match_at] + replacement + current_lines[file_i:]
+        return "\n".join(new_lines) + ("\n" if current.endswith("\n") else "")
+
+    # 2) Полная перезапись: блок подписан этим файлом.
+    for lang, body in blocks:
+        if _named(lang):
+            return body if body.endswith("\n") else body + "\n"
+
+    # 3) Один большой безымянный блок — считаем, что это новый файл целиком.
+    big = [b for _l, b in blocks if len(b.splitlines()) >= _FULL_REWRITE_MIN_LINES]
+    if len(big) == 1:
+        body = big[0]
+        return body if body.endswith("\n") else body + "\n"
+
+    return None
+
+
+def parse_direct_edit(text: str, file_manifest: list | None = None) -> dict | None:
+    """
+    Небольшая правка без планировщика: модель прислала патч в ```-блоке и
+    [SYNC: путь] для файла, который уже лежит на сервере.
+
+    Такой ответ раньше уходил в чат как обычный текст: файл на сервере не менялся,
+    на ПК ничего не приезжало, а модель на следующем шаге начинала «скачивать
+    curl'ом» уже имеющиеся файлы.
+    """
+    s = (text or "").strip()
+    if not s or "```" not in s:
+        return None
+    sync_files = [m.group(1).strip() for m in _SYNC_TAG_RE.finditer(s)]
+    if not sync_files:
+        return None
+    sync_files = [
+        re.sub(r"^(\./)+", "", f.replace("\\", "/")).lstrip("/")
+        for f in sync_files
+    ]
+    if not _sync_paths_exist(sync_files, file_manifest):
+        return None
+    return {"sync_files": sync_files}
+
+
+
+def parse_antigravity_call(text: str) -> dict | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+
+    # Старые/галлюцинированные теги: [CALL_ANTIGRAVITY ...], [ESCALATE_ANTIGRAVITY ...],
+    # а также [CALL_PLANNER] без двоеточия — иначе DIRECT «отвечал» служебной строкой
+    # в чат, и задача молча не запускалась.
+    if re.search(r"\[ESCALATE_ANTIGRAVITY\b", s, flags=re.IGNORECASE):
+        return {"task": None, "files": [], "network": False}
+
+    short_form = re.search(r"\[CALL_(?:PLANNER|ANTIGRAVITY)\s*\]", s, flags=re.IGNORECASE)
+    if short_form:
+        return {"task": None, "files": [], "network": False}
+
+    task_m = re.search(r"\[CALL_(?:PLANNER|ANTIGRAVITY)\s*:\s*(.+?)\]", s, flags=re.DOTALL | re.IGNORECASE)
+    if not task_m:
+        return None
+
+    body = task_m.group(1).strip()
     need_network = False
     files: list[str] = []
 
@@ -319,7 +569,12 @@ def parse_antigravity_call(text: str) -> dict | None:
 
 
 def _could_be_call_tag(text_upper: str) -> bool:
-    return any(p.startswith(text_upper) or text_upper.startswith(p) for p in CALL_PREFIXES)
+    """True, пока ответ похож на служебный тег/команду — такой текст не стримим в UI."""
+    compact = "".join(text_upper.split())
+    for p in DECIDE_PREFIXES + CMD_PREFIXES:
+        if p.startswith(compact) or compact.startswith(p):
+            return True
+    return False
 
 
 async def run_direct(
@@ -416,7 +671,7 @@ async def run_direct(
 
             if not flushed_any:
                 early_buf += delta
-                stripped_up = early_buf.lstrip().upper()
+                stripped_up = _norm_tag_start(early_buf).upper()
                 if stripped_up and not stripped_up.startswith("["):
                     flushed_any = True
                     if chunk_callback:
@@ -431,6 +686,16 @@ async def run_direct(
 
         full_text = "".join(full_parts).strip()
 
+        # У DIRECT нет терминала: команды вырезаем ПЕРЕД всеми разборами,
+        # иначе [RUN_COMMAND: ...] уедет в IDE как действие (и попадёт в лог
+        # как «cmd.exe /d /s /c chcp 65001 && curl ...»).
+        full_text, stripped_cmds = _strip_run_command(full_text)
+        if stripped_cmds:
+            logger.warning(
+                f"🚫 [NO TERMINAL] DIRECT предложил {len(stripped_cmds)} команд(ы) — вырезано: "
+                f"{str(stripped_cmds[0])[:120]}"
+            )
+
         call_info = parse_antigravity_call(full_text)
         if call_info is not None:
             key_pool.mark_success(key_idx, model=model_name)
@@ -442,6 +707,32 @@ async def run_direct(
                 "need_network": call_info["network"],
                 "assigned_key": key_idx,
             }
+
+        # Мелкая правка готового файла прямо в DIRECT: модель прислала патч в ```-блоке
+        # и [SYNC: путь]. Раньше это уходило в чат как текст (правка терялась), а на
+        # следующем шаге модель просила «скачать» уже имеющиеся файлы.
+        edit_info = parse_direct_edit(full_text, file_manifest)
+        if edit_info:
+            patched = {}
+            applied = []
+            for rel_p in edit_info["sync_files"]:
+                new_src = _apply_code_patch(text=full_text, rel_path=rel_p, file_manifest=file_manifest)
+                if new_src is not None:
+                    patched[rel_p] = new_src
+                    applied.append(rel_p)
+            if applied:
+                key_pool.mark_success(key_idx, model=model_name)
+                logger.info(
+                    f"🩹 [DIRECT EDIT] Ключ #{key_idx}: правка без песочницы -> {', '.join(applied)}"
+                )
+                return {
+                    "escalate": False,
+                    "text": full_text,
+                    "file_urls": {},
+                    "direct_edits": patched,
+                    "assigned_key": key_idx,
+                    "usage": usage_info,
+                }
 
         if not flushed_any and early_buf and chunk_callback:
             await chunk_callback(early_buf)

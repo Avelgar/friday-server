@@ -4,10 +4,16 @@ import json
 import time
 import asyncio
 import logging
+import urllib.parse
 import aiomysql
 
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
+from app.services.ai.router import (
+    _inject_sync_tag,
+    _strip_run_command,
+    extract_mentioned_files,
+)
 from app.websocket_server.utils import async_send
 from app.websocket_server.antigravity_storage import (
     antigravity_user_sockets,
@@ -16,12 +22,77 @@ from app.websocket_server.antigravity_storage import (
     send_antigravity_event,
     load_chat_state,
     save_chat_state,
+    UPLOADS_DIR,
     detect_requested_ide_tag,
+    detect_run_command_urls,
     build_synced_meta,
     build_server_file_manifest,
 )
 
 logger = logging.getLogger("WS_Server")
+
+# Сколько раз в одном чате перехватывать бесполезные curl-команды, прежде чем
+# просто отдать их IDE как есть (защита от бесконечного цикла перехватов).
+CURL_GUARD_LIMIT = 2
+
+
+def _apply_direct_edits(chat_uid: str, edits: dict) -> dict:
+    """
+    Записывает новые версии файлов, которые DIRECT поправил без песочницы,
+    и возвращает {путь: url} — тот же формат, что отдаёт Antigravity после [SYNC].
+    """
+    applied = {}
+    if not edits:
+        return applied
+    safe_uid = os.path.basename(chat_uid or "common")
+    base_dir = os.path.abspath(os.path.join(UPLOADS_DIR, safe_uid))
+    for rel_p, content in edits.items():
+        clean = re.sub(r"^(\./)+", "", str(rel_p).replace("\\", "/")).lstrip("/")
+        if not clean or ".." in clean.split("/"):
+            continue
+        dest = os.path.abspath(os.path.join(base_dir, clean))
+        if not dest.startswith(base_dir + os.sep):
+            continue
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            applied[clean] = (
+                f"https://friday-assistant.ru/uploads/{safe_uid}/"
+                f"{urllib.parse.quote(clean)}?v={int(time.time())}"
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ [DIRECT EDIT WRITE] {clean}: {e}")
+    return applied
+
+
+def _summary_need_files(plan: dict, project_tree, manifest_paths) -> list:
+    """
+    Файлы, которые планировщик перечислил в прозе вместо "need_files".
+
+    Такой план (steps=[]) без этого превращался в ответ пользователю
+    «необходимо проверить такие-то файлы» вместо запроса файлов у IDE.
+    """
+    if not isinstance(plan, dict) or (plan.get("steps") or []):
+        return []
+    text = f"{plan.get('summary') or ''} {plan.get('need_reason') or ''}".strip()
+    if not text:
+        return []
+    known = set(manifest_paths or set())
+    known |= {str(nf).strip() for nf in (plan.get("need_files") or [])}
+    return [p for p in extract_mentioned_files(text, project_tree) if p not in known]
+
+
+def _manifest_has_url(file_manifest, url: str) -> bool:
+    """URL уже относится к файлу, который лежит на сервере (т.е. скачивать его не надо)."""
+    if not url or not file_manifest:
+        return False
+    clean = url.split("?")[0].rstrip("/")
+    for f in file_manifest:
+        fu = str(f.get("url") or "").split("?")[0].rstrip("/")
+        if fu and fu == clean:
+            return True
+    return False
 
 
 def _format_plan_message(plan: dict) -> str:
@@ -286,7 +357,10 @@ async def handle_antigravity_task(websocket, data):
                 save_chat_state(chat_uid, chat_state)
 
         # === ВЕТКА 2: Ответ IDE на тег, который запросил сам Antigravity ===
-        if result is None and is_tool_response and last_engine == "ANTIGRAVITY":
+        # GET_FILES/GET_TREE — это теги уровня DIRECT (диспетчера), поэтому они
+        # обрабатываются в ветке 3. Раньше при last_engine == "ANTIGRAVITY" ответ IDE
+        # с файлами уходил прямо в песочницу, и модель отвечала «сходи сам curl'ом».
+        if result is None and is_tool_response and last_engine == "ANTIGRAVITY" and last_tag not in ("GET_FILES", "GET_TREE"):
             used_engine = "ANTIGRAVITY"
             result = await ai_instance.run_antigravity_agent(
                 prompt_text=prompt,
@@ -301,6 +375,16 @@ async def handle_antigravity_task(websocket, data):
                 max_total_tokens=85_000,
             )
 
+        # === ВЕТКА 2.5: IDE принесла файлы по [GET_FILES] от Планировщика ===
+        # Пользователь не должен писать «Запроси эти файлы» руками: файлы уже на
+        # сервере, поэтому один раз молча повторяем исходную задачу — DIRECT
+        # увидит их в манифесте и сразу уйдёт в [CALL_PLANNER].
+        auto_retry_task = chat_state.pop("planner_waiting_files", None)
+        if result is None and is_tool_response and auto_retry_task:
+            logger.info(f"🔁 [AUTO-RETRY] Файлы от IDE получены → повторяем задачу планировщика: {auto_retry_task[:80]}")
+            prompt = auto_retry_task
+            is_tool_response = False
+
         # === ВЕТКА 3: Обычный вход через Direct (3.5-flash-lite) -> при работе с файлами в Планировщик ===
         if result is None:
             direct_res = await ai_instance.run_direct(
@@ -309,15 +393,49 @@ async def handle_antigravity_task(websocket, data):
                 project_tree=project_tree,
                 file_manifest=file_manifest,
                 status_callback=send_status_update,
-                chunk_callback=send_chunk_update,
+                # Стрим не отдаём в UI: если это [RUN_COMMAND]/[CALL_…]/патч,
+                # пользователь не должен видеть «Действие: cmd.exe …» в бабле.
+                # Обычный текстовый ответ всё равно приходит в antigravity_result.
+                chunk_callback=None,
                 assigned_key=assigned_key,
             )
 
+            # Перехват «сходи скачай curl'ом то, что уже есть на сервере».
+            # DIRECT присылает такую команду как обычный текст (escalate=False),
+            # поэтому проверять её нужно ДО развилки, иначе она уходит в IDE
+            # как cmd.exe-команда и ничего не меняет.
+            curl_urls = detect_run_command_urls(direct_res.get("text") or "")
+            guard_used = int(chat_state.get("curl_guard_hits", 0) or 0)
+            stale_curl = [u for u in curl_urls if _manifest_has_url(file_manifest, u)]
+            if stale_curl and guard_used < CURL_GUARD_LIMIT:
+                chat_state["curl_guard_hits"] = guard_used + 1
+                save_chat_state(chat_uid, chat_state)
+                guarded_files = direct_res.get("ag_files") or [
+                    f["path"] for f in file_manifest if _manifest_has_url([f], stale_curl[0])
+                ]
+                logger.warning(
+                    f"🛑 [CURL GUARD] DIRECT собирался скачивать curl'ом файлы, которые уже на сервере "
+                    f"({len(stale_curl)} URL) → эскалация в планировщик: {guarded_files}"
+                )
+                direct_res = {
+                    "escalate": True,
+                    "ag_task": prompt,
+                    "ag_files": guarded_files,
+                    "need_network": False,
+                    "assigned_key": direct_res.get("assigned_key", assigned_key),
+                }
+
             if not direct_res.get("escalate"):
                 used_engine = "DIRECT"
+                direct_edits = direct_res.get("direct_edits") or {}
+                applied_urls = _apply_direct_edits(chat_uid, direct_edits) if direct_edits else {}
+                direct_text = direct_res["text"]
+                if applied_urls:
+                    logger.info(f"🩹 [DIRECT EDIT] Изменено на сервере: {', '.join(applied_urls)}")
+                    direct_text = _inject_sync_tag(direct_text, list(applied_urls))
                 result = {
-                    "text": direct_res["text"],
-                    "file_urls": {},
+                    "text": direct_text,
+                    "file_urls": applied_urls,
                     "environment_id": None,
                     "assigned_key": direct_res.get("assigned_key", assigned_key),
                     "usage": direct_res.get("usage", {}),
@@ -327,13 +445,16 @@ async def handle_antigravity_task(websocket, data):
                 manifest_paths = {f["path"] for f in file_manifest}
                 manifest_names = {os.path.basename(p) for p in manifest_paths}
 
-                missing_on_server = [
-                    f for f in cand_files
-                    if f not in manifest_paths
-                    and os.path.basename(f) not in manifest_names
-                    and project_tree
-                    and os.path.basename(f) in project_tree
-                ]
+                def _missing(cands):
+                    return [
+                        f for f in cands
+                        if f not in manifest_paths
+                        and os.path.basename(f) not in manifest_names
+                        and project_tree
+                        and os.path.basename(f) in project_tree
+                    ]
+
+                missing_on_server = _missing(cand_files)
 
                 if missing_on_server:
                     logger.info(f"📥 [PRE-FETCH] Файлы не на сервере, запрашиваем через IDE: {missing_on_server}")
@@ -363,15 +484,29 @@ async def handle_antigravity_task(websocket, data):
                     plan = plan_res["plan"]
                     assigned_key = plan_res.get("assigned_key", assigned_key)
 
-                    need_files = [
-                        re.sub(r"^(\./)+", "", str(nf).strip().replace("\\", "/")).lstrip("/")
-                        for nf in (plan.get("need_files") or [])
-                        if str(nf).strip()
-                    ]
+                    def _norm_need(raw):
+                        return re.sub(r"^(\./)+", "", str(raw).strip().replace("\\", "/")).lstrip("/")
+
+                    need_files = [_norm_need(nf) for nf in (plan.get("need_files") or []) if str(nf).strip()]
                     need_files = [nf for nf in need_files if nf not in manifest_paths]
+
+                    # Планировщик иногда вместо "need_files" пишет в summary
+                    # «необходимо проверить js/entities.js, js/interiors.js…».
+                    # Пользователю это читать незачем: сами запрашиваем файлы у IDE.
+                    mentioned = _summary_need_files(plan, project_tree, manifest_paths)
+                    if mentioned:
+                        logger.info(
+                            f"📥 [PLANNER MENTIONS] Файлы названы в summary, а не в need_files: {mentioned}"
+                        )
+                        need_files = mentioned
+                        plan = dict(plan)
+                        plan["need_files"] = mentioned
+                        plan["summary"] = ""
 
                     if need_files:
                         logger.info(f"📥 [PLANNER NEED FILES] Дозапрашиваем файлы: {need_files}")
+                        chat_state["planner_waiting_files"] = planner_task
+                        save_chat_state(chat_uid, chat_state)
                         result = {
                             "text": f"[GET_FILES: {', '.join(need_files)}]",
                             "file_urls": {},
@@ -404,6 +539,17 @@ async def handle_antigravity_task(websocket, data):
                             "assigned_key": assigned_key,
                             "usage": plan_res.get("usage", {}),
                         }
+
+        # Страховка: DIRECT не имеет терминала. Даже если модель всё-таки выдала
+        # команду — вырезаем её из финального текста (иначе IDE выполнит cmd.exe).
+        agent_text_raw = result["text"]
+        agent_text_clean, stripped_cmds = _strip_run_command(agent_text_raw)
+        if stripped_cmds:
+            logger.warning(
+                f"🚫 [NO TERMINAL] В итоговом ответе вырезано команд: {len(stripped_cmds)} "
+                f"({str(stripped_cmds[0])[:100]})"
+            )
+            result["text"] = agent_text_clean
 
         new_env_id = result.get("environment_id")
         agent_reply_text = result["text"]
