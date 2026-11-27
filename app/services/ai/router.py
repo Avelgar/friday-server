@@ -6,6 +6,8 @@ import struct
 import zipfile
 import asyncio
 import logging
+import mimetypes
+import urllib.parse
 import xml.etree.ElementTree as ET
 from google.genai import types
 from .key_pool import GeminiKeyPool, create_genai_client
@@ -17,6 +19,8 @@ logger = logging.getLogger("AI_Service")
 DIRECT_HISTORY_CHAR_BUDGET = 12000
 ANTIGRAVITY_HISTORY_CHAR_BUDGET = 5000
 PLANNER_FILES_CHAR_BUDGET = 150000
+UPLOADS_DIR = "/opt/friday/storage/uploads"
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 CALL_PREFIXES = ("[CALL_PLANNER", "[CALL_ANTIGRAVITY", "[ESCALATE_ANTIGRAVITY")
 
 
@@ -132,6 +136,22 @@ def format_stateless_prompt_parts(
         "history": history_block,
         "task": task_block,
     }
+
+
+def _resolve_disk_path(f: dict) -> str | None:
+    dp = f.get("disk_path")
+    if dp and os.path.isfile(dp):
+        return dp
+    url = f.get("url") or ""
+    m = re.search(r"/uploads/([^/]+)/([^?]+)", url)
+    if m:
+        c_uid = os.path.basename(urllib.parse.unquote(m.group(1)))
+        rel = urllib.parse.unquote(m.group(2)).lstrip("/")
+        base = os.path.abspath(os.path.join(UPLOADS_DIR, c_uid))
+        cand = os.path.abspath(os.path.join(base, rel))
+        if cand.startswith(base + os.sep) and os.path.isfile(cand):
+            return cand
+    return None
 
 
 def _summarize_stl(disk_path: str, rel_path: str) -> str:
@@ -458,7 +478,7 @@ async def run_planner(
     status_callback=None,
     assigned_key: int = None,
 ) -> dict:
-    """Читает файлы с диска с нумерацией строк и строит пошаговый план через модель Планировщика (250K TPM)."""
+    """Читает файлы (и скриншоты) с диска и строит пошаговый план через модель Планировщика (250K TPM)."""
     cfg = get_models_config()
     planner_model = to_api_model(cfg["router_model"])
     key_idx = assigned_key if (assigned_key is not None and key_pool.is_usable(assigned_key, model=planner_model)) else key_pool.get_best_key(model=planner_model)
@@ -474,9 +494,28 @@ async def run_planner(
         ordered_files.sort(key=lambda f: (0 if f["path"] in selected_norm else 1, -f.get("mtime", 0)))
 
     file_blocks = []
+    image_parts = []
     used_chars = 0
+
     for f in ordered_files:
-        numbered = _read_numbered_file_content(f.get("disk_path"), f["path"])
+        disk_p = _resolve_disk_path(f)
+        if not disk_p:
+            continue
+
+        ext = os.path.splitext(f["path"])[1].lower()
+        if ext in IMAGE_EXTS:
+            if len(image_parts) < 3 and os.path.getsize(disk_p) <= 10 * 1024 * 1024:
+                try:
+                    with open(disk_p, "rb") as imgf:
+                        img_bytes = imgf.read()
+                    mime, _ = mimetypes.guess_type(disk_p)
+                    image_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime or "image/png"))
+                    file_blocks.append(f"=== ИЗОБРАЖЕНИЕ: {f['path']} (передано в запрос как картинка) ===")
+                except Exception:
+                    pass
+            continue
+
+        numbered = _read_numbered_file_content(disk_p, f["path"])
         if not numbered:
             continue
         block = f"=== ФАЙЛ: {f['path']} ===\n{numbered}"
@@ -504,6 +543,9 @@ async def run_planner(
     parts.append(f"# Задача:\n{task_prompt}")
     planner_input = "\n\n".join(parts)
 
+    content_parts = [types.Part.from_text(text=planner_input), *image_parts]
+    contents = [types.Content(role="user", parts=content_parts)]
+
     is_25 = "2.5" in planner_model
     thinking_cfg = types.ThinkingConfig(thinking_budget=1024) if is_25 else types.ThinkingConfig(thinking_level="low")
     afc_cfg = types.AutomaticFunctionCallingConfig(disable=True) if hasattr(types, "AutomaticFunctionCallingConfig") else None
@@ -521,44 +563,54 @@ async def run_planner(
         short_m = planner_model.replace("models/", "")
         await status_callback({"status": f"Планировщик ({short_m}) изучает файлы..."})
 
-    logger.info(f"🧠 [PLANNER {planner_model}] Ключ #{key_idx} | файлов={len(file_blocks)} | символов входа={len(planner_input)}")
+    logger.info(f"🧠 [PLANNER {planner_model}] Ключ #{key_idx} | файлов={len(file_blocks)} | картинок={len(image_parts)} | символов входа={len(planner_input)}")
 
     client = create_genai_client(api_keys, key_idx, timeout=60000)
-    try:
-        resp = await asyncio.wait_for(
-            asyncio.to_thread(
-                client.models.generate_content,
-                model=planner_model,
-                contents=planner_input,
-                config=gen_cfg,
-            ),
-            timeout=65.0,
-        )
-        key_pool.mark_success(key_idx, model=planner_model)
+    last_err = None
+    for attempt in range(2):
+        try:
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.models.generate_content,
+                    model=planner_model,
+                    contents=contents,
+                    config=gen_cfg,
+                ),
+                timeout=65.0,
+            )
+            key_pool.mark_success(key_idx, model=planner_model)
 
-        um = getattr(resp, "usage_metadata", None)
-        u_in = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
-        u_cac = int(getattr(um, "cached_content_token_count", 0) or 0) if um else 0
-        u_out = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
-        u_tot = int(getattr(um, "total_token_count", 0) or 0) if um else 0
-        logger.info(f"📊 [PLANNER TOKENS] {planner_model} | in={u_in} cached={u_cac} out={u_out} total={u_tot}")
+            um = getattr(resp, "usage_metadata", None)
+            u_in = int(getattr(um, "prompt_token_count", 0) or 0) if um else 0
+            u_cac = int(getattr(um, "cached_content_token_count", 0) or 0) if um else 0
+            u_out = int(getattr(um, "candidates_token_count", 0) or 0) if um else 0
+            u_tot = int(getattr(um, "total_token_count", 0) or 0) if um else 0
+            logger.info(f"📊 [PLANNER TOKENS] {planner_model} | in={u_in} cached={u_cac} out={u_out} total={u_tot}")
 
-        raw_json = (getattr(resp, "text", None) or "").strip()
-        raw_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_json, flags=re.IGNORECASE | re.DOTALL).strip()
-        plan_data = json.loads(raw_json)
-        if not isinstance(plan_data, dict):
-            raise ValueError("Planner JSON is not an object")
+            raw_json = (getattr(resp, "text", None) or "").strip()
+            raw_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_json, flags=re.IGNORECASE | re.DOTALL).strip()
+            plan_data = json.loads(raw_json)
+            if not isinstance(plan_data, dict):
+                raise ValueError("Planner JSON is not an object")
 
-        return {
-            "plan": plan_data,
-            "assigned_key": key_idx,
-            "usage": {"input": u_in, "cached": u_cac, "output": u_out, "total": u_tot},
-        }
-    except Exception as e:
-        logger.warning(f"⚠️ [PLANNER ERROR] {e}")
-        if _is_dead_project_error(str(e)):
-            key_pool.mark_dead_all_models(key_idx)
-        raise
+            return {
+                "plan": plan_data,
+                "assigned_key": key_idx,
+                "usage": {"input": u_in, "cached": u_cac, "output": u_out, "total": u_tot},
+            }
+        except Exception as e:
+            last_err = e
+            err_s = str(e)
+            if "503" in err_s and attempt == 0:
+                logger.warning("⚠️ [PLANNER 503] Модель временно перегружена, повтор через 2.5с...")
+                await asyncio.sleep(2.5)
+                continue
+            logger.warning(f"⚠️ [PLANNER ERROR] {e}")
+            if _is_dead_project_error(err_s):
+                key_pool.mark_dead_all_models(key_idx)
+            raise
+
+    raise last_err
 
 
 run_direct_hydrogen = run_direct
