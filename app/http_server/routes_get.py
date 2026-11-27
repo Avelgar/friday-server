@@ -53,9 +53,11 @@ def do_GET(self):
         except: self.send_error(500); return
     elif path.startswith('/uploads/'):
         rel_path = urllib.parse.unquote(path[len('/uploads/'):])
-        safe_path = os.path.normpath(os.path.join('/opt/friday/storage/uploads', rel_path))
+        uploads_root = os.path.abspath('/opt/friday/storage/uploads')
+        safe_path = os.path.abspath(os.path.normpath(os.path.join(uploads_root, rel_path)))
 
-        if safe_path.startswith('/opt/friday/storage/uploads') and os.path.isfile(safe_path):
+        # Сравниваем с разделителем: иначе '/uploads/../uploads_private/x' проходит проверку префикса.
+        if (safe_path == uploads_root or safe_path.startswith(uploads_root + os.sep)) and os.path.isfile(safe_path):
             import mimetypes
             content_type, _ = mimetypes.guess_type(safe_path)
             content_type = content_type or 'application/octet-stream'
