@@ -189,18 +189,38 @@ async def handle_antigravity_create_chat(websocket, data):
     if user_token:
         antigravity_user_sockets[user_token] = websocket
     conn = None; cursor = None
+    assigned_key = None
+    created = True
     try:
         conn = await get_async_db_connection()
         cursor = await conn.cursor(aiomysql.DictCursor)
         assigned_key = await get_least_used_key_index(cursor)
 
-        await cursor.execute(
-            """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path) 
-               VALUES (%s, %s, %s, %s, %s)""",
-            (chat_uid, title, assigned_key, user_token, workspace_path)
-        )
-        await conn.commit()
+        # Уже существует? (клиент повторил create_chat после реконнекта)
+        await cursor.execute("SELECT key_index, title FROM antigravity_chats WHERE chat_uid = %s", (chat_uid,))
+        existing = await cursor.fetchone()
+        if existing:
+            created = False
+            assigned_key = existing.get("key_index", assigned_key)
+            logger.info(f"🗂️ [create_chat] Чат {chat_uid} уже существует — отвечаем без INSERT")
+        else:
+            # Идемпотентно: два одновременных подключения больше не роняют
+            # «Duplicate entry ... for key 'chat_uid'» (MySQL 1062).
+            await cursor.execute(
+                """INSERT INTO antigravity_chats (chat_uid, title, key_index, user_token, workspace_path)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE chat_uid = chat_uid""",
+                (chat_uid, title, assigned_key, user_token, workspace_path)
+            )
+            await conn.commit()
+    except Exception as e:
+        logger.error(f"[DB create_chat error] {e}")
+    finally:
+        if cursor: await cursor.close()
+        if conn: conn.close()
 
+    # Клиенту отвечаем ВСЕГДА — иначе расширение навсегда ждёт antigravity_chat_created.
+    try:
         await async_send(websocket, {
             "type": "antigravity_chat_created",
             "chat": {
@@ -209,15 +229,13 @@ async def handle_antigravity_create_chat(websocket, data):
                 "key_index": assigned_key,
                 "user_token": user_token,
                 "workspace_path": workspace_path,
+                "exists": not created,
                 "last_interaction_id": None,
                 "environment_id": None
             }
         })
-    except Exception as e:
-        logger.error(f"[DB create_chat error] {e}")
-    finally:
-        if cursor: await cursor.close()
-        if conn: conn.close()
+    except Exception as se:
+        logger.warning(f"[WS create_chat reply error] {se}")
 
 
 async def handle_antigravity_delete_chat(websocket, data):

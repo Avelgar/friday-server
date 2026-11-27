@@ -10,7 +10,12 @@ import mimetypes
 import urllib.parse
 import xml.etree.ElementTree as ET
 from google.genai import types
-from .key_pool import GeminiKeyPool, create_genai_client
+from .key_pool import (
+    GeminiKeyPool,
+    create_genai_client,
+    is_transient_error,
+    run_generate_content_in_thread,
+)
 from .model_config import get_models_config, to_api_model
 from .prompts import DIRECT_SYSTEM_INSTRUCTION, PLANNER_SYSTEM_INSTRUCTION
 
@@ -18,7 +23,15 @@ logger = logging.getLogger("AI_Service")
 
 DIRECT_HISTORY_CHAR_BUDGET = 12000
 ANTIGRAVITY_HISTORY_CHAR_BUDGET = 5000
-PLANNER_FILES_CHAR_BUDGET = 150000
+PLANNER_FILES_CHAR_BUDGET = 70_000
+# На повторных попытках (после 503/504) режем контекст: так запрос реально
+# успевает в дедлайн Google, а не просто повторяет ту же «тяжёлую» ошибку.
+PLANNER_RETRY_CHAR_BUDGET = 25_000
+# Таймауты планировщика: http-таймаут клиента и «жёсткий» asyncio-дедлайн (больше него).
+PLANNER_HTTP_TIMEOUT_MS = 120_000
+PLANNER_WAIT_TIMEOUT_SEC = 125.0
+PLANNER_ATTEMPTS = 3
+PLANNER_RETRY_DELAYS = (3.0, 8.0)
 UPLOADS_DIR = "/opt/friday/storage/uploads"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 CALL_PREFIXES = ("[CALL_PLANNER", "[CALL_ANTIGRAVITY", "[ESCALATE_ANTIGRAVITY")
@@ -497,58 +510,61 @@ async def run_planner(
     if selected_norm:
         ordered_files.sort(key=lambda f: (0 if f["path"] in selected_norm else 1, -f.get("mtime", 0)))
 
-    file_blocks = []
-    image_parts = []
-    used_chars = 0
+    def _build_planner_messages(budget: int, shrink_images: bool = False) -> tuple[list, list]:
+        """Собирает (file_blocks, image_parts) под заданный символьный бюджет."""
+        blocks: list[str] = []
+        imgs: list = []
+        used = 0
 
-    for f in ordered_files:
-        disk_p = _resolve_disk_path(f)
-        if not disk_p:
-            continue
+        for f in ordered_files:
+            disk_p = _resolve_disk_path(f)
+            if not disk_p:
+                continue
 
-        ext = os.path.splitext(f["path"])[1].lower()
-        if ext in IMAGE_EXTS:
-            if len(image_parts) < 3 and os.path.getsize(disk_p) <= 10 * 1024 * 1024:
-                try:
-                    with open(disk_p, "rb") as imgf:
-                        img_bytes = imgf.read()
-                    mime, _ = mimetypes.guess_type(disk_p)
-                    image_parts.append(types.Part.from_bytes(data=img_bytes, mime_type=mime or "image/png"))
-                    file_blocks.append(f"=== ИЗОБРАЖЕНИЕ: {f['path']} (передано в запрос как картинка) ===")
-                except Exception:
-                    pass
-            continue
+            ext = os.path.splitext(f["path"])[1].lower()
+            if ext in IMAGE_EXTS:
+                if not shrink_images and len(imgs) < 3 and os.path.getsize(disk_p) <= 10 * 1024 * 1024:
+                    try:
+                        with open(disk_p, "rb") as imgf:
+                            img_bytes = imgf.read()
+                        mime, _ = mimetypes.guess_type(disk_p)
+                        imgs.append(types.Part.from_bytes(data=img_bytes, mime_type=mime or "image/png"))
+                        blocks.append(f"=== ИЗОБРАЖЕНИЕ: {f['path']} (передано в запрос как картинка) ===")
+                    except Exception:
+                        pass
+                continue
 
-        numbered = _read_numbered_file_content(disk_p, f["path"])
-        if not numbered:
-            continue
-        block = f"=== ФАЙЛ: {f['path']} ===\n{numbered}"
-        if used_chars + len(block) > PLANNER_FILES_CHAR_BUDGET:
-            if not file_blocks:
-                block = block[:PLANNER_FILES_CHAR_BUDGET] + "\n...[файл обрезан по бюджету]..."
-                file_blocks.append(block)
-            break
-        file_blocks.append(block)
-        used_chars += len(block)
+            numbered = _read_numbered_file_content(disk_p, f["path"])
+            if not numbered:
+                continue
+            block = f"=== ФАЙЛ: {f['path']} ===\n{numbered}"
+            if used + len(block) > budget:
+                if not blocks:
+                    block = block[:budget] + "\n...[файл обрезан по бюджету]..."
+                    blocks.append(block)
+                    used += len(block)
+                break
+            blocks.append(block)
+            used += len(block)
 
-    parts = []
-    if project_tree and project_tree.strip():
-        parts.append(f"# Дерево проекта:\n{project_tree.strip()[:5000]}")
-    if file_blocks:
-        parts.append("# Содержимое файлов с сервера:\n\n" + "\n\n".join(file_blocks))
-    else:
-        parts.append("# Файлы на сервере:\nФайлов на сервере нет.")
+        return blocks, imgs
 
-    entries = _compress_history_entries(recent_history, char_budget=5000, max_items=6)
-    if entries:
-        h_lines = [f"[{'Пользователь' if r == 'user' else ('IDE' if r in ('tool', 'system') else 'Ассистент')}]: {t}" for r, t in entries]
-        parts.append("# Недавний контекст:\n" + "\n\n".join(h_lines))
+    def _render_planner_input(blocks: list[str]) -> str:
+        parts = []
+        if project_tree and project_tree.strip():
+            parts.append(f"# Дерево проекта:\n{project_tree.strip()[:5000]}")
+        if blocks:
+            parts.append("# Содержимое файлов с сервера:\n\n" + "\n\n".join(blocks))
+        else:
+            parts.append("# Файлы на сервере:\nФайлов на сервере нет.")
 
-    parts.append(f"# Задача:\n{task_prompt}")
-    planner_input = "\n\n".join(parts)
+        entries = _compress_history_entries(recent_history, char_budget=5000, max_items=6)
+        if entries:
+            h_lines = [f"[{'Пользователь' if r == 'user' else ('IDE' if r in ('tool', 'system') else 'Ассистент')}]: {t}" for r, t in entries]
+            parts.append("# Недавний контекст:\n" + "\n\n".join(h_lines))
 
-    content_parts = [types.Part.from_text(text=planner_input), *image_parts]
-    contents = [types.Content(role="user", parts=content_parts)]
+        parts.append(f"# Задача:\n{task_prompt}")
+        return "\n\n".join(parts)
 
     is_25 = "2.5" in planner_model
     thinking_cfg = types.ThinkingConfig(thinking_budget=1024) if is_25 else types.ThinkingConfig(thinking_level="low")
@@ -567,20 +583,34 @@ async def run_planner(
         short_m = planner_model.replace("models/", "")
         await status_callback({"status": f"Планировщик ({short_m}) изучает файлы..."})
 
-    logger.info(f"🧠 [PLANNER {planner_model}] Ключ #{key_idx} | файлов={len(file_blocks)} | картинок={len(image_parts)} | символов входа={len(planner_input)}")
-
-    client = create_genai_client(api_keys, key_idx, timeout=60000)
+    # Одна «тяжёлая» попытка + до 2 повторов на другом ключе с урезанным контекстом.
+    # 504 DEADLINE_EXCEEDED / 503 UNAVAILABLE — это перегрузка на стороне Google,
+    # ключ при этом живой, поэтому винить его (register_key_error) нельзя.
+    attempts = PLANNER_ATTEMPTS
     last_err = None
-    for attempt in range(2):
+    for attempt in range(attempts):
+        if attempt > 0:
+            key_idx = key_pool.pick_key_for_request(model=planner_model, avoid_index=key_idx)
+
+        # Каждый повтор собирается заново: меньше файлов, меньше картинок.
+        files_budget = PLANNER_FILES_CHAR_BUDGET if attempt == 0 else PLANNER_RETRY_CHAR_BUDGET
+        file_blocks, image_parts = _build_planner_messages(files_budget, shrink_images=attempt > 0)
+        planner_input = _render_planner_input(file_blocks)
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=planner_input), *image_parts])]
+
+        logger.info(
+            f"🧠 [PLANNER {planner_model}] попытка {attempt + 1}/{attempts} | Ключ #{key_idx} | "
+            f"файлов={len(file_blocks)} | картинок={len(image_parts)} | символов входа={len(planner_input)}"
+        )
+
+        client = create_genai_client(api_keys, key_idx, timeout=PLANNER_HTTP_TIMEOUT_MS)
         try:
-            resp = await asyncio.wait_for(
-                asyncio.to_thread(
-                    client.models.generate_content,
-                    model=planner_model,
-                    contents=contents,
-                    config=gen_cfg,
-                ),
-                timeout=65.0,
+            resp = await run_generate_content_in_thread(
+                client,
+                timeout_sec=PLANNER_WAIT_TIMEOUT_SEC,
+                model=planner_model,
+                contents=contents,
+                config=gen_cfg,
             )
             key_pool.mark_success(key_idx, model=planner_model)
 
@@ -604,13 +634,24 @@ async def run_planner(
             }
         except Exception as e:
             last_err = e
-            err_s = str(e)
-            if "503" in err_s and attempt == 0:
-                logger.warning("⚠️ [PLANNER 503] Модель временно перегружена, повтор через 2.5с...")
-                await asyncio.sleep(2.5)
+            transient = is_transient_error(e)
+            if transient and attempt < attempts - 1:
+                delay = PLANNER_RETRY_DELAYS[attempt] if attempt < len(PLANNER_RETRY_DELAYS) else 8.0
+                logger.warning(
+                    f"⚠️ [PLANNER RETRY {attempt + 1}/{attempts}] временная ошибка бэкенда "
+                    f"({type(e).__name__}: {str(e)[:160]}) — повтор на другом ключе через {delay:.0f}с "
+                    f"с урезанным контекстом ({PLANNER_RETRY_CHAR_BUDGET} симв.)..."
+                )
+                if status_callback:
+                    await status_callback({"status": f"Планировщик перегружен, повтор через {delay:.0f}с..."})
+                await asyncio.sleep(delay)
                 continue
             logger.warning(f"⚠️ [PLANNER ERROR] {e}")
-            key_pool.register_key_error(key_idx, model=planner_model, exc=e)
+            # Ключ наказываем ТОЛЬКО за ошибки, которые действительно про ключ
+            # (401/403/429). Перегрузка Google, таймауты и кривой JSON — не повод
+            # сажать живой ключ в паузу на 15 минут или на сутки.
+            if not transient and key_pool.classify_key_error(e):
+                key_pool.register_key_error(key_idx, model=planner_model, exc=e)
             raise
 
     raise last_err

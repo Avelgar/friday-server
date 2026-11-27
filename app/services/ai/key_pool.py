@@ -4,9 +4,12 @@ import re
 import json
 import time
 import random
+import asyncio
 import logging
+import functools
 import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from google import genai
 from google.genai import types
 
@@ -71,6 +74,29 @@ def log_keys_loaded(keys: list[str]) -> None:
     logger.info(f"🔑 [Key Pool] Загружено ключей: {len(keys)} | " + ", ".join(parts))
 
 
+# --- Пул потоков для синхронного genai-клиента -------------------------------
+# Python-дефолт (min(32, cpu+4)) на VPS = 6 потоков. Одна «живая» стрим-сессия
+# Antigravity держит поток всё время стрима, поэтому дефолтного пула не хватает
+# и новые asyncio.to_thread начинают стоять в очереди. Свой пул решает это.
+_AI_EXECUTOR = ThreadPoolExecutor(max_workers=64, thread_name_prefix="genai")
+
+
+def get_ai_executor() -> ThreadPoolExecutor:
+    return _AI_EXECUTOR
+
+
+async def run_in_ai_executor(func, *args, **kwargs):
+    """
+    То же, что asyncio.to_thread, но в выделенном пуле потоков (не дефолтном).
+
+    Использовать для ЛЮБЫХ вызовов синхронного google-genai: models.generate_content,
+    interactions.get / create / cancel, environments.files.*.
+    """
+    loop = asyncio.get_running_loop()
+    call = functools.partial(func, *args, **kwargs)
+    return await loop.run_in_executor(_AI_EXECUTOR, call)
+
+
 def _extract_status_code(exc) -> int | None:
     """Достаёт HTTP-код из исключения google.genai (APIError.code / .status / .response)."""
     for attr in ("status_code", "code", "status"):
@@ -91,6 +117,53 @@ def _extract_status_code(exc) -> int | None:
     if m:
         return int(m.group(1))
     return None
+
+
+_TRANSIENT_MARKERS = (
+    "deadline_exceeded",
+    "deadline expired",
+    "unavailable",
+    "overloaded",
+    "service unavailable",
+    "resource_exhausted",
+    "rate limit",
+    "too many requests",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "remoteprotocolerror",
+    "readtimeout",
+    "connecttimeout",
+    "server disconnected",
+    "temporarily",
+)
+
+
+def is_transient_error(exc) -> bool:
+    """
+    Глобальная (не про конкретный ключ) временная ошибка бэкенда Gemini/прокси:
+    5xx, DEADLINE_EXCEEDED, OVERLOADED, UNAVAILABLE, таймауты и обрывы сети.
+
+    Такие ошибки смысла «винить» ключ нет — надо повторить запрос, желательно
+    на ДРУГОМ ключе. В отличие от 400/401/403/404, где повтор не поможет.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+
+    # httpx.ReadTimeout/ConnectTimeout/RemoteProtocolError дают пустой str(exc),
+    # поэтому смотрим на имена классов в MRO.
+    type_names = {c.__name__.lower() for c in type(exc).__mro__}
+    if any(("timeout" in n) or ("connecterror" in n) or ("transport" in n) for n in type_names):
+        return True
+
+    status = _extract_status_code(exc)
+    if status in (500, 502, 503, 504, 529):
+        return True
+
+    low = str(exc or "").lower()
+    return any(marker in low for marker in _TRANSIENT_MARKERS)
 
 
 def classify_key_error(exc) -> str | None:
@@ -480,6 +553,30 @@ def create_genai_client(api_keys: list[str], key_index: int = 0, timeout=180000,
         http_options=build_http_options(timeout=timeout, with_retry_opt=with_retry_opt),
         api_key=api_keys[idx]
     )
+
+
+async def run_generate_content_in_thread(client, timeout_sec: float = None, **gen_kwargs):
+    """
+    Один не-стриминговый generate_content в ВЫДЕЛЕННОМ пуле потоков.
+
+    Зачем: httpx-таймаут genai на практике срабатывает не всегда, и зависший
+    запрос продолжает держать поток. В дефолтном пуле Python (min(32, cpu+4) =
+    6 потоков на 2-vCPU VPS) пара таких «зомби» + стрим песочницы полностью
+    блокируют очередь — снаружи это выглядит как «сервер завис».
+    Здесь пул на 64 потока, а жёсткий дедлайн держит asyncio.wait_for.
+    """
+    loop = asyncio.get_running_loop()
+    call = functools.partial(client.models.generate_content, **gen_kwargs)
+    fut = loop.run_in_executor(_AI_EXECUTOR, call)
+    try:
+        if timeout_sec:
+            return await asyncio.wait_for(fut, timeout=timeout_sec)
+        return await fut
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        # Поток прервать нельзя (concurrent.futures), но future снимаем с ожидания,
+        # чтобы задача наверху не висела.
+        fut.cancel()
+        raise
 
 
 def create_live_client(api_keys: list[str], key_index: int = 0):
