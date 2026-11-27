@@ -10,6 +10,7 @@ import aiomysql
 from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
 from app.services.ai.router import (
+    EmptyPlanError,
     _inject_sync_tag,
     _strip_run_command,
     extract_mentioned_files,
@@ -64,6 +65,36 @@ def _apply_direct_edits(chat_uid: str, edits: dict) -> dict:
         except Exception as e:
             logger.warning(f"⚠️ [DIRECT EDIT WRITE] {clean}: {e}")
     return applied
+
+
+# Короткие ответы на «Запустить выполнение этого плана?»
+_PLAN_APPROVAL_RE = re.compile(
+    r"^(?:да|ага|ок|ok|окей|давай|поехали|старт|запускай|запускай план|выполняй|выполнить(?: план)?|"
+    r"выполни(?: план)?|да,? (?:выполняй|запускай|выполнить|давай)|"
+    r"да,? (?:выполнить|запустить) план\.?|запустить план|погнали|го)$",
+    re.IGNORECASE,
+)
+
+
+def _is_plan_answer(prompt: str) -> bool:
+    """
+    Ответ на план — это КОРОТКАЯ реплика («да», «отмена», «выполняй»).
+
+    Без этой проверки любое сообщение, пока pending_plan висит в состоянии,
+    попадало в ветку выполнения плана: «Давай доделывай, что-то ты остановился»
+    содержало «да» → план выполнялся повторно (шаги пустые) → «Готово.».
+    """
+    t = (prompt or "").strip()
+    if not t or len(t) > 60 or len(t.split()) > 5:
+        return False
+    low = t.lower().rstrip(".!")
+    if _PLAN_APPROVAL_RE.match(low):
+        return True
+    return any(w in low for w in ("отмен", "cancel", "не надо", "стоп")) or low in ("нет", "no")
+
+
+def _is_plan_approval(ans_low: str) -> bool:
+    return bool(_PLAN_APPROVAL_RE.match((ans_low or "").strip().rstrip(".!")))
 
 
 def _summary_need_files(plan: dict, project_tree, manifest_paths) -> list:
@@ -277,9 +308,20 @@ async def handle_antigravity_task(websocket, data):
         result = None
 
         # === ВЕТКА 1: Ответ пользователя на предложенный план ===
-        if pending_plan:
+        # ВАЖНО: ветка срабатывает только на КОРОТКИЙ ответ про план.
+        # Раньше сюда попадало любое сообщение, пока план висел в состоянии:
+        # «Давай доделывай…» содержало «да» → повторное выполнение пустого плана
+        # → в чат уходило «Готово.» на любую задачу.
+        answers_plan = bool(pending_plan) and _is_plan_answer(prompt)
+        if pending_plan and not answers_plan:
+            logger.info("🗒️ [PLAN] Похоже на новую задачу, а не ответ на план — старый план сбрасываю")
+            chat_state.pop("pending_plan", None)
+            save_chat_state(chat_uid, chat_state)
+            pending_plan = None
+
+        if answers_plan:
             ans_low = prompt.strip().lower()
-            if any(w in ans_low for w in ("отмен", "cancel", "не надо", "стоп")) or ans_low == "нет":
+            if any(w in ans_low for w in ("отмен", "cancel", "не надо", "стоп")) or ans_low in ("нет", "no"):
                 chat_state.pop("pending_plan", None)
                 save_chat_state(chat_uid, chat_state)
                 result = {
@@ -289,7 +331,7 @@ async def handle_antigravity_task(websocket, data):
                     "assigned_key": assigned_key,
                     "usage": {},
                 }
-            elif any(w in ans_low for w in ("выполн", "запуст", "поехали", "да", "ok", "ок", "старт")):
+            elif _is_plan_approval(ans_low):
                 chat_state.pop("pending_plan", None)
                 save_chat_state(chat_uid, chat_state)
 
@@ -297,12 +339,19 @@ async def handle_antigravity_task(websocket, data):
                 need_network = bool(pending_plan.get("need_network", False))
                 used_engine = "ANTIGRAVITY"
 
+                if not steps:
+                    # Пустой план в состоянии (артефакт старых версий) — молча
+                    # уходим на обычный разбор задачи, а не отвечаем «Готово.».
+                    logger.warning("⚠️ [PLAN] pending_plan без шагов — уходим на обычный разбор задачи")
+                    used_engine = "DIRECT"
+                    result = None
+
                 all_file_urls = {}
                 step_reports = []
                 last_env_id = None
                 total_in_acc = 0
 
-                for idx, st in enumerate(steps, start=1):
+                for idx, st in enumerate(steps, start=1) if steps else []:
                     st_file = (st.get("file") or "").strip()
                     st_lines = (st.get("line_ranges") or "").strip()
                     st_title = (st.get("title") or st_file or f"Шаг {idx}").strip()
@@ -339,18 +388,19 @@ async def handle_antigravity_task(websocket, data):
                     clean_step_txt = re.sub(r"\[SYNC:\s*[^\]]+\]", "", step_res.get("text") or "", flags=re.IGNORECASE).strip()
                     step_reports.append(f"✅ **Шаг {idx}/{len(steps)} ({st_title}):** {clean_step_txt or 'готово'}")
 
-                sync_block = "\n".join(f"[SYNC: {p}]" for p in all_file_urls.keys())
-                final_txt = "\n\n".join(step_reports)
-                if sync_block:
-                    final_txt = f"{sync_block}\n\n{final_txt}"
+                if steps:
+                    sync_block = "\n".join(f"[SYNC: {p}]" for p in all_file_urls.keys())
+                    final_txt = "\n\n".join(step_reports)
+                    if sync_block:
+                        final_txt = f"{sync_block}\n\n{final_txt}"
 
-                result = {
-                    "text": final_txt.strip(),
-                    "file_urls": all_file_urls,
-                    "environment_id": last_env_id,
-                    "assigned_key": assigned_key,
-                    "usage": {"input": total_in_acc},
-                }
+                    result = {
+                        "text": final_txt.strip(),
+                        "file_urls": all_file_urls,
+                        "environment_id": last_env_id,
+                        "assigned_key": assigned_key,
+                        "usage": {"input": total_in_acc},
+                    }
             else:
                 # Пользователь написал правку к плану — сбрасываем старый план и идём дальше как новый запрос
                 chat_state.pop("pending_plan", None)
@@ -472,15 +522,26 @@ async def handle_antigravity_task(websocket, data):
                     planner_task = direct_res.get("ag_task") or prompt
                     need_network = bool(direct_res.get("need_network", False))
 
-                    plan_res = await ai_instance.run_planner(
-                        task_prompt=planner_task,
-                        recent_history=recent_history,
-                        project_tree=project_tree,
-                        file_manifest=file_manifest,
-                        selected_files=cand_files,
-                        status_callback=send_status_update,
-                        assigned_key=assigned_key,
-                    )
+                    try:
+                        plan_res = await ai_instance.run_planner(
+                            task_prompt=planner_task,
+                            recent_history=recent_history,
+                            project_tree=project_tree,
+                            file_manifest=file_manifest,
+                            selected_files=cand_files,
+                            status_callback=send_status_update,
+                            assigned_key=assigned_key,
+                        )
+                    except EmptyPlanError as pe:
+                        logger.warning(f"⚠️ [PLANNER EMPTY PLAN] {pe}")
+                        plan_res = {
+                            "plan": {
+                                "need_files": [], "steps": [], "summary": "",
+                                "_error": "empty_plan",
+                            },
+                            "assigned_key": assigned_key,
+                            "usage": {},
+                        }
                     plan = plan_res["plan"]
                     assigned_key = plan_res.get("assigned_key", assigned_key)
 
@@ -515,14 +576,35 @@ async def handle_antigravity_task(websocket, data):
                             "usage": plan_res.get("usage", {}),
                         }
                     elif not (plan.get("steps") or []):
-                        # Чистый анализ/ответ без правки файлов — Планировщик уже ответил сам!
-                        result = {
-                            "text": (plan.get("summary") or "Готово.").strip(),
-                            "file_urls": {},
-                            "environment_id": None,
-                            "assigned_key": assigned_key,
-                            "usage": plan_res.get("usage", {}),
-                        }
+                        # План без шагов: либо реальный ответ по файлам (summary непустой),
+                        # либо модель не справилась. Раньше во втором случае в чат уходило
+                        # «Готово.» — именно это и выглядело как «на любое сообщение Готово».
+                        answer = (plan.get("summary") or "").strip()
+                        if answer:
+                            result = {
+                                "text": answer,
+                                "file_urls": {},
+                                "environment_id": None,
+                                "assigned_key": assigned_key,
+                                "usage": plan_res.get("usage", {}),
+                            }
+                        else:
+                            logger.warning(
+                                "⚠️ [PLANNER EMPTY PLAN] Планировщик вернул пустой план — "
+                                "отдаём понятную ошибку вместо «Готово.»"
+                            )
+                            result = {
+                                "text": (
+                                    "⚠️ Не смог разобрать задачу: планировщик вернул пустой план "
+                                    "(без шагов и без запроса файлов).\n\n"
+                                    "Попробуй переформулировать: укажи конкретный файл и что в нём "
+                                    "поменять, например «в js/world.js добавь биомы пустыня/город»."
+                                ),
+                                "file_urls": {},
+                                "environment_id": None,
+                                "assigned_key": assigned_key,
+                                "usage": plan_res.get("usage", {}),
+                            }
                     else:
                         # Сохраняем план и выводим его пользователю в чат с кнопками подтверждения
                         chat_state["pending_plan"] = {
