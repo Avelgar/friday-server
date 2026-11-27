@@ -11,6 +11,7 @@ from app.database.connection import get_async_db_connection
 from app.services.ai_service import ai_instance
 from app.services.ai.router import (
     EmptyPlanError,
+    summarize_planner_failure,
     _inject_sync_tag,
     _strip_run_command,
     extract_mentioned_files,
@@ -534,10 +535,17 @@ async def handle_antigravity_task(websocket, data):
                         )
                     except EmptyPlanError as pe:
                         logger.warning(f"⚠️ [PLANNER EMPTY PLAN] {pe}")
+                        err_text = summarize_planner_failure(
+                            getattr(pe, "raw_text", ""),
+                            getattr(pe, "out_tokens", 0),
+                            getattr(pe, "reason", ""),
+                            getattr(pe, "asked_files", None),
+                        )
                         plan_res = {
                             "plan": {
                                 "need_files": [], "steps": [], "summary": "",
                                 "_error": "empty_plan",
+                                "_error_text": err_text,
                             },
                             "assigned_key": assigned_key,
                             "usage": {},
@@ -595,10 +603,13 @@ async def handle_antigravity_task(websocket, data):
                             )
                             result = {
                                 "text": (
-                                    "⚠️ Не смог разобрать задачу: планировщик вернул пустой план "
-                                    "(без шагов и без запроса файлов).\n\n"
-                                    "Попробуй переформулировать: укажи конкретный файл и что в нём "
-                                    "поменять, например «в js/world.js добавь биомы пустыня/город»."
+                                    plan.get("_error_text")
+                                    or (
+                                        "⚠️ Не смог разобрать задачу: планировщик вернул пустой план "
+                                        "(без шагов и без запроса файлов).\n\n"
+                                        "Попробуй переформулировать: укажи конкретный файл и что в нём "
+                                        "поменять."
+                                    )
                                 ),
                                 "file_urls": {},
                                 "environment_id": None,
