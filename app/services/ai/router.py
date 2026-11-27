@@ -310,6 +310,37 @@ def _norm_tag_start(text: str) -> str:
     return t[m.end():] if m else t
 
 
+class EmptyPlanError(RuntimeError):
+    """
+    Планировщик вернул пустой план: steps=[], need_files=[], summary="".
+
+    Именно это раньше превращалось в ответ «Готово.» на любую задачу.
+    """
+
+
+# Ответы-пустышки: если они попадают в историю, планировщик копирует их форму
+# и снова выдаёт пустой план («работа же уже сделана»).
+_FILLER_REPLY_RE = re.compile(
+    r"^(?:готово|план отменён|отменено|ок|ok|принято|сделано|done)\.?$",
+    re.IGNORECASE,
+)
+
+
+def _is_filler_reply(role, text: str) -> bool:
+    if not role or role in ("tool", "system"):
+        return False
+    return bool(_FILLER_REPLY_RE.match((text or "").strip()))
+
+
+def is_empty_plan(plan) -> bool:
+    if not isinstance(plan, dict):
+        return True
+    need = [n for n in (plan.get("need_files") or []) if str(n).strip()]
+    steps = plan.get("steps") or []
+    summary = (plan.get("summary") or "").strip()
+    return not need and not steps and not summary
+
+
 # DIRECT больше не имеет права на терминал: любые [RUN_COMMAND: ...] вырезаем
 # ещё до того, как ответ уйдёт в чат/IDE (у модели 3.5-flash-lite промпт не гарантия).
 _RUN_COMMAND_RE = re.compile(r"\[RUN_COMMAND[^\]]*\]", re.IGNORECASE)
@@ -849,7 +880,11 @@ async def run_planner(
         else:
             parts.append("# Файлы на сервере:\nФайлов на сервере нет.")
 
-        entries = _compress_history_entries(recent_history, char_budget=5000, max_items=6)
+        clean_history = [
+            m for m in (recent_history or [])
+            if not _is_filler_reply(m.get("role"), m.get("text"))
+        ]
+        entries = _compress_history_entries(clean_history, char_budget=5000, max_items=6)
         if entries:
             h_lines = [f"[{'Пользователь' if r == 'user' else ('IDE' if r in ('tool', 'system') else 'Ассистент')}]: {t}" for r, t in entries]
             parts.append("# Недавний контекст:\n" + "\n\n".join(h_lines))
@@ -874,19 +909,29 @@ async def run_planner(
         short_m = planner_model.replace("models/", "")
         await status_callback({"status": f"Планировщик ({short_m}) изучает файлы..."})
 
-    # Одна «тяжёлая» попытка + до 2 повторов на другом ключе с урезанным контекстом.
-    # 504 DEADLINE_EXCEEDED / 503 UNAVAILABLE — это перегрузка на стороне Google,
-    # ключ при этом живой, поэтому винить его (register_key_error) нельзя.
+    # Попытки: 1 «тяжёлая» + 2 повтора. Повторяем на ДРУГОМ ключе при
+    # 503/504/таймауте и при пустом плане (именно он давал «Готово.» в чат).
     attempts = PLANNER_ATTEMPTS
     last_err = None
+    last_empty = None
+
     for attempt in range(attempts):
         if attempt > 0:
             key_idx = key_pool.pick_key_for_request(model=planner_model, avoid_index=key_idx)
 
-        # Каждый повтор собирается заново: меньше файлов, меньше картинок.
-        files_budget = PLANNER_FILES_CHAR_BUDGET if attempt == 0 else PLANNER_RETRY_CHAR_BUDGET
-        file_blocks, image_parts = _build_planner_messages(files_budget, shrink_images=attempt > 0)
+        # На повторах после 503/504 контекст режем, а после пустого плана — НЕТ:
+        # там как раз наоборот, модели не хватило материала.
+        shrink = attempt > 0 and not isinstance(last_err, EmptyPlanError)
+        files_budget = PLANNER_FILES_CHAR_BUDGET if not shrink else PLANNER_RETRY_CHAR_BUDGET
+        file_blocks, image_parts = _build_planner_messages(files_budget, shrink_images=shrink)
         planner_input = _render_planner_input(file_blocks)
+        if isinstance(last_err, EmptyPlanError):
+            planner_input += (
+                "\n\n# ВАЖНО:\n"
+                "Предыдущий ответ был пустым планом (steps=[], need_files=[], summary=\"\").\n"
+                "Это НЕ ответ пользователю. Либо заполни need_files (если не хватает файлов),\n"
+                "либо составь steps с точными инструкциями, либо напиши содержательный summary."
+            )
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=planner_input), *image_parts])]
 
         logger.info(
@@ -918,34 +963,54 @@ async def run_planner(
             if not isinstance(plan_data, dict):
                 raise ValueError("Planner JSON is not an object")
 
+            # Пустой план — это НЕ «Готово.»: модель либо не разобралась, либо
+            # скопировала форму прошлых пустых ответов из истории. Пробуем снова.
+            if is_empty_plan(plan_data):
+                raise EmptyPlanError(
+                    f"Пустой план (steps=0, need_files=0, summary пустой), out={u_out} ток."
+                )
+
             return {
                 "plan": plan_data,
                 "assigned_key": key_idx,
                 "usage": {"input": u_in, "cached": u_cac, "output": u_out, "total": u_tot},
             }
+
         except Exception as e:
             last_err = e
             transient = is_transient_error(e)
-            if transient and attempt < attempts - 1:
+            empty_plan = isinstance(e, EmptyPlanError)
+            if empty_plan:
+                last_empty = e
+
+            if (transient or empty_plan) and attempt < attempts - 1:
                 delay = PLANNER_RETRY_DELAYS[attempt] if attempt < len(PLANNER_RETRY_DELAYS) else 8.0
+                reason = "пустой план" if empty_plan else "временная ошибка бэкенда"
                 logger.warning(
-                    f"⚠️ [PLANNER RETRY {attempt + 1}/{attempts}] временная ошибка бэкенда "
-                    f"({type(e).__name__}: {str(e)[:160]}) — повтор на другом ключе через {delay:.0f}с "
-                    f"с урезанным контекстом ({PLANNER_RETRY_CHAR_BUDGET} симв.)..."
+                    f"⚠️ [PLANNER RETRY {attempt + 1}/{attempts}] {reason} "
+                    f"({type(e).__name__}: {str(e)[:160]}) — повтор на другом ключе через {delay:.0f}с..."
                 )
                 if status_callback:
-                    await status_callback({"status": f"Планировщик перегружен, повтор через {delay:.0f}с..."})
+                    await status_callback({"status": f"Планировщик не справился ({reason}), повтор через {delay:.0f}с..."})
                 await asyncio.sleep(delay)
                 continue
+
+            if empty_plan:
+                logger.warning(
+                    f"⚠️ [PLANNER EMPTY] {attempts} попытки, план так и пустой — "
+                    f"возвращаем ошибку вместо «Готово.»"
+                )
+                raise
+
             logger.warning(f"⚠️ [PLANNER ERROR] {e}")
             # Ключ наказываем ТОЛЬКО за ошибки, которые действительно про ключ
-            # (401/403/429). Перегрузка Google, таймауты и кривой JSON — не повод
-            # сажать живой ключ в паузу на 15 минут или на сутки.
+            # (401/403/429). Перегрузка Google и таймауты — не повод сажать
+            # живой ключ в паузу на 15 минут или на сутки.
             if not transient and key_pool.classify_key_error(e):
                 key_pool.register_key_error(key_idx, model=planner_model, exc=e)
             raise
 
-    raise last_err
+    raise last_err or last_empty
 
 
 run_direct_hydrogen = run_direct
