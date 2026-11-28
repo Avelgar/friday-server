@@ -6,7 +6,6 @@ import asyncio
 import logging
 import threading
 import urllib.parse
-from collections import deque
 from .key_pool import (
     GeminiKeyPool,
     create_genai_client,
@@ -33,56 +32,12 @@ class BudgetExhaustedError(RuntimeError):
     """Остановка по потолку max_total_tokens."""
 
 
-class AsyncAntigravityLimiter:
-    """Асинхронное скользящее окно RPM и TPM (60 сек) с учётом total (включая cached)."""
-
-    def __init__(self, max_rpm: int = 50, max_tpm: int = 92_000, min_headroom: int = 45_000):
-        self.max_rpm = max_rpm
-        self.max_tpm = max_tpm
-        self.min_headroom = min_headroom
-        self._lock = asyncio.Lock()
-        self._entries: deque[list] = deque()
-
-    def _prune(self, now: float) -> None:
-        cutoff = now - 60.0
-        while self._entries and self._entries[0][0] < cutoff:
-            self._entries.popleft()
-
-    async def acquire(self, estimated_tokens: int, status_callback=None) -> list:
-        need = max(self.min_headroom, estimated_tokens)
-        while True:
-            sleep_for = 0.0
-            used_tpm = 0
-            async with self._lock:
-                now = time.monotonic()
-                self._prune(now)
-                used_rpm = len(self._entries)
-                used_tpm = sum(item[1] for item in self._entries)
-
-                if used_rpm < self.max_rpm and (used_tpm + need <= self.max_tpm or used_rpm == 0):
-                    slot = [now, estimated_tokens]
-                    self._entries.append(slot)
-                    return slot
-
-                if self._entries:
-                    sleep_for = max(1.0, (self._entries[0][0] + 60.5) - now)
-                else:
-                    sleep_for = 1.0
-
-            logger.info(f"⏳ [AG LIMITER] Окно TPM заполнено ({used_tpm}/{self.max_tpm}), ждём {sleep_for:.1f}с...")
-            if status_callback:
-                await status_callback({"status": f"Ожидание сброса окна TPM ({sleep_for:.0f}с)..."})
-            await asyncio.sleep(sleep_for)
-
-    async def finalize(self, slot: list, actual_total_tokens: int) -> None:
-        if actual_total_tokens <= 0:
-            return
-        async with self._lock:
-            slot[0] = time.monotonic()
-            slot[1] = actual_total_tokens
-
-
-ag_limiter = AsyncAntigravityLimiter(max_rpm=50, max_tpm=92_000, min_headroom=45_000)
+# Лимиты Antigravity (на один ключ): 100K TPM и 100 запросов в сутки.
+# Внутренний лимитер на 92K TPM удалён: он считал TPM по всем ключам сразу и
+# заставлял сервер спать, хотя рядом простаивали 13 свободных ключей. Теперь
+# TPM считается на ключ: после каждого вызова ключ уходит в минуту
+# (key_pool.mark_ag_used), а следующий шаг берёт любой другой живой.
+AG_MAX_TOTAL_TOKENS = 100_000
 
 
 def _approx_tokens(text: str) -> int:
@@ -431,7 +386,7 @@ async def run_antigravity_agent(
     selected_files: list = None,
     line_ranges: str = "",
     need_network: bool = False,
-    max_total_tokens: int = 85_000,
+    max_total_tokens: int = AG_MAX_TOTAL_TOKENS,
     per_request_key: bool = True,
     **kwargs,
 ):
@@ -481,7 +436,12 @@ async def run_antigravity_agent(
     if need_network:
         tools.extend([{"type": "google_search"}, {"type": "url_context"}])
 
-    slot = await ag_limiter.acquire(est_tokens, status_callback=status_callback)
+    if est_tokens > AG_MAX_TOTAL_TOKENS:
+        logger.warning(
+            f"⚠️ [AG BUDGET] Стартовый промпт уже ~{est_tokens} ток. — "
+            f"это больше лимита {AG_MAX_TOTAL_TOKENS}. Режем историю и curl-список."
+        )
+
     new_interaction_id = None
 
     try:
@@ -529,14 +489,19 @@ async def run_antigravity_agent(
         status_raw = str(getattr(interaction, "status", "")).lower().strip()
         usage = extract_usage_tokens(interaction)
         new_in = max(0, usage["input"] - usage["cached"])
-        total_for_limiter = max(est_tokens, usage["total"])
-        await ag_limiter.finalize(slot, total_for_limiter)
 
         logger.info(
             f"📊 [AG FINAL TOKENS] ключ=#{assigned_key} | статус={status_raw} | "
             f"зашло(in)={usage['input']} (кэш={usage['cached']}, новых={new_in}) | "
             f"вышло(out)={usage['output']} | всего(total)={usage['total']}"
         )
+
+        # Ключ израсходовал TPM (до 100K за один вызов) — сразу на минуту из
+        # ротации. Ставим ДО скачивания файлов: следующий шаг плана не должен
+        # успеть взять тот же ключ, пока идёт синхронизация.
+        # Это НЕ mark_success: снимать паузу здесь нельзя, следующий запрос
+        # на этом ключе сразу упрётся в 429.
+        key_pool.mark_ag_used(assigned_key)
 
         if "cancel" in status_raw:
             raise RuntimeError("Google прервал выполнение задачи в песочнице (status=cancelled).")
@@ -663,8 +628,6 @@ async def run_antigravity_agent(
                             file_url = f"https://friday-assistant.ru/uploads/{os.path.basename(chat_uid or 'common')}/{urllib.parse.quote(clean_path)}?v={int(time.time())}"
                             file_urls[clean_path] = file_url
                             break
-
-        key_pool.mark_success(assigned_key, model=model_tag)
 
         if "incomplete" in status_raw:
             if output_text.strip():

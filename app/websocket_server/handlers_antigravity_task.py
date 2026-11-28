@@ -16,6 +16,7 @@ from app.services.ai.router import (
     _strip_run_command,
     extract_mentioned_files,
 )
+from app.services.ai.antigravity import AG_MAX_TOTAL_TOKENS
 from app.websocket_server.utils import async_send
 from app.websocket_server.antigravity_storage import (
     antigravity_user_sockets,
@@ -36,6 +37,12 @@ logger = logging.getLogger("WS_Server")
 # Сколько раз в одном чате перехватывать бесполезные curl-команды, прежде чем
 # просто отдать их IDE как есть (защита от бесконечного цикла перехватов).
 CURL_GUARD_LIMIT = 2
+
+# Бюджет на ВЕСЬ план в одном сообщении. Квота аккаунта — 250K, поэтому план
+# ограничен ею целиком, а не «250K на каждый шаг».
+PLAN_TOKEN_BUDGET = 250_000
+# Меньше этого запускать шаг бессмысленно: агент только скачает файл и встанет.
+AG_MIN_STEP_TOKENS = 25_000
 
 
 def _apply_direct_edits(chat_uid: str, edits: dict) -> dict:
@@ -351,14 +358,42 @@ async def handle_antigravity_task(websocket, data):
                 step_reports = []
                 last_env_id = None
                 total_in_acc = 0
+                # Бюджет на ВЕСЬ план. Раньше каждый шаг получал свежие 85K,
+                # то есть план из 3 шагов мог съесть 255K при квоте 250K на аккаунт
+                # и ничего не мешало агенту «думать» до потолка на каждом шаге.
+                plan_budget_left = PLAN_TOKEN_BUDGET
+                stopped_early = None
 
                 for idx, st in enumerate(steps, start=1) if steps else []:
                     st_file = (st.get("file") or "").strip()
                     st_lines = (st.get("line_ranges") or "").strip()
                     st_title = (st.get("title") or st_file or f"Шаг {idx}").strip()
                     st_instr = (st.get("instruction") or "").strip()
+                    st_code = (st.get("code") or "").strip()
+                    if st_code:
+                        # Планировщик уже написал готовый код: исполнителю не надо
+                        # исследовать файл и «думать» по 1-2 минуты на виток.
+                        st_instr = (
+                            f"{st_instr}\n\n"
+                            "ГОТОВЫЙ КОД ДЛЯ ПРАВКИ (вставь его как есть, ничего не придумывай):\n"
+                            f"```\n{st_code}\n```"
+                        )
 
-                    await send_status_update({"status": f"Выполнение плана: шаг {idx}/{len(steps)} ({st_file or 'новый файл'})..."})
+                    # Шаг получает свою долю остатка, но не больше лимита вызова
+                    # Antigravity (100K) и не меньше разумного минимума.
+                    remaining_steps = len(steps) - idx + 1
+                    step_budget = min(AG_MAX_TOTAL_TOKENS, plan_budget_left // remaining_steps)
+                    if step_budget < AG_MIN_STEP_TOKENS:
+                        stopped_early = (
+                            f"⚠️ Остановился на шаге {idx}/{len(steps)}: на весь план "
+                            f"выделено {PLAN_TOKEN_BUDGET // 1000}K токенов, остаток "
+                            f"({plan_budget_left // 1000}K) уже не хватит на безопасный "
+                            f"запуск песочницы."
+                        )
+                        logger.warning(f"🛑 [PLAN BUDGET] {stopped_early}")
+                        break
+
+                    await send_status_update({"status": f"Выполнение плана: шаг {idx}/{len(steps)} ({st_file or 'новый файл'}, бюджет {step_budget // 1000}K)..."})
                     await send_chunk_update(f"\n⚙️ **Шаг {idx}/{len(steps)}** (`{st_file}`): в работе...\n")
 
                     # Обновляем манифест перед каждым шагом (на случай если прошлый шаг уже изменил файл)
@@ -376,18 +411,28 @@ async def handle_antigravity_task(websocket, data):
                         selected_files=sel,
                         line_ranges=st_lines,
                         need_network=need_network,
-                        max_total_tokens=85_000,
+                        max_total_tokens=step_budget,
                     )
 
                     last_env_id = step_res.get("environment_id") or last_env_id
                     assigned_key = step_res.get("assigned_key", assigned_key)
-                    total_in_acc += int((step_res.get("usage") or {}).get("input", 0) or 0)
+                    step_usage = step_res.get("usage") or {}
+                    step_total = int(step_usage.get("total", 0) or 0) or step_budget
+                    total_in_acc += int(step_usage.get("input", 0) or 0)
+                    plan_budget_left = max(0, plan_budget_left - step_total)
+                    logger.info(
+                        f"💰 [PLAN BUDGET] шаг {idx}/{len(steps)}: истрачено {step_total} ток. | "
+                        f"остаток плана {plan_budget_left}/{PLAN_TOKEN_BUDGET}"
+                    )
 
                     step_urls = step_res.get("file_urls") or {}
                     all_file_urls.update(step_urls)
 
                     clean_step_txt = re.sub(r"\[SYNC:\s*[^\]]+\]", "", step_res.get("text") or "", flags=re.IGNORECASE).strip()
                     step_reports.append(f"✅ **Шаг {idx}/{len(steps)} ({st_title}):** {clean_step_txt or 'готово'}")
+
+                if stopped_early:
+                    step_reports.append(stopped_early)
 
                 if steps:
                     sync_block = "\n".join(f"[SYNC: {p}]" for p in all_file_urls.keys())
@@ -423,7 +468,7 @@ async def handle_antigravity_task(websocket, data):
                 file_manifest=file_manifest,
                 selected_files=list(target_files) if target_files else [],
                 need_network=False,
-                max_total_tokens=85_000,
+                max_total_tokens=AG_MAX_TOTAL_TOKENS,
             )
 
         # === ВЕТКА 2.5: IDE принесла файлы по [GET_FILES] от Планировщика ===
