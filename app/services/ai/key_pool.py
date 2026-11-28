@@ -46,6 +46,9 @@ KEY_STRATEGY = (os.environ.get("KEY_STRATEGY") or "freest").strip().lower()
 # Сколько держать ключ в паузе после ошибки (секунды)
 INVALID_KEY_COOLDOWN = float(os.environ.get("KEY_INVALID_COOLDOWN", 86400))  # ключ/проект невалиден
 RATE_LIMIT_COOLDOWN = float(os.environ.get("KEY_RATE_COOLDOWN", 900))        # 429 / квота на минуту
+# Antigravity: 100K TPM на ключ. После каждого вызова ключ уходит в минуту,
+# потому что израсходованный TPM всё равно не даст пройти следующему запросу.
+AG_KEY_COOLDOWN = float(os.environ.get("AG_KEY_COOLDOWN", 60))
 
 
 def mask_key(api_key: str | None) -> str:
@@ -264,6 +267,28 @@ class GeminiKeyPool:
             entry["errors_today"] = int(entry.get("errors_today", 0)) + 1
             self._save_state_locked()
         logger.warning(f"🚫 [Key Pool] ({_norm_model(model)}) Ключ #{key_index} в паузе на {duration_seconds/60:.0f} мин.")
+
+    def mark_ag_used(self, key_index: int, cooldown: float = None):
+        """
+        Antigravity израсходовал TPM ключа — уводим его из ротации на минуту.
+
+        Лимит песочницы 100K токенов в минуту на ключ. Один вызов съедает
+        60-100K, поэтому после него ключ бесполезен до сброса окна: следующий
+        запрос на нём гарантированно получит 429. Вызывается ЯВНО вместо
+        mark_success (тот, наоборот, снимает паузу).
+        """
+        if not self.keys:
+            return
+        secs = AG_KEY_COOLDOWN if cooldown is None else cooldown
+        with self._lock:
+            entry = self._entry_locked("antigravity", key_index)
+            entry["exhausted_until"] = time.time() + secs
+            entry["last_used"] = time.time()
+            self._save_state_locked()
+        logger.info(
+            f"⏸️ [Key Pool] Antigravity ключ {format_key_label(self.keys, key_index)} "
+            f"в паузе {secs:.0f}с (израсходован TPM)"
+        )
 
     def mark_success(self, key_index: int, model: str = "antigravity"):
         if not self.keys:

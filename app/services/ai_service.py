@@ -106,7 +106,7 @@ class AIService:
         selected_files: list = None,
         line_ranges: str = "",
         need_network: bool = False,
-        max_total_tokens: int = 85_000,
+        max_total_tokens: int = 100_000,
         per_request_key: bool = True,
         **kwargs,
     ):
