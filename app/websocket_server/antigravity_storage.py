@@ -90,6 +90,45 @@ def detect_requested_ide_tag(text: str) -> str | None:
     return None
 
 
+def _split_need_paths(raw: str) -> list[str]:
+    """
+    Режет тело [GET_FILES: ...] на пути, НЕ ломая имена с запятыми.
+
+    Расширение VS Code режет по запятой — поэтому имя вида
+    «Шаблоны_КРКП_Листы_задания,_титульный_лист_...docx» превращалось в два
+    несуществующих файла, IDE отвечала «не найден в проекте», сервер снова
+    просил тот же файл, и получался бесконечный цикл запросов.
+    """
+    parts = [p.strip() for p in (raw or "").split(",")]
+    merged: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        # у предыдущего куска нет расширения => это склейка одного имени
+        if merged and not re.search(r"\.[A-Za-z0-9]{1,6}$", merged[-1]):
+            merged[-1] = merged[-1] + "," + part
+        else:
+            merged.append(part)
+    return merged
+
+
+def partition_get_files(paths: list) -> tuple[str, list]:
+    """
+    Делит запрошенные пути на «можно запросить» и «нельзя».
+
+    Протокол [GET_FILES: a, b] режет тело по запятой, поэтому файл с запятой
+    в имени (например «Шаблоны_...,_титульный_лист....docx») приходит в IDE
+    как ДВА несуществующих файла. IDE отвечает «не найден в проекте», сервер
+    просит снова — и так по кругу. Такие файлы честно возвращаем отдельно,
+    чтобы обработчик объяснил проблему пользователю, а не зациклился.
+    """
+    clean = [str(p).strip() for p in (paths or []) if str(p).strip()]
+    ok = [p for p in clean if "," not in p]
+    blocked = [p for p in clean if "," in p]
+    tag = f"[GET_FILES: {', '.join(ok)}]" if ok else ""
+    return tag, blocked
+
+
 def detect_run_command_urls(text: str) -> list[str]:
     """
     Достаёт URL из [RUN_COMMAND: ...] вида `curl ... "https://..." -o js/app.js`

@@ -353,10 +353,28 @@ _FILLER_REPLY_RE = re.compile(
 )
 
 
+# «Файл X (не найден в проекте)» — это НЕ содержимое файла, а отчёт IDE об
+# ошибке. Если пустить его в контекст, планировщик решает, что файла нет,
+# и просит его снова — отсюда бесконечный цикл GET_FILES.
+_NOT_FOUND_RE = re.compile(r"\(\s*не\s+найден\s+в\s+проекте\s*\)", re.IGNORECASE)
+
+
 def _is_filler_reply(role, text: str) -> bool:
     if not role or role in ("tool", "system"):
         return False
     return bool(_FILLER_REPLY_RE.match((text or "").strip()))
+
+
+def _strip_not_found_files(text: str) -> str:
+    """Выбрасывает из отчёта IDE строки про файлы, которых нет в проекте."""
+    if not text or "не найден" not in text.lower():
+        return text
+    keep = []
+    for line in text.splitlines():
+        if _NOT_FOUND_RE.search(line) or "не найден в проекте" in line.lower():
+            continue
+        keep.append(line)
+    return "\n".join(keep).strip()
 
 
 def is_empty_plan(plan) -> bool:
@@ -981,10 +999,16 @@ async def run_planner(
         elif not ordered_files:
             parts.append("# Файлы на сервере:\nФайлов на сервере нет.")
 
-        clean_history = [
-            m for m in (recent_history or [])
-            if not _is_filler_reply(m.get("role"), m.get("text"))
-        ]
+        clean_history = []
+        for m in (recent_history or []):
+            role_m = m.get("role")
+            txt_m = m.get("text")
+            if _is_filler_reply(role_m, txt_m):
+                continue
+            txt_m = _strip_not_found_files(txt_m)
+            if not (txt_m or "").strip():
+                continue
+            clean_history.append({"role": role_m, "text": txt_m})
         entries = _compress_history_entries(clean_history, char_budget=5000, max_items=6)
         if entries:
             h_lines = [f"[{'Пользователь' if r == 'user' else ('IDE' if r in ('tool', 'system') else 'Ассистент')}]: {t}" for r, t in entries]

@@ -19,6 +19,7 @@ from app.services.ai.router import (
 from app.services.ai.antigravity import AG_MAX_TOTAL_TOKENS
 from app.websocket_server.utils import async_send
 from app.websocket_server.antigravity_storage import (
+    partition_get_files,
     antigravity_user_sockets,
     active_antigravity_tasks,
     get_least_used_key_index,
@@ -103,6 +104,17 @@ def _is_plan_answer(prompt: str) -> bool:
 
 def _is_plan_approval(ans_low: str) -> bool:
     return bool(_PLAN_APPROVAL_RE.match((ans_low or "").strip().rstrip(".!")))
+
+
+def _comma_name_error(paths: list) -> str:
+    """Файл(ы) с запятой в имени: протокол GET_FILES их не передаёт."""
+    names = "**, **".join(paths)
+    return (
+        "⚠️ Не могу запросить файл(ы) с ПК: **" + names + "**\n\n"
+        "В имени есть **запятая**, а список файлов в запросе разделяется именно "
+        "запятыми — IDE получит два обрезанных имени и не найдёт их.\n\n"
+        "Переименуй файл без запятой (например через `_`) и повтори задачу."
+    )
 
 
 def _summary_need_files(plan: dict, project_tree, manifest_paths) -> list:
@@ -480,6 +492,11 @@ async def handle_antigravity_task(websocket, data):
             logger.info(f"🔁 [AUTO-RETRY] Файлы от IDE получены → повторяем задачу планировщика: {auto_retry_task[:80]}")
             prompt = auto_retry_task
             is_tool_response = False
+            # Файлы доехали — счётчик неудачных запросов сбрасываем, иначе он
+            # копился бы по всему чату и однажды заблокировал бы файл, который
+            # в другой задаче просто ещё не успели прислать.
+            if chat_state.pop("need_files_asked", None) is not None:
+                save_chat_state(chat_uid, chat_state)
 
         # === ВЕТКА 3: Обычный вход через Direct (3.5-flash-lite) -> при работе с файлами в Планировщик ===
         if result is None:
@@ -555,8 +572,9 @@ async def handle_antigravity_task(websocket, data):
                 if missing_on_server:
                     logger.info(f"📥 [PRE-FETCH] Файлы не на сервере, запрашиваем через IDE: {missing_on_server}")
                     used_engine = "DIRECT"
+                    pre_tag, pre_blocked = partition_get_files(missing_on_server)
                     result = {
-                        "text": f"[GET_FILES: {', '.join(missing_on_server)}]",
+                        "text": pre_tag or _comma_name_error(pre_blocked),
                         "file_urls": {},
                         "environment_id": None,
                         "assigned_key": direct_res.get("assigned_key", assigned_key),
@@ -618,16 +636,63 @@ async def handle_antigravity_task(websocket, data):
                         plan["summary"] = ""
 
                     if need_files:
-                        logger.info(f"📥 [PLANNER NEED FILES] Дозапрашиваем файлы: {need_files}")
-                        chat_state["planner_waiting_files"] = planner_task
-                        save_chat_state(chat_uid, chat_state)
-                        result = {
-                            "text": f"[GET_FILES: {', '.join(need_files)}]",
-                            "file_urls": {},
-                            "environment_id": None,
-                            "assigned_key": assigned_key,
-                            "usage": plan_res.get("usage", {}),
-                        }
+                        get_tag, comma_files = partition_get_files(need_files)
+
+                        # Имя с запятой протокол не переживает: IDE увидит два
+                        # несуществующих файла и будет получать «не найден»
+                        # вечно. Честно говорим об этом сразу.
+                        if comma_files:
+                            logger.warning(
+                                f"🛑 [GET_FILES] Имя с запятой — протокол не поддерживает: {comma_files}"
+                            )
+                            result = {
+                                "text": _comma_name_error(comma_files),
+                                "file_urls": {},
+                                "environment_id": None,
+                                "assigned_key": assigned_key,
+                                "usage": plan_res.get("usage", {}),
+                            }
+                        else:
+                            # Сколько раз уже просили КАЖДЫЙ файл. Если просили
+                            # дважды, а IDE так и не прислала — третий запрос
+                            # бессмысленен, это и был бесконечный цикл.
+                            asked = chat_state.get("need_files_asked") or {}
+                            hopeless = [nf for nf in need_files if int(asked.get(nf, 0)) >= 2]
+                            if hopeless:
+                                logger.warning(
+                                    "🛑 [GET_FILES LOOP] Файл(ы) просили дважды, IDE не прислала: "
+                                    f"{', '.join(hopeless)} — прекращаю цикл"
+                                )
+                                result = {
+                                    "text": (
+                                        "⚠️ Не смог получить файл(ы) с ПК: **"
+                                        + "**, **".join(hopeless)
+                                        + "**\n\nIDE дважды ответила, что их нет в проекте. "
+                                        "Проверь имя файла в дереве проекта и напиши точное "
+                                        "название — возможно, есть опечатка."
+                                    ),
+                                    "file_urls": {},
+                                    "environment_id": None,
+                                    "assigned_key": assigned_key,
+                                    "usage": plan_res.get("usage", {}),
+                                }
+                            else:
+                                for nf in need_files:
+                                    asked[nf] = int(asked.get(nf, 0)) + 1
+                                chat_state["need_files_asked"] = asked
+                                chat_state["planner_waiting_files"] = planner_task
+                                save_chat_state(chat_uid, chat_state)
+                                logger.info(
+                                    f"📥 [PLANNER NEED FILES] Дозапрашиваем файлы: {need_files} "
+                                    f"(попытки: {asked})"
+                                )
+                                result = {
+                                    "text": get_tag,
+                                    "file_urls": {},
+                                    "environment_id": None,
+                                    "assigned_key": assigned_key,
+                                    "usage": plan_res.get("usage", {}),
+                                }
                     elif not (plan.get("steps") or []):
                         # План без шагов: либо реальный ответ по файлам (summary непустой),
                         # либо модель не справилась. Раньше во втором случае в чат уходило
